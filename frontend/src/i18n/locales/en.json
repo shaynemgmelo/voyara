@@ -1,0 +1,448 @@
+{
+  "app": {
+    "name": "Voyara"
+  },
+  "landing": {
+    "login": "Log in",
+    "startPlanning": "Start planning",
+    "learnMore": "Learn more",
+    "headline": "Stop planning. Start traveling.",
+    "subheadline": "Paste a link from that travel video you saved. In 30 seconds you'll have a complete day-by-day itinerary with maps, perfect timing, and hidden gems you'd never find on your own.",
+    "stat1Number": "100%",
+    "stat1Label": "Free to use",
+    "stat2Number": "AI",
+    "stat2Label": "Smart itineraries",
+    "stat3Number": "2 languages",
+    "stat3Label": "English & Portuguese",
+    "featuresTitle": "Everything a traveler dreams of. Nothing you don't need.",
+    "featuresSubtitle": "One app replaces your 12 open tabs, 3 spreadsheets, and that notes app you never find.",
+    "features": {
+      "linkImport": {
+        "title": "From saved video to itinerary",
+        "desc": "That TikTok you saved at 2am? Paste the link. We extract every place, validate on Google Maps, and build your trip."
+      },
+      "aiItinerary": {
+        "title": "Days that actually make sense",
+        "desc": "No more zigzagging. Nearby places are grouped together, viewpoints at sunset, markets in the morning. Like a local planned it."
+      },
+      "mapView": {
+        "title": "See your whole trip at a glance",
+        "desc": "Color-coded pins by day. Click a day, see the route. Zoom out, see the week. You'll never feel lost."
+      },
+      "smartTiming": {
+        "title": "Perfect timing, every day",
+        "desc": "Sunrise spots in the morning, long lunches at the right hour, golden hour at viewpoints. Every moment is intentional."
+      },
+      "flightsHotels": {
+        "title": "Flights & notes in one place",
+        "desc": "Add your flights, jot down visa reminders, packing lists — everything lives with your itinerary. No more scattered info."
+      },
+      "smartSuggestions": {
+        "title": "Hidden gems you'd miss",
+        "desc": "Get suggestions the guides don't mention. That rooftop bar with the view, the bakery only locals know, the shortcut through the park."
+      }
+    },
+    "howItWorksTitle": "So simple it feels like magic",
+    "howItWorks": {
+      "step1": {
+        "title": "Paste the link you already saved",
+        "desc": "That travel video bookmarked on Instagram, YouTube or TikTok? Paste it here. We extract every place mentioned — automatically."
+      },
+      "step2": {
+        "title": "Watch your trip come alive",
+        "desc": "In 30 seconds: a complete itinerary with smart timing, nearby grouping, sunset viewpoints, and every place validated on Google Maps."
+      },
+      "step3": {
+        "title": "Make it yours and go",
+        "desc": "Drag to reorder, ask for changes, add your flights. It's your trip — we just made the hard part disappear."
+      }
+    },
+    "ctaTitle": "Your next trip deserves more than a spreadsheet",
+    "ctaSubtitle": "Paste a link and watch your itinerary come alive in seconds. Free, no signup, no limits.",
+    "ctaButton": "Build my trip now",
+    "footerCopy": "2024 Voyara. Plan intelligently.",
+    "footerDashboard": "My trips",
+    "demoSuggestions": "Smart suggestions for Day 1",
+    "demoProfile": "Traveler Profile",
+    "demoProfileDesc": "Cultural traveler who loves local cuisine, street photography and exploring authentic neighborhoods. Prefers unique experiences over crowded tourist spots.",
+    "demoBudget": "Trip Budget",
+    "demoSpent": "$3,450 spent",
+    "demoBudgetOf": "of"
+  },
+  "header": {
+    "newTrip": "+ New Trip"
+  },
+  "dashboard": {
+    "loading": "Loading trips...",
+    "error": "Error:",
+    "empty": "No trips yet",
+    "createFirst": "Create your first trip",
+    "filters": {
+      "all": "all",
+      "draft": "draft",
+      "active": "active",
+      "completed": "completed",
+      "archived": "archived"
+    }
+  },
+  "tripCreate": {
+    "title": "Create a New Trip"
+  },
+  "tripForm": {
+    "name": "Trip Name *",
+    "namePlaceholder": "e.g. Tokyo Adventure",
+    "destination": "Destination",
+    "destinationPlaceholder": "e.g. Tokyo, Japan",
+    "numDays": "Number of Days",
+    "numDaysHint": "You can add or remove days later",
+    "submit": "Create Trip",
+    "submitting": "Creating..."
+  },
+  "tripCard": {
+    "deleteConfirm": "Delete this trip?",
+    "delete": "Delete",
+    "days": "days",
+    "places": "places",
+    "links": "links"
+  },
+  "tripDetail": {
+    "loading": "Loading trip...",
+    "notFound": "Trip not found",
+    "back": "← Back",
+    "days": "days",
+    "aiMode": "AI Mode:",
+    "eco": "Eco",
+    "pro": "Pro",
+    "ecoDesc": "Single call · Cost efficient",
+    "proDesc": "Full agent · Higher quality",
+    "addItem": "Add Item"
+  },
+  "profile": {
+    "title": "Your Traveler Profile",
+    "addPlaceholder": "Add...",
+    "detectedDestination": "Detected destination:",
+    "howSplit": "How do you want to split your {days} days?",
+    "daysLabel": "days",
+    "confirm": "Confirm & Generate Itinerary",
+    "cancel": "Cancel Edit",
+    "edit": "Edit",
+    "skip": "Skip",
+    "style": "Style:",
+    "pace": "Pace:",
+    "clickToRemove": "Click to remove",
+    "relaxed": "Relaxed",
+    "moderate": "Moderate",
+    "intense": "Intense",
+    "emptyFallback": "Profile analysis incomplete. Confirm to generate itinerary with default settings, or edit to customize.",
+    "modalSubtitle": "Here's what we understood about your travel style",
+    "whatYouWant": "What do you want in your trip?",
+    "whatYouWantDesc": "Select what matters to you — we'll prioritize these in your itinerary",
+    "selectPace": "What's your pace?",
+    "cat_restaurants": "Restaurants",
+    "cat_attractions": "Attractions",
+    "cat_museums": "Museums",
+    "cat_shopping": "Shopping",
+    "cat_nightlife": "Nightlife",
+    "cat_cafes": "Cafes",
+    "cat_nature": "Nature",
+    "cat_viewpoints": "Viewpoints"
+  },
+  "processing": {
+    "extracting": "Extracting content from links...",
+    "linksExtracted": "links extracted",
+    "analyzing": "Analyzing your traveler profile...",
+    "analyzingDesc": "Detecting cities, interests and travel style",
+    "generating": "Generating your personalized itinerary...",
+    "generatingDesc": "Validating places on Google Maps and creating itinerary"
+  },
+  "linkInput": {
+    "placeholder": "Paste one or more links (Instagram, YouTube, etc.)",
+    "add": "Add Link",
+    "saved": "Saved!",
+    "savedMultiple": "{count} links added!"
+  },
+  "linkList": {
+    "queued": "Queued",
+    "extracting": "Extracting...",
+    "extracted": "Extracted ✓",
+    "done": "Done",
+    "failed": "Failed",
+    "places": "places",
+    "collapse": "Collapse",
+    "processing": "Processing {count} link(s)..."
+  },
+  "itemForm": {
+    "name": "Name *",
+    "namePlaceholder": "e.g. Senso-ji Temple",
+    "category": "Category",
+    "categories": {
+      "attraction": "Attraction",
+      "restaurant": "Restaurant",
+      "hotel": "Hotel",
+      "activity": "Activity",
+      "shopping": "Shopping",
+      "transport": "Transport",
+      "other": "Other"
+    },
+    "description": "Description",
+    "descriptionPlaceholder": "Brief description...",
+    "timeSlot": "Time Slot",
+    "duration": "Duration (min)",
+    "address": "Address",
+    "addressPlaceholder": "Full address...",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "pricing": "Pricing",
+    "pricingPlaceholder": "e.g. Free, ~$10",
+    "notes": "Notes",
+    "notesPlaceholder": "Any extra notes...",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "Saving..."
+  },
+  "itemDetail": {
+    "address": "Address",
+    "loadingSuggestions": "Loading suggestions...",
+    "add": "+ Add",
+    "delete": "Delete",
+    "notesPlaceholder": "Add your own notes..."
+  },
+  "dayPlan": {
+    "day": "Day",
+    "places": "place(s)",
+    "addPlace": "+ Add place",
+    "showingOnMap": "Showing on map",
+    "recalculate": "Recalculate"
+  },
+  "feedback": {
+    "title": "Refine with AI",
+    "refine": "Refine with AI",
+    "placeholder": "Tell the AI what you'd like changed... (e.g., 'more local restaurants', 'I like item 1 but replace the rest')",
+    "placeholderDay": "What would you change about this day?",
+    "placeholderTrip": "What would you change about the overall itinerary?",
+    "hint": "Press Enter to send",
+    "send": "Refine",
+    "cancel": "Cancel",
+    "refining": "Refining..."
+  },
+  "schedule": {
+    "recalculate": "Recalculate Schedule",
+    "noTime": "No time",
+    "cancel": "Cancel",
+    "applyAll": "Apply All"
+  },
+  "vibeFilter": {
+    "label": "Vibes:",
+    "clear": "Clear"
+  },
+  "vibes": {
+    "instagramavel": "Instagrammable",
+    "hidden_gem": "Hidden Gem",
+    "romantico": "Romantic",
+    "comida_de_rua": "Street Food",
+    "vida_noturna": "Nightlife",
+    "familiar": "Family",
+    "cultural": "Cultural",
+    "ao_ar_livre": "Outdoor",
+    "luxo": "Luxury",
+    "economico": "Budget",
+    "historico": "Historic",
+    "cafe_trabalho": "Work Cafe",
+    "vista_panoramica": "Scenic View"
+  },
+  "cityTabs": {
+    "all": "All"
+  },
+  "alternatives": {
+    "chooseOne": "Choose one"
+  },
+  "map": {
+    "loading": "Loading map...",
+    "noApiKey": "Google Maps API key not set",
+    "noApiKeyHint": "Add REACT_APP_GOOGLE_MAPS_API_KEY to your .env.local file"
+  },
+  "linkAnalyzer": {
+    "placeholder": "Paste your link here (Instagram, YouTube, TikTok, blog...)",
+    "analyze": "Analyze",
+    "analyzing": "Analyzing...",
+    "error": "Something went wrong. Try again."
+  },
+  "analyzeResult": {
+    "learnMore": "Learn more about these places",
+    "learnMoreDesc": "See details, photos, hours and maps",
+    "createItinerary": "Create an itinerary",
+    "createItineraryDesc": "Build a day-by-day travel plan from this content"
+  },
+  "quickTrip": {
+    "name": "Trip name",
+    "namePlaceholder": "e.g., Summer in Paris",
+    "create": "Create & Build Itinerary",
+    "creating": "Creating..."
+  },
+  "placeCard": {
+    "hours": "Opening hours",
+    "viewOnMaps": "View on Maps",
+    "website": "Website"
+  },
+  "hotelInput": {
+    "placeholder": "Add your hotel",
+    "searching": "Searching...",
+    "noResults": "No hotels found",
+    "change": "Change"
+  },
+  "suggestions": {
+    "title": "Suggestions for this day",
+    "loading": "Finding suggestions...",
+    "addManually": "Add manually",
+    "noSuggestions": "No suggestions found",
+    "addThis": "Add",
+    "close": "Close"
+  },
+  "logistics": {
+    "tabs": {
+      "itinerary": "Itinerary",
+      "flights": "Flights",
+      "lodging": "Lodging",
+      "transport": "Transport",
+      "notes": "Notes"
+    },
+    "common": {
+      "add": "Add",
+      "edit": "Edit",
+      "delete": "Delete",
+      "cancel": "Cancel",
+      "save": "Save",
+      "saving": "Saving...",
+      "booked": "Booked",
+      "confirmation": "Confirmation #",
+      "totalCost": "Total Cost",
+      "notes": "Notes"
+    },
+    "flights": {
+      "title": "Flights",
+      "empty": "No flights added yet",
+      "airline": "Airline",
+      "flightNumber": "Flight Number",
+      "departureAirport": "Departure Airport",
+      "arrivalAirport": "Arrival Airport",
+      "departureDate": "Departure",
+      "arrivalDate": "Arrival",
+      "departure": "Departure",
+      "arrival": "Arrival",
+      "seats": "Seats"
+    },
+    "lodging": {
+      "title": "Lodging",
+      "empty": "No lodging added yet",
+      "name": "Hotel/Property Name",
+      "namePlaceholder": "e.g. Hilton Tokyo",
+      "unnamed": "Unnamed lodging",
+      "address": "Address",
+      "checkIn": "Check-in",
+      "checkInTime": "Check-in Time",
+      "checkOut": "Check-out",
+      "checkOutTime": "Check-out Time",
+      "phone": "Phone",
+      "website": "Website",
+      "email": "Email",
+      "nights": "nights"
+    },
+    "transport": {
+      "title": "Transport",
+      "empty": "No transport added yet",
+      "type": "Type",
+      "company": "Company",
+      "pickup": "Pickup Location",
+      "dropoff": "Drop-off Location",
+      "departureDate": "Departure",
+      "arrivalDate": "Arrival",
+      "vehicleInfo": "Vehicle Info",
+      "vehiclePlaceholder": "e.g. Toyota Corolla, White",
+      "types": {
+        "car_rental": "Car Rental",
+        "train": "Train",
+        "bus": "Bus",
+        "ferry": "Ferry",
+        "taxi": "Taxi",
+        "rideshare": "Rideshare",
+        "other": "Other"
+      }
+    },
+    "notes": {
+      "title": "Trip Notes",
+      "empty": "No notes yet",
+      "noteTitle": "Title",
+      "titlePlaceholder": "e.g. Visa requirements",
+      "category": "Category",
+      "content": "Content",
+      "contentPlaceholder": "Write your note here...",
+      "untitled": "Untitled Note",
+      "categories": {
+        "general": "General",
+        "packing": "Packing",
+        "documents": "Documents",
+        "budget": "Budget",
+        "emergency": "Emergency",
+        "tips": "Tips"
+      }
+    }
+  },
+  "nav": {
+    "home": "Home",
+    "myTrips": "My Trips",
+    "pricing": "Pricing"
+  },
+  "auth": {
+    "login": "Log in",
+    "register": "Sign up",
+    "logout": "Log out",
+    "loginTitle": "Welcome back",
+    "loginSubtitle": "Log in to access your trips",
+    "registerTitle": "Create your account",
+    "registerSubtitle": "Start planning your trips for free",
+    "name": "Full Name",
+    "namePlaceholder": "e.g. John Doe",
+    "email": "Email",
+    "emailPlaceholder": "you@example.com",
+    "password": "Password",
+    "passwordPlaceholder": "At least 6 characters",
+    "loginButton": "Log in",
+    "registerButton": "Create account",
+    "loggingIn": "Logging in...",
+    "registering": "Creating account...",
+    "forgotPassword": "Forgot your password?",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?",
+    "registerLink": "Sign up",
+    "loginLink": "Log in",
+    "required": "Please fill in all fields",
+    "nameRequired": "Please enter your name",
+    "passwordMin": "Password must be at least 6 characters",
+    "error": "Something went wrong. Please try again."
+  },
+  "language": {
+    "toggle": "PT"
+  },
+  "onboarding": {
+    "step1Title": "Paste your links",
+    "step1Desc": "Found an amazing travel video on TikTok, Instagram, or YouTube? Paste the link here and our AI will extract all the places mentioned.",
+    "step2Title": "Discover places",
+    "step2Desc": "See every place from the video with photos, ratings, and descriptions. The AI also suggests hidden gems you might love nearby.",
+    "step3Title": "Your traveler profile",
+    "step3Desc": "The AI builds your traveler profile — interests, pace, and style. Adjust everything before confirming to get the perfect itinerary.",
+    "step4Title": "Day-by-day itinerary",
+    "step4Desc": "Get a complete itinerary with iconic attractions, restaurants, and activities organized by day — all with Google Maps ratings and real photos.",
+    "step5Title": "Customize with AI",
+    "step5Desc": "Not happy with something? Give feedback on any day or the whole trip and the AI will adjust. Swap places, change order, add new spots.",
+    "step6Title": "Interactive map",
+    "step6Desc": "See everything on the map — your hotel, each day's attractions, walking distances. Filter by day to focus on what matters.",
+    "step7Title": "Flights, hotel & notes",
+    "step7Desc": "Add your flights, hotel, and personal notes all in one place. Your hotel appears on the map so you can see distances to each attraction.",
+    "step8Title": "Share & export",
+    "step8Desc": "Download a beautiful PDF of your itinerary or share it with friends via WhatsApp, email, or a direct link.",
+    "back": "Back",
+    "next": "Next",
+    "skip": "Skip",
+    "start": "Let's go!"
+  }
+}

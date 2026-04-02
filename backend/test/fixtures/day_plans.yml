@@ -1,0 +1,13 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  trip: one
+  day_number: 1
+  date: 2026-03-28
+  notes: MyText
+
+two:
+  trip: two
+  day_number: 1
+  date: 2026-03-28
+  notes: MyText

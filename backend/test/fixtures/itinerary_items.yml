@@ -1,0 +1,45 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  day_plan: one
+  name: MyString
+  description: MyText
+  category: MyString
+  time_slot: MyString
+  duration_minutes: 1
+  position: 1
+  latitude: 9.99
+  longitude: 9.99
+  address: MyString
+  google_place_id: MyString
+  google_rating: 9.99
+  google_reviews_count: 1
+  operating_hours: 
+  pricing_info: MyString
+  phone: MyString
+  website: MyString
+  photos: 
+  notes: MyText
+  source_url: MyString
+
+two:
+  day_plan: two
+  name: MyString
+  description: MyText
+  category: MyString
+  time_slot: MyString
+  duration_minutes: 1
+  position: 1
+  latitude: 9.99
+  longitude: 9.99
+  address: MyString
+  google_place_id: MyString
+  google_rating: 9.99
+  google_reviews_count: 1
+  operating_hours: 
+  pricing_info: MyString
+  phone: MyString
+  website: MyString
+  photos: 
+  notes: MyText
+  source_url: MyString

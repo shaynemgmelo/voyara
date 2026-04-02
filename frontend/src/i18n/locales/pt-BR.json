@@ -1,0 +1,448 @@
+{
+  "app": {
+    "name": "Voyara"
+  },
+  "landing": {
+    "login": "Entrar",
+    "startPlanning": "Comece a planejar",
+    "learnMore": "Saiba mais",
+    "headline": "Pare de planejar. Comece a viajar.",
+    "subheadline": "Cole o link daquele vídeo de viagem que você salvou. Em 30 segundos você terá um roteiro completo dia a dia com mapa, timing perfeito e lugares que você nunca encontraria sozinho.",
+    "stat1Number": "100%",
+    "stat1Label": "Gratuito para usar",
+    "stat2Number": "IA",
+    "stat2Label": "Roteiros inteligentes",
+    "stat3Number": "2 idiomas",
+    "stat3Label": "Português e Inglês",
+    "featuresTitle": "Tudo que um viajante sonha. Nada do que não precisa.",
+    "featuresSubtitle": "Um app substitui suas 12 abas abertas, 3 planilhas e aquele app de notas que você nunca acha.",
+    "features": {
+      "linkImport": {
+        "title": "Do vídeo salvo ao roteiro pronto",
+        "desc": "Aquele TikTok que você salvou às 2h da manhã? Cole o link. Extraímos cada lugar, validamos no Google Maps e montamos sua viagem."
+      },
+      "aiItinerary": {
+        "title": "Dias que realmente fazem sentido",
+        "desc": "Chega de ziguezaguear. Lugares próximos agrupados, mirantes no pôr do sol, mercados de manhã. Como se um local tivesse planejado."
+      },
+      "mapView": {
+        "title": "Veja toda a viagem de relance",
+        "desc": "Pins coloridos por dia. Clique num dia, veja a rota. Afaste o zoom, veja a semana. Você nunca vai se sentir perdido."
+      },
+      "smartTiming": {
+        "title": "Timing perfeito, todo dia",
+        "desc": "Pontos de nascer do sol de manhã, almoços longos na hora certa, golden hour nos mirantes. Cada momento é intencional."
+      },
+      "flightsHotels": {
+        "title": "Voos e notas em um só lugar",
+        "desc": "Adicione voos, anote lembretes de visto, listas de mala — tudo vive junto com seu roteiro. Chega de info espalhada."
+      },
+      "smartSuggestions": {
+        "title": "Lugares escondidos que você perderia",
+        "desc": "Sugestões que os guias não mencionam. Aquele bar no terraço com a vista, a padaria que só os locais conhecem, o atalho pelo parque."
+      }
+    },
+    "howItWorksTitle": "Tão simples que parece mágica",
+    "howItWorks": {
+      "step1": {
+        "title": "Cole o link que você já salvou",
+        "desc": "Aquele vídeo de viagem salvo no Instagram, YouTube ou TikTok? Cole aqui. Extraímos cada lugar mencionado — automaticamente."
+      },
+      "step2": {
+        "title": "Veja sua viagem ganhar vida",
+        "desc": "Em 30 segundos: um roteiro completo com timing inteligente, lugares agrupados, mirantes no pôr do sol, e tudo validado no Google Maps."
+      },
+      "step3": {
+        "title": "Faça do seu jeito e vá",
+        "desc": "Arraste para reordenar, peça mudanças, adicione seus voos. É a sua viagem — a gente só fez a parte difícil desaparecer."
+      }
+    },
+    "ctaTitle": "Sua próxima viagem merece mais que uma planilha",
+    "ctaSubtitle": "Cole um link e veja seu roteiro ganhar vida em segundos. Grátis, sem cadastro, sem limites.",
+    "ctaButton": "Montar meu roteiro agora",
+    "footerCopy": "2024 Voyara. Planeje com inteligência.",
+    "footerDashboard": "Minhas viagens",
+    "demoSuggestions": "Sugestões inteligentes para Dia 1",
+    "demoProfile": "Perfil do Viajante",
+    "demoProfileDesc": "Viajante cultural que ama gastronomia local, fotografia de rua e explorar bairros autênticos. Prefere experiências únicas a pontos turísticos lotados.",
+    "demoBudget": "Orçamento da Viagem",
+    "demoSpent": "$3,450 gastos",
+    "demoBudgetOf": "de"
+  },
+  "header": {
+    "newTrip": "+ Nova Viagem"
+  },
+  "dashboard": {
+    "loading": "Carregando viagens...",
+    "error": "Erro:",
+    "empty": "Nenhuma viagem ainda",
+    "createFirst": "Crie sua primeira viagem",
+    "filters": {
+      "all": "todas",
+      "draft": "rascunho",
+      "active": "ativa",
+      "completed": "concluída",
+      "archived": "arquivada"
+    }
+  },
+  "tripCreate": {
+    "title": "Criar Nova Viagem"
+  },
+  "tripForm": {
+    "name": "Nome da Viagem *",
+    "namePlaceholder": "ex: Aventura em Tóquio",
+    "destination": "Destino",
+    "destinationPlaceholder": "ex: Tóquio, Japão",
+    "numDays": "Número de Dias",
+    "numDaysHint": "Você pode adicionar ou remover dias depois",
+    "submit": "Criar Viagem",
+    "submitting": "Criando..."
+  },
+  "tripCard": {
+    "deleteConfirm": "Excluir esta viagem?",
+    "delete": "Excluir",
+    "days": "dias",
+    "places": "lugares",
+    "links": "links"
+  },
+  "tripDetail": {
+    "loading": "Carregando viagem...",
+    "notFound": "Viagem não encontrada",
+    "back": "← Voltar",
+    "days": "dias",
+    "aiMode": "Modo IA:",
+    "eco": "Eco",
+    "pro": "Pro",
+    "ecoDesc": "Chamada única · Mais econômico",
+    "proDesc": "Agente completo · Maior qualidade",
+    "addItem": "Adicionar Item"
+  },
+  "profile": {
+    "title": "Seu Perfil de Viajante",
+    "addPlaceholder": "Adicionar...",
+    "detectedDestination": "Destino detectado:",
+    "howSplit": "Como quer dividir seus {days} dias?",
+    "daysLabel": "dias",
+    "confirm": "Confirmar e Gerar Roteiro",
+    "cancel": "Cancelar Edição",
+    "edit": "Editar",
+    "skip": "Pular",
+    "style": "Estilo:",
+    "pace": "Ritmo:",
+    "clickToRemove": "Clique para remover",
+    "relaxed": "Relaxado",
+    "moderate": "Moderado",
+    "intense": "Intenso",
+    "emptyFallback": "Análise de perfil incompleta. Confirme para gerar o roteiro com configurações padrão, ou edite para personalizar.",
+    "modalSubtitle": "Aqui está o que entendemos sobre seu estilo de viagem",
+    "whatYouWant": "O que você quer na sua viagem?",
+    "whatYouWantDesc": "Selecione o que importa pra você — vamos priorizar no seu roteiro",
+    "selectPace": "Qual o seu ritmo?",
+    "cat_restaurants": "Restaurantes",
+    "cat_attractions": "Atrações",
+    "cat_museums": "Museus",
+    "cat_shopping": "Compras",
+    "cat_nightlife": "Vida Noturna",
+    "cat_cafes": "Cafés",
+    "cat_nature": "Natureza",
+    "cat_viewpoints": "Mirantes"
+  },
+  "processing": {
+    "extracting": "Extraindo conteúdo dos links...",
+    "linksExtracted": "links extraídos",
+    "analyzing": "Analisando seu perfil de viajante...",
+    "analyzingDesc": "Detectando cidades, interesses e estilo de viagem",
+    "generating": "Gerando seu roteiro personalizado...",
+    "generatingDesc": "Validando lugares no Google Maps e criando itinerário"
+  },
+  "linkInput": {
+    "placeholder": "Cole um ou mais links (Instagram, YouTube, etc.)",
+    "add": "Adicionar Link",
+    "saved": "Salvo!",
+    "savedMultiple": "{count} links adicionados!"
+  },
+  "linkList": {
+    "queued": "Na fila",
+    "extracting": "Extraindo...",
+    "extracted": "Extraído ✓",
+    "done": "Pronto",
+    "failed": "Falhou",
+    "places": "lugares",
+    "collapse": "Recolher",
+    "processing": "Processando {count} link(s)..."
+  },
+  "itemForm": {
+    "name": "Nome *",
+    "namePlaceholder": "ex: Templo Senso-ji",
+    "category": "Categoria",
+    "categories": {
+      "attraction": "Atração",
+      "restaurant": "Restaurante",
+      "hotel": "Hotel",
+      "activity": "Atividade",
+      "shopping": "Compras",
+      "transport": "Transporte",
+      "other": "Outro"
+    },
+    "description": "Descrição",
+    "descriptionPlaceholder": "Breve descrição...",
+    "timeSlot": "Horário",
+    "duration": "Duração (min)",
+    "address": "Endereço",
+    "addressPlaceholder": "Endereço completo...",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "pricing": "Preço",
+    "pricingPlaceholder": "ex: Grátis, ~R$50",
+    "notes": "Notas",
+    "notesPlaceholder": "Notas extras...",
+    "cancel": "Cancelar",
+    "save": "Salvar",
+    "saving": "Salvando..."
+  },
+  "itemDetail": {
+    "address": "Endereço",
+    "loadingSuggestions": "Carregando sugestões...",
+    "add": "+ Adicionar",
+    "delete": "Excluir",
+    "notesPlaceholder": "Adicione suas notas..."
+  },
+  "dayPlan": {
+    "day": "Dia",
+    "places": "lugar(es)",
+    "addPlace": "+ Adicionar lugar",
+    "showingOnMap": "Mostrando no mapa",
+    "recalculate": "Recalcular"
+  },
+  "feedback": {
+    "title": "Refinar com IA",
+    "refine": "Refinar com IA",
+    "placeholder": "Diga o que gostaria de mudar... (ex: 'mais restaurantes locais', 'gostei do item 1 mas troque o resto')",
+    "placeholderDay": "O que mudaria neste dia?",
+    "placeholderTrip": "O que mudaria no roteiro geral?",
+    "hint": "Pressione Enter para enviar",
+    "send": "Refinar",
+    "cancel": "Cancelar",
+    "refining": "Refinando..."
+  },
+  "schedule": {
+    "recalculate": "Recalcular Horários",
+    "noTime": "Sem horário",
+    "cancel": "Cancelar",
+    "applyAll": "Aplicar Todos"
+  },
+  "vibeFilter": {
+    "label": "Vibes:",
+    "clear": "Limpar"
+  },
+  "vibes": {
+    "instagramavel": "Instagramável",
+    "hidden_gem": "Escondido",
+    "romantico": "Romântico",
+    "comida_de_rua": "Comida de Rua",
+    "vida_noturna": "Vida Noturna",
+    "familiar": "Familiar",
+    "cultural": "Cultural",
+    "ao_ar_livre": "Ao Ar Livre",
+    "luxo": "Luxo",
+    "economico": "Econômico",
+    "historico": "Histórico",
+    "cafe_trabalho": "Café Trabalho",
+    "vista_panoramica": "Vista Panorâmica"
+  },
+  "cityTabs": {
+    "all": "Todas"
+  },
+  "alternatives": {
+    "chooseOne": "Escolha uma"
+  },
+  "map": {
+    "loading": "Carregando mapa...",
+    "noApiKey": "Chave da API do Google Maps não configurada",
+    "noApiKeyHint": "Adicione REACT_APP_GOOGLE_MAPS_API_KEY ao seu .env.local"
+  },
+  "linkAnalyzer": {
+    "placeholder": "Cole seu link aqui (Instagram, YouTube, TikTok, blog...)",
+    "analyze": "Analisar",
+    "analyzing": "Analisando...",
+    "error": "Algo deu errado. Tente novamente."
+  },
+  "analyzeResult": {
+    "learnMore": "Saber mais sobre esses lugares",
+    "learnMoreDesc": "Veja detalhes, fotos, horários e mapa",
+    "createItinerary": "Criar um roteiro",
+    "createItineraryDesc": "Monte um plano dia a dia a partir desse conteúdo"
+  },
+  "quickTrip": {
+    "name": "Nome da viagem",
+    "namePlaceholder": "ex: Verão em Paris",
+    "create": "Criar e Montar Roteiro",
+    "creating": "Criando..."
+  },
+  "placeCard": {
+    "hours": "Horário de funcionamento",
+    "viewOnMaps": "Ver no Maps",
+    "website": "Website"
+  },
+  "hotelInput": {
+    "placeholder": "Adicione seu hotel",
+    "searching": "Buscando...",
+    "noResults": "Nenhum hotel encontrado",
+    "change": "Trocar"
+  },
+  "suggestions": {
+    "title": "Sugestões para este dia",
+    "loading": "Buscando sugestões...",
+    "addManually": "Adicionar manualmente",
+    "noSuggestions": "Nenhuma sugestão encontrada",
+    "addThis": "Adicionar",
+    "close": "Fechar"
+  },
+  "logistics": {
+    "tabs": {
+      "itinerary": "Roteiro",
+      "flights": "Voos",
+      "lodging": "Hospedagem",
+      "transport": "Transporte",
+      "notes": "Notas"
+    },
+    "common": {
+      "add": "Adicionar",
+      "edit": "Editar",
+      "delete": "Excluir",
+      "cancel": "Cancelar",
+      "save": "Salvar",
+      "saving": "Salvando...",
+      "booked": "Reservado",
+      "confirmation": "N° Confirmação",
+      "totalCost": "Custo Total",
+      "notes": "Observações"
+    },
+    "flights": {
+      "title": "Voos",
+      "empty": "Nenhum voo adicionado",
+      "airline": "Companhia Aérea",
+      "flightNumber": "Número do Voo",
+      "departureAirport": "Aeroporto de Saída",
+      "arrivalAirport": "Aeroporto de Chegada",
+      "departureDate": "Partida",
+      "arrivalDate": "Chegada",
+      "departure": "Partida",
+      "arrival": "Chegada",
+      "seats": "Assentos"
+    },
+    "lodging": {
+      "title": "Hospedagem",
+      "empty": "Nenhuma hospedagem adicionada",
+      "name": "Nome do Hotel/Propriedade",
+      "namePlaceholder": "ex: Hilton Tokyo",
+      "unnamed": "Hospedagem sem nome",
+      "address": "Endereço",
+      "checkIn": "Check-in",
+      "checkInTime": "Horário Check-in",
+      "checkOut": "Check-out",
+      "checkOutTime": "Horário Check-out",
+      "phone": "Telefone",
+      "website": "Website",
+      "email": "Email",
+      "nights": "noites"
+    },
+    "transport": {
+      "title": "Transporte",
+      "empty": "Nenhum transporte adicionado",
+      "type": "Tipo",
+      "company": "Empresa",
+      "pickup": "Local de Retirada",
+      "dropoff": "Local de Devolução",
+      "departureDate": "Partida",
+      "arrivalDate": "Chegada",
+      "vehicleInfo": "Info do Veículo",
+      "vehiclePlaceholder": "ex: Toyota Corolla, Branco",
+      "types": {
+        "car_rental": "Aluguel de Carro",
+        "train": "Trem",
+        "bus": "Ônibus",
+        "ferry": "Balsa",
+        "taxi": "Táxi",
+        "rideshare": "Corrida por App",
+        "other": "Outro"
+      }
+    },
+    "notes": {
+      "title": "Notas da Viagem",
+      "empty": "Nenhuma nota ainda",
+      "noteTitle": "Título",
+      "titlePlaceholder": "ex: Requisitos de visto",
+      "category": "Categoria",
+      "content": "Conteúdo",
+      "contentPlaceholder": "Escreva sua nota aqui...",
+      "untitled": "Nota sem título",
+      "categories": {
+        "general": "Geral",
+        "packing": "Mala",
+        "documents": "Documentos",
+        "budget": "Orçamento",
+        "emergency": "Emergência",
+        "tips": "Dicas"
+      }
+    }
+  },
+  "nav": {
+    "home": "Início",
+    "myTrips": "Minhas Viagens",
+    "pricing": "Planos"
+  },
+  "auth": {
+    "login": "Entrar",
+    "register": "Criar conta",
+    "logout": "Sair",
+    "loginTitle": "Bem-vindo de volta",
+    "loginSubtitle": "Entre para acessar suas viagens",
+    "registerTitle": "Crie sua conta",
+    "registerSubtitle": "Comece a planejar suas viagens de graça",
+    "name": "Nome completo",
+    "namePlaceholder": "ex: Maria Silva",
+    "email": "Email",
+    "emailPlaceholder": "você@exemplo.com",
+    "password": "Senha",
+    "passwordPlaceholder": "Mínimo 6 caracteres",
+    "loginButton": "Entrar",
+    "registerButton": "Criar conta",
+    "loggingIn": "Entrando...",
+    "registering": "Criando conta...",
+    "forgotPassword": "Esqueceu sua senha?",
+    "noAccount": "Não tem uma conta?",
+    "hasAccount": "Já tem uma conta?",
+    "registerLink": "Criar conta",
+    "loginLink": "Entrar",
+    "required": "Preencha todos os campos",
+    "nameRequired": "Informe seu nome",
+    "passwordMin": "A senha deve ter pelo menos 6 caracteres",
+    "error": "Algo deu errado. Tente novamente."
+  },
+  "language": {
+    "toggle": "EN"
+  },
+  "onboarding": {
+    "step1Title": "Cole seus links",
+    "step1Desc": "Achou um vídeo incrível de viagem no TikTok, Instagram ou YouTube? Cole o link aqui e nossa IA vai extrair todos os lugares mencionados.",
+    "step2Title": "Descubra lugares",
+    "step2Desc": "Veja cada lugar do vídeo com fotos, avaliações e descrições. A IA também sugere lugares incríveis que você pode amar por perto.",
+    "step3Title": "Seu perfil de viajante",
+    "step3Desc": "A IA cria seu perfil de viajante — interesses, ritmo e estilo. Ajuste tudo antes de confirmar para ter o roteiro perfeito.",
+    "step4Title": "Roteiro dia a dia",
+    "step4Desc": "Receba um roteiro completo com atrações icônicas, restaurantes e atividades organizados por dia — tudo com avaliações e fotos reais do Google Maps.",
+    "step5Title": "Personalize com IA",
+    "step5Desc": "Não gostou de algo? Dê feedback em qualquer dia ou no roteiro todo e a IA vai ajustar. Troque lugares, mude a ordem, adicione novos pontos.",
+    "step6Title": "Mapa interativo",
+    "step6Desc": "Veja tudo no mapa — seu hotel, as atrações de cada dia, distâncias a pé. Filtre por dia para focar no que importa.",
+    "step7Title": "Voos, hotel e notas",
+    "step7Desc": "Adicione seus voos, hotel e notas pessoais em um só lugar. Seu hotel aparece no mapa para você ver as distâncias até cada atração.",
+    "step8Title": "Compartilhe e exporte",
+    "step8Desc": "Baixe um PDF bonito do seu roteiro ou compartilhe com amigos via WhatsApp, email ou link direto.",
+    "back": "Voltar",
+    "next": "Próximo",
+    "skip": "Pular",
+    "start": "Vamos lá!"
+  }
+}

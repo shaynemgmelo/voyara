@@ -1,0 +1,446 @@
+import { useState, useMemo, useCallback, useEffect } from "react";
+import { useParams, Link } from "react-router-dom";
+import { DragDropContext } from "@hello-pangea/dnd";
+import useTripDetail from "../hooks/useTripDetail";
+import DayPlanColumn from "../components/itinerary/DayPlanColumn";
+import ItemDetail from "../components/itinerary/ItemDetail";
+import ItemForm from "../components/itinerary/ItemForm";
+import LinkInput from "../components/links/LinkInput";
+import LinkList from "../components/links/LinkList";
+import TripMap from "../components/map/TripMap";
+import HotelMapInput from "../components/map/HotelMapInput";
+import VibeTagFilter from "../components/itinerary/VibeTagFilter";
+import SchedulePreview from "../components/itinerary/SchedulePreview";
+import TravelerProfileCard from "../components/trips/TravelerProfileCard";
+import CityTabs from "../components/itinerary/CityTabs";
+import ProcessingStatus from "../components/trips/ProcessingStatus";
+import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
+import FeedbackBox from "../components/itinerary/FeedbackBox";
+import FlightPanel from "../components/logistics/FlightPanel";
+import NotePanel from "../components/logistics/NotePanel";
+import TripPDFExport from "../components/trip/TripPDFExport";
+import TripShareModal from "../components/trip/TripShareModal";
+import { getTravelTimes, recalculateSchedule } from "../api/dayPlans";
+import { useLanguage } from "../i18n/LanguageContext";
+
+export default function TripDetail() {
+  const { id } = useParams();
+  const { t, lang } = useLanguage();
+  const {
+    trip,
+    loading,
+    error,
+    addItem,
+    updateItem,
+    removeItem,
+    reorderItems,
+    moveItemBetweenDays,
+    addLink,
+    removeLink,
+    updateAiMode,
+    updateProfile,
+    refineItinerary,
+    refining,
+    addLodging,
+    removeLodging,
+  } = useTripDetail(id);
+
+  const [selectedItemId, setSelectedItemId] = useState(null);
+  const [selectedDayNumber, setSelectedDayNumber] = useState(null);
+  const [hoveredItemId, setHoveredItemId] = useState(null);
+  const [showItemForm, setShowItemForm] = useState(null);
+  const [showSuggestions, setShowSuggestions] = useState(null); // dayPlanId
+  const [expandedItem, setExpandedItem] = useState(null);
+  const [vibeFilters, setVibeFilters] = useState([]);
+  const [travelTimes, setTravelTimes] = useState({});
+  const [schedulePreview, setSchedulePreview] = useState(null);
+  const [activeCity, setActiveCity] = useState(null);
+  const [activeTab, setActiveTab] = useState("itinerary");
+  const [showPDFExport, setShowPDFExport] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+
+  // Build a fingerprint of all item IDs to detect changes (adds, deletes, reorders)
+  const itemsFingerprint = useMemo(() => {
+    if (!trip?.day_plans) return "";
+    return trip.day_plans
+      .map((dp) => `${dp.id}:${(dp.itinerary_items || []).map((i) => i.id).join(",")}`)
+      .join("|");
+  }, [trip?.day_plans]);
+
+  // Fetch travel times for all days with 2+ items
+  const fetchAllTravelTimes = useCallback(async () => {
+    if (!trip?.day_plans) return;
+    for (const dp of trip.day_plans) {
+      const itemsWithCoords = dp.itinerary_items?.filter((i) => i.latitude) || [];
+      if (itemsWithCoords.length >= 2) {
+        try {
+          const data = await getTravelTimes(trip.id, dp.id);
+          setTravelTimes((prev) => ({ ...prev, [dp.id]: data.segments || [] }));
+        } catch {
+          // Silently skip
+        }
+      } else {
+        // Clear travel times for days with 0-1 items
+        setTravelTimes((prev) => ({ ...prev, [dp.id]: [] }));
+      }
+    }
+  }, [trip?.day_plans, trip?.id, itemsFingerprint]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    fetchAllTravelTimes();
+  }, [fetchAllTravelTimes]);
+
+  // Collect all unique vibe tags across all items
+  const availableVibeTags = useMemo(() => {
+    if (!trip?.day_plans) return [];
+    const tags = new Set();
+    trip.day_plans.forEach((dp) =>
+      dp.itinerary_items?.forEach((item) =>
+        item.vibe_tags?.forEach((tag) => tags.add(tag))
+      )
+    );
+    return [...tags].sort();
+  }, [trip]);
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-12 text-center text-gray-500">
+        {t("tripDetail.loading")}
+      </div>
+    );
+  }
+
+  if (error || !trip) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-12 text-center text-red-400">
+        {error || t("tripDetail.notFound")}
+      </div>
+    );
+  }
+
+  const handleItemClick = (item) => {
+    setSelectedItemId(item.id);
+    setExpandedItem(item);
+  };
+
+  const handleMarkerClick = (item) => {
+    setSelectedItemId(item.id);
+    setExpandedItem(item);
+    const el = document.getElementById(`item-${item.id}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const handleAddItem = async (dayPlanId, data) => {
+    await addItem(dayPlanId, data);
+    setShowItemForm(null);
+  };
+
+  const handleSwapItem = async (itemId, swapData) => {
+    // Find which day plan this item belongs to
+    const dayPlan = trip.day_plans.find((dp) =>
+      dp.itinerary_items?.some((i) => i.id === itemId)
+    );
+    if (dayPlan) {
+      await updateItem(dayPlan.id, itemId, swapData);
+    }
+  };
+
+  const handleDragEnd = (result) => {
+    const { source, destination, draggableId } = result;
+    if (!destination) return;
+    if (source.droppableId === destination.droppableId && source.index === destination.index) return;
+
+    const sourceDayId = parseInt(source.droppableId);
+    const destDayId = parseInt(destination.droppableId);
+    const itemId = parseInt(draggableId);
+
+    if (sourceDayId === destDayId) {
+      // Reorder within same day
+      const dayPlan = trip.day_plans.find((dp) => dp.id === sourceDayId);
+      const newItems = [...dayPlan.itinerary_items];
+      const [moved] = newItems.splice(source.index, 1);
+      newItems.splice(destination.index, 0, moved);
+      reorderItems(sourceDayId, newItems.map((i) => i.id));
+    } else {
+      // Move between days
+      moveItemBetweenDays(sourceDayId, destDayId, itemId, destination.index);
+    }
+  };
+
+  return (
+    <div className="max-w-[1600px] mx-auto">
+      {/* Trip header */}
+      <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">
+        <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 transition-colors">
+          {t("tripDetail.back")}
+        </Link>
+        <div className="flex-1 min-w-0">
+          <h1 className="text-xl font-bold text-gray-900">{trip.name}</h1>
+          <p className="text-sm text-gray-500">
+            {trip.destination}
+            {trip.num_days && ` · ${trip.num_days} ${t("tripDetail.days")}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={() => setShowShareModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:text-gray-900 hover:border-gray-400 transition-colors"
+            title={t("tripDetail.share") || "Share"}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg>
+            <span className="hidden sm:inline">{lang === "pt-BR" ? "Compartilhar" : "Share"}</span>
+          </button>
+          <button
+            onClick={() => setShowPDFExport(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-coral-500 hover:bg-coral-600 text-white text-sm font-semibold transition-colors"
+            title="PDF"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/>
+            </svg>
+            <span className="hidden sm:inline">PDF</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Tab navigation */}
+      <div className="px-4 border-b border-gray-200">
+        <div className="flex gap-1 overflow-x-auto">
+          {["itinerary", "flights", "notes"].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                activeTab === tab
+                  ? "border-coral-500 text-coral-600"
+                  : "border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-500"
+              }`}
+            >
+              {t(`logistics.tabs.${tab}`)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Logistics panels (non-itinerary tabs) */}
+      {activeTab !== "itinerary" && (
+        <div className="max-w-3xl mx-auto p-4">
+          {activeTab === "flights" && <FlightPanel tripId={trip.id} flights={trip.flights || []} />}
+          {activeTab === "notes" && <NotePanel tripId={trip.id} notes={trip.trip_notes || []} />}
+        </div>
+      )}
+
+      {/* Main content: itinerary + map */}
+      {activeTab === "itinerary" && <div className="flex flex-col lg:flex-row">
+        {/* Left panel: itinerary */}
+        <div className="w-full lg:w-3/5 p-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 120px)" }}>
+          {/* Link input section */}
+          <div className="mb-4">
+            <LinkInput onSubmit={(url) => addLink(url)} />
+            {trip.links && trip.links.length > 0 && (
+              <LinkList links={trip.links} onDelete={(linkId) => removeLink(linkId)} />
+            )}
+          </div>
+
+          {/* Processing status feedback */}
+          <ProcessingStatus trip={trip} />
+
+          {/* Traveler profile card */}
+          {trip.profile_status === "suggested" && (
+            <TravelerProfileCard
+              profile={trip.traveler_profile}
+              numDays={trip.num_days}
+              onConfirm={(p) => updateProfile(p, "confirm")}
+              onReject={() => updateProfile({}, "reject")}
+            />
+          )}
+
+          {/* Vibe tag filter */}
+          <VibeTagFilter
+            activeFilters={vibeFilters}
+            availableTags={availableVibeTags}
+            onToggle={(tag) => {
+              if (tag === null) {
+                setVibeFilters([]);
+              } else {
+                setVibeFilters((prev) =>
+                  prev.includes(tag) ? prev.filter((f) => f !== tag) : [...prev, tag]
+                );
+              }
+            }}
+          />
+
+          {/* City tabs (only shown for multi-city trips) */}
+          <CityTabs
+            dayPlans={trip.day_plans || []}
+            activeCity={activeCity}
+            onCityChange={setActiveCity}
+          />
+
+          {/* Trip-level AI feedback */}
+          {trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0) && (
+            <div className="mb-4">
+              <FeedbackBox
+                alwaysOpen
+                loading={refining}
+                placeholder={t("feedback.placeholderTrip")}
+                onSubmit={(feedback) => refineItinerary(feedback, "trip")}
+              />
+            </div>
+          )}
+
+          {/* Day plans with drag-and-drop */}
+          <DragDropContext onDragEnd={handleDragEnd}>
+            {(activeCity
+              ? trip.day_plans?.filter((dp) => dp.city === activeCity)
+              : trip.day_plans
+            )?.map((dayPlan) => (
+              <DayPlanColumn
+                key={dayPlan.id}
+                dayPlan={dayPlan}
+                tripId={trip.id}
+                selectedItemId={selectedItemId}
+                hoveredItemId={hoveredItemId}
+                vibeFilters={vibeFilters}
+                travelSegments={travelTimes[dayPlan.id] || []}
+                hotelLodging={(trip.lodgings || []).find(l => l.latitude && l.longitude) || null}
+                onItemClick={handleItemClick}
+                onItemHover={setHoveredItemId}
+                onAddClick={() => setShowSuggestions(dayPlan.id)}
+                onDeleteItem={(itemId) => removeItem(dayPlan.id, itemId)}
+                onSwapItem={handleSwapItem}
+                onSelectDay={() =>
+                  setSelectedDayNumber(
+                    selectedDayNumber === dayPlan.day_number ? null : dayPlan.day_number
+                  )
+                }
+                isSelectedDay={selectedDayNumber === dayPlan.day_number}
+                onRefine={(dayPlanId, feedback) => refineItinerary(feedback, "day", dayPlanId)}
+                refineLoading={refining}
+                onRecalculate={async () => {
+                  try {
+                    const data = await recalculateSchedule(trip.id, dayPlan.id);
+                    setSchedulePreview({ dayPlanId: dayPlan.id, proposals: data.proposals || [] });
+                  } catch { /* ignore */ }
+                }}
+              />
+            ))}
+          </DragDropContext>
+        </div>
+
+        {/* Right panel: hotel input + map */}
+        <div className="w-full lg:w-2/5 h-[400px] lg:h-auto lg:sticky lg:top-0 flex flex-col" style={{ maxHeight: "calc(100vh - 60px)" }}>
+          <HotelMapInput
+            lodgings={trip.lodgings || []}
+            onLodgingCreated={addLodging}
+            onLodgingRemoved={removeLodging}
+          />
+          <div className="flex-1 min-h-0">
+            <TripMap
+              dayPlans={trip.day_plans || []}
+              selectedDayNumber={selectedDayNumber}
+              selectedItemId={selectedItemId}
+              hoveredItemId={hoveredItemId}
+              onMarkerClick={handleMarkerClick}
+              hotelLodgings={(trip.lodgings || []).filter(l => l.latitude && l.longitude)}
+            />
+          </div>
+        </div>
+      </div>}
+
+
+      {/* Item detail slide-out */}
+      {expandedItem && (
+        <ItemDetail
+          item={expandedItem}
+          tripId={trip.id}
+          onClose={() => {
+            setExpandedItem(null);
+            setSelectedItemId(null);
+          }}
+          onUpdate={async (data) => {
+            const updated = await updateItem(expandedItem.day_plan_id, expandedItem.id, data);
+            setExpandedItem(updated);
+          }}
+          onDelete={async () => {
+            await removeItem(expandedItem.day_plan_id, expandedItem.id);
+            setExpandedItem(null);
+            setSelectedItemId(null);
+          }}
+          onAddNearby={async (data) => {
+            await addItem(expandedItem.day_plan_id, data);
+          }}
+        />
+      )}
+
+      {/* Schedule recalculation preview */}
+      {schedulePreview && (
+        <SchedulePreview
+          proposals={schedulePreview.proposals}
+          onClose={() => setSchedulePreview(null)}
+          onApply={async (proposals) => {
+            for (const p of proposals) {
+              if (p.current_time_slot !== p.suggested_time_slot) {
+                await updateItem(schedulePreview.dayPlanId, p.item_id, {
+                  time_slot: p.suggested_time_slot,
+                });
+              }
+            }
+            setSchedulePreview(null);
+          }}
+        />
+      )}
+
+      {/* Smart suggestions modal */}
+      {showSuggestions && (
+        <PlaceSuggestions
+          tripId={trip.id}
+          dayPlanId={showSuggestions}
+          onAdd={async (data) => {
+            await addItem(showSuggestions, data);
+          }}
+          onManualAdd={() => {
+            const dayPlanId = showSuggestions;
+            setShowSuggestions(null);
+            setShowItemForm(dayPlanId);
+          }}
+          onClose={() => setShowSuggestions(null)}
+        />
+      )}
+
+      {/* Add item modal (manual) */}
+      {showItemForm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-sm w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-gray-900">{t("tripDetail.addItem")}</h2>
+              <button
+                onClick={() => setShowItemForm(null)}
+                className="text-gray-500 hover:text-gray-900"
+              >
+                ✕
+              </button>
+            </div>
+            <ItemForm
+              onSubmit={(data) => handleAddItem(showItemForm, data)}
+              onCancel={() => setShowItemForm(null)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* PDF Export modal */}
+      {showPDFExport && (
+        <TripPDFExport trip={trip} onClose={() => setShowPDFExport(false)} />
+      )}
+
+      {/* Share modal */}
+      {showShareModal && (
+        <TripShareModal trip={trip} onClose={() => setShowShareModal(false)} />
+      )}
+    </div>
+  );
+}

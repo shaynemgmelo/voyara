@@ -1,0 +1,43 @@
+Rails.application.routes.draw do
+  # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
+
+  # Reveal health status on /up that returns 200 if the app boots with no exceptions, otherwise 500.
+  # Can be used by load balancers and uptime monitors to verify that the app is live.
+  get "up" => "rails/health#show", as: :rails_health_check
+
+  namespace :api do
+    namespace :v1 do
+      get "health", to: "health#index"
+
+      resources :trips do
+        resources :flights, except: [:new, :edit]
+        resources :lodgings, except: [:new, :edit]
+        resources :transports, except: [:new, :edit]
+        resources :trip_notes, except: [:new, :edit]
+        resources :day_plans do
+          member do
+            get :travel_times
+            post :recalculate_schedule
+            get :smart_suggestions
+          end
+          resources :itinerary_items do
+            collection { patch :reorder }
+            member do
+              patch :move
+              get :nearby_suggestions
+              get :suggest_swap
+            end
+          end
+        end
+        resources :links, only: [:index, :show, :create, :update, :destroy]
+      end
+
+      # Pending links endpoint (for AI service polling)
+      get "links/pending", to: "links#pending"
+
+      post "google_places/search", to: "google_places#search"
+      get "google_places/details", to: "google_places#details"
+      get "google_places/autocomplete", to: "google_places#autocomplete"
+    end
+  end
+end

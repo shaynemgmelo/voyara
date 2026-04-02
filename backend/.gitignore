@@ -1,0 +1,12 @@
+.env
+
+# Rails
+/log/*
+/tmp/*
+/storage/*
+!/log/.keep
+!/tmp/.keep
+!/storage/.keep
+
+# macOS
+.DS_Store
