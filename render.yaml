@@ -48,14 +48,13 @@ services:
       - key: CORS_ORIGINS
         sync: false
 
+staticSites:
   # Frontend — React Static Site
   - type: web
     name: voyara
-    runtime: static
-    plan: free
-    rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: build
+    rootDir: frontend
     routes:
       - type: rewrite
         source: /*
