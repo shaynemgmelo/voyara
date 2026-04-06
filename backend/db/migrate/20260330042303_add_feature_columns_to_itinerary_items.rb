@@ -1,4 +1,4 @@
-class AddFeatureColumnsToItineraryItems < ActiveRecord::Migration[8.1]
+class AddFeatureColumnsToItineraryItems < ActiveRecord::Migration[8.0]
   def change
     add_column :itinerary_items, :personal_notes, :text
     add_column :itinerary_items, :vibe_tags, :jsonb, default: []

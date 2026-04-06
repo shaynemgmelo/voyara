@@ -1,4 +1,4 @@
-class CreateTrips < ActiveRecord::Migration[8.1]
+class CreateTrips < ActiveRecord::Migration[8.0]
   def change
     create_table :trips do |t|
       t.string :name

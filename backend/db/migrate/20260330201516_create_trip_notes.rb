@@ -1,4 +1,4 @@
-class CreateTripNotes < ActiveRecord::Migration[8.1]
+class CreateTripNotes < ActiveRecord::Migration[8.0]
   def change
     create_table :trip_notes do |t|
       t.string :title

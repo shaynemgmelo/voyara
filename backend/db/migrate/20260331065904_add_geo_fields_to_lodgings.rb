@@ -1,4 +1,4 @@
-class AddGeoFieldsToLodgings < ActiveRecord::Migration[8.1]
+class AddGeoFieldsToLodgings < ActiveRecord::Migration[8.0]
   def change
     add_column :lodgings, :latitude, :decimal, precision: 10, scale: 7
     add_column :lodgings, :longitude, :decimal, precision: 10, scale: 7

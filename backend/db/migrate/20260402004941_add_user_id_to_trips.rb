@@ -1,4 +1,4 @@
-class AddUserIdToTrips < ActiveRecord::Migration[8.1]
+class AddUserIdToTrips < ActiveRecord::Migration[8.0]
   def change
     # Supabase Auth user UUID — string format (not integer FK)
     add_column :trips, :user_id, :string

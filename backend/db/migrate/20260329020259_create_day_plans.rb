@@ -1,4 +1,4 @@
-class CreateDayPlans < ActiveRecord::Migration[8.1]
+class CreateDayPlans < ActiveRecord::Migration[8.0]
   def change
     create_table :day_plans do |t|
       t.references :trip, null: false, foreign_key: true

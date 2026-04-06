@@ -1,4 +1,4 @@
-class CreateTransports < ActiveRecord::Migration[8.1]
+class CreateTransports < ActiveRecord::Migration[8.0]
   def change
     create_table :transports do |t|
       t.string :transport_type

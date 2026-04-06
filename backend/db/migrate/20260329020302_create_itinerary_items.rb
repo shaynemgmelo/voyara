@@ -1,4 +1,4 @@
-class CreateItineraryItems < ActiveRecord::Migration[8.1]
+class CreateItineraryItems < ActiveRecord::Migration[8.0]
   def change
     create_table :itinerary_items do |t|
       t.references :day_plan, null: false, foreign_key: true

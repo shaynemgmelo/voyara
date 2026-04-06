@@ -1,4 +1,4 @@
-class CreateFlights < ActiveRecord::Migration[8.1]
+class CreateFlights < ActiveRecord::Migration[8.0]
   def change
     create_table :flights do |t|
       t.string :airline
