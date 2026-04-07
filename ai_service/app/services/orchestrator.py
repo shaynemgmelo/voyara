@@ -441,7 +441,7 @@ async def _validate_and_create_items(
             cities_in_plans.add(c)
     max_distance_km = 300 if len(cities_in_plans) > 1 else 150
 
-    semaphore = asyncio.Semaphore(5)
+    semaphore = asyncio.Semaphore(10)
 
     async def validate_one(place: dict) -> dict | None:
         name = place.get("name", "")
@@ -531,9 +531,12 @@ async def _validate_and_create_items(
 
     logger.info("[eco] Validated %d places, creating items", len(validated))
 
-    # Create items in Rails
-    created = 0
+    # Create items in Rails (parallel for speed)
     day_positions: dict[int, int] = {}
+    create_tasks = []
+
+    VALID_CATEGORIES = {"restaurant", "attraction", "hotel", "transport", "activity", "shopping", "cafe", "nightlife", "other"}
+    CATEGORY_MAP = {"bar": "nightlife", "park": "attraction", "museum": "attraction"}
 
     for place in validated:
         day_num = place.get("day", 1)
@@ -542,9 +545,6 @@ async def _validate_and_create_items(
         pos = day_positions.get(day_plan_id, 0)
         day_positions[day_plan_id] = pos + 1
 
-        # Map unknown categories to valid Rails categories
-        VALID_CATEGORIES = {"restaurant", "attraction", "hotel", "transport", "activity", "shopping", "cafe", "nightlife", "other"}
-        CATEGORY_MAP = {"bar": "nightlife", "park": "attraction", "museum": "attraction"}
         raw_cat = place.get("category", "attraction")
         category = CATEGORY_MAP.get(raw_cat, raw_cat) if raw_cat not in VALID_CATEGORIES else raw_cat
 
@@ -574,12 +574,25 @@ async def _validate_and_create_items(
             "source_url": source_url,
         }
         item_data = {k: v for k, v in item_data.items() if v is not None}
+        create_tasks.append((trip_id, day_plan_id, item_data, place.get("name")))
 
-        try:
-            await rails.create_itinerary_item(trip_id, day_plan_id, item_data)
-            created += 1
-        except Exception as e:
-            logger.warning("[eco] Failed to create %s: %s", place.get("name"), e)
+    # Run all creates concurrently (batches of 10 to avoid overwhelming Rails)
+    created = 0
+    for i in range(0, len(create_tasks), 10):
+        batch = create_tasks[i:i + 10]
+
+        async def _create_one(t_id, dp_id, data, name):
+            try:
+                await rails.create_itinerary_item(t_id, dp_id, data)
+                return True
+            except Exception as e:
+                logger.warning("[eco] Failed to create %s: %s", name, e)
+                return False
+
+        results = await asyncio.gather(
+            *[_create_one(t, d, data, n) for t, d, data, n in batch]
+        )
+        created += sum(1 for r in results if r)
 
     cost.log_summary()
     return {
@@ -1150,28 +1163,55 @@ RULES:
 
 
 async def _call_claude_for_itinerary(
-    prompt: str, cost: CostTracker
+    prompt: str, cost: CostTracker, expected_items: int = 0,
 ) -> list[dict] | None:
-    """Call Claude Haiku to generate the itinerary place list (Eco mode)."""
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    try:
-        response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=16000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        )
-        cost.record_usage(response.usage)
-        raw = response.content[0].text if response.content else "[]"
-    except Exception as e:
-        logger.error("[eco] Claude itinerary call failed: %s", e)
-        return None
+    """Call Claude Sonnet to generate the itinerary place list (Eco mode).
 
-    parsed = _parse_json_response(raw)
-    if isinstance(parsed, list):
-        return parsed
-    logger.error("[eco] Failed to parse Claude response as list. Raw (first 500 chars): %s", raw[:500])
+    Uses Sonnet for better instruction-following (fills all days, 4-5 items each).
+    If the first attempt returns too few items (<60% of expected), retries once
+    with an emphatic reminder.
+    """
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    for attempt in range(2):
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            if attempt == 1:
+                messages.append({"role": "assistant", "content": "["})
+                messages[0]["content"] += (
+                    "\n\nCRITICAL REMINDER: You MUST generate at least "
+                    f"{expected_items} places across ALL days. "
+                    "Every day needs 4-5 items. Do NOT cut short."
+                )
+
+            response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=16000,
+                    messages=messages,
+                )
+            )
+            cost.record_usage(response.usage)
+            raw = response.content[0].text if response.content else "[]"
+        except Exception as e:
+            logger.error("[eco] Claude itinerary call failed (attempt %d): %s", attempt + 1, e)
+            if attempt == 0:
+                continue
+            return None
+
+        parsed = _parse_json_response(raw)
+        if isinstance(parsed, list):
+            if expected_items > 0 and len(parsed) < expected_items * 0.6 and attempt == 0:
+                logger.warning(
+                    "[eco] Only %d items generated (expected %d), retrying...",
+                    len(parsed), expected_items,
+                )
+                continue
+            return parsed
+        logger.error("[eco] Failed to parse Claude response as list. Raw (first 500 chars): %s", raw[:500])
+        if attempt == 0:
+            continue
+
     return None
 
 
@@ -1494,12 +1534,13 @@ async def _build_itinerary_eco(
         combined_content, trip, day_plans, existing_items,
         source_urls, places_mentioned, day_plans_from_links,
     )
-    place_list = await _call_claude_for_itinerary(prompt, cost)
+    expected_items = len(day_plans) * 5
+    place_list = await _call_claude_for_itinerary(prompt, cost, expected_items=expected_items)
 
     if not place_list:
         return {"error": "Itinerary generation failed", "places_created": 0}
 
-    logger.info("[eco] Claude generated %d places", len(place_list))
+    logger.info("[eco] Claude generated %d places (expected %d)", len(place_list), expected_items)
 
     # Force-tag sources programmatically (Claude often ignores the instruction)
     place_list = _tag_sources_from_links(place_list, places_mentioned)
@@ -1732,7 +1773,7 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
 {"Original link content (for reference):" + chr(10) + combined_content[:4000] if combined_content else ""}"""
 
     # Call Claude
-    place_list = await _call_claude_for_itinerary(prompt, cost)
+    place_list = await _call_claude_for_itinerary(prompt, cost, expected_items=total_items_needed)
 
     if not place_list:
         return {"error": "Refine generation failed", "places_created": 0}
