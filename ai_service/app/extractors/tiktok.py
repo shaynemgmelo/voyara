@@ -38,7 +38,7 @@ class TikTokExtractor(BaseExtractor):
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "getcomments": True,
+            "socket_timeout": 15,
         }
 
         try:

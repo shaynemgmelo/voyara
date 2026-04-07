@@ -60,44 +60,23 @@ async def process_link(
 
 
 async def _extract_content(url: str) -> str:
-    """Extract text content from URL + transcribe audio if thin. No Claude cost."""
+    """Extract text content from URL. Timeout after 30s to avoid hanging."""
     content_text = ""
     for ext in _extractors:
         if ext.can_handle(url):
             try:
-                content = await ext.extract(url)
+                content = await asyncio.wait_for(ext.extract(url), timeout=30)
                 parts = [content.title or "", content.description or ""]
                 if content.captions:
                     parts.append(" ".join(content.captions[:50]))
                 if content.comments:
                     parts.append(" ".join(content.comments[:10]))
                 content_text = "\n".join(p for p in parts if p)
+            except asyncio.TimeoutError:
+                logger.warning("[extract] Extraction timed out for %s", url)
             except Exception as e:
                 logger.warning("[extract] Extraction failed: %s", e)
             break
-
-    # Transcribe audio if content is thin
-    if len(content_text) < 200 or content_text.count(",") < 3:
-        logger.info("[extract] Content too thin (%d chars), transcribing audio", len(content_text))
-        try:
-            yt = YouTubeExtractor()
-            audio_path = await yt.download_audio(url)
-            if audio_path:
-                from app.transcription.whisper_service import transcribe_audio
-                transcript = await transcribe_audio(audio_path)
-                if transcript:
-                    content_text += "\n\nTranscript:\n" + transcript
-                try:
-                    from pathlib import Path
-                    import shutil
-                    p = Path(audio_path)
-                    p.unlink(missing_ok=True)
-                    if p.parent.name.startswith("tmp"):
-                        shutil.rmtree(p.parent, ignore_errors=True)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.warning("[extract] Transcription failed: %s", e)
 
     return content_text
 
