@@ -16,27 +16,15 @@ class ApplicationController < ActionController::API
       token = request.headers["Authorization"]&.split("Bearer ")&.last
       return nil unless token.present?
 
-      jwt_secret = ENV["SUPABASE_JWT_SECRET"]
-      unless jwt_secret.present?
-        Rails.logger.warn("[auth] SUPABASE_JWT_SECRET not configured")
-        return nil
-      end
-
       begin
-        # Debug: log the token header algorithm
-        header = JSON.parse(Base64.urlsafe_decode64(token.split(".").first + "=="))
-        Rails.logger.info("[auth] Token header: alg=#{header['alg']}, typ=#{header['typ']}")
-        Rails.logger.info("[auth] JWT secret length: #{jwt_secret.length}, first 4: #{jwt_secret[0..3]}")
-
-        decoded = JWT.decode(
-          token,
-          jwt_secret,
-          true,
-          {
-            algorithms: [header["alg"] || "HS256"],
-            verify_expiration: true,
-          }
-        )
+        # Supabase uses ES256 (ECDSA P-256) for user access tokens.
+        # Fetch the JWKS public key to verify the signature.
+        jwk_set = self.class.supabase_jwks
+        decoded = JWT.decode(token, nil, true, {
+          algorithms: ["ES256"],
+          jwks: jwk_set,
+          verify_expiration: true,
+        })
         payload = decoded.first
         Rails.logger.info("[auth] Authenticated user: #{payload['sub']}")
         payload["sub"] # Supabase user UUID
@@ -46,7 +34,30 @@ class ApplicationController < ActionController::API
       rescue JWT::DecodeError => e
         Rails.logger.info("[auth] Invalid token: #{e.message}")
         nil
+      rescue => e
+        Rails.logger.error("[auth] Unexpected error: #{e.class} #{e.message}")
+        nil
       end
+    end
+  end
+
+  # Cache the Supabase JWKS keys (fetched once per process)
+  def self.supabase_jwks
+    @supabase_jwks ||= begin
+      supabase_url = ENV["SUPABASE_URL"]
+      unless supabase_url.present?
+        Rails.logger.warn("[auth] SUPABASE_URL not configured")
+        return { keys: [] }
+      end
+
+      uri = URI("#{supabase_url}/auth/v1/.well-known/jwks.json")
+      response = Net::HTTP.get(uri)
+      jwks_data = JSON.parse(response)
+      Rails.logger.info("[auth] Loaded #{jwks_data['keys']&.length} JWKS keys from Supabase")
+      jwks_data
+    rescue => e
+      Rails.logger.error("[auth] Failed to fetch JWKS: #{e.message}")
+      { "keys" => [] }
     end
   end
 
