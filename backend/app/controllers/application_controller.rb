@@ -28,7 +28,7 @@ class ApplicationController < ActionController::API
           jwt_secret,
           true,
           {
-            algorithm: "HS256",
+            algorithms: ["HS256"],
             verify_expiration: true,
           }
         )
