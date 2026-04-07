@@ -59,6 +59,8 @@ staticSites:
     envVars:
       - key: REACT_APP_API_URL
         sync: false
+      - key: REACT_APP_AI_SERVICE_URL
+        sync: false
       - key: REACT_APP_SUPABASE_URL
         value: https://ekodgupuhlytnikqgufb.supabase.co
       - key: REACT_APP_SUPABASE_ANON_KEY
