@@ -23,16 +23,22 @@ class ApplicationController < ActionController::API
       end
 
       begin
+        # Debug: log the token header algorithm
+        header = JSON.parse(Base64.urlsafe_decode64(token.split(".").first + "=="))
+        Rails.logger.info("[auth] Token header: alg=#{header['alg']}, typ=#{header['typ']}")
+        Rails.logger.info("[auth] JWT secret length: #{jwt_secret.length}, first 4: #{jwt_secret[0..3]}")
+
         decoded = JWT.decode(
           token,
           jwt_secret,
           true,
           {
-            algorithms: ["HS256"],
+            algorithms: [header["alg"] || "HS256"],
             verify_expiration: true,
           }
         )
         payload = decoded.first
+        Rails.logger.info("[auth] Authenticated user: #{payload['sub']}")
         payload["sub"] # Supabase user UUID
       rescue JWT::ExpiredSignature
         Rails.logger.info("[auth] Token expired")
