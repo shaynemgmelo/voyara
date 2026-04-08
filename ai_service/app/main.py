@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ai.itinerary AI Service",
+    title="Mapass AI Service",
     version="0.1.0",
     lifespan=lifespan,
 )

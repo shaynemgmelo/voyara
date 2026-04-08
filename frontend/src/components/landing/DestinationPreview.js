@@ -96,7 +96,7 @@ export default function DestinationPreview({ destination, onClose }) {
 
   const handleCreateTrip = () => {
     if (!user) {
-      sessionStorage.setItem("voyara_pending_destination", destination);
+      sessionStorage.setItem("mapass_pending_destination", destination);
       navigate("/login");
     } else {
       navigate("/dashboard?new=1");
@@ -147,8 +147,8 @@ export default function DestinationPreview({ destination, onClose }) {
         <div className="px-5 sm:px-6 pt-4 pb-2">
           <p className="text-sm text-gray-500">
             {pt
-              ? "Um preview do que o Voyara cria pra você. Imagine cada dia planejado assim:"
-              : "A preview of what Voyara creates for you. Imagine every day planned like this:"}
+              ? "Um preview do que o Mapass cria pra você. Imagine cada dia planejado assim:"
+              : "A preview of what Mapass creates for you. Imagine every day planned like this:"}
           </p>
         </div>
 

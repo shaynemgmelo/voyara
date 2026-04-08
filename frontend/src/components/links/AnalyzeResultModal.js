@@ -20,12 +20,12 @@ export default function AnalyzeResultModal({ data, onClose }) {
 
   // Show onboarding once per user (stored in localStorage)
   const shouldShowOnboarding = () => {
-    const seen = localStorage.getItem("voyara_onboarding_seen");
+    const seen = localStorage.getItem("mapass_onboarding_seen");
     return !seen;
   };
 
   const markOnboardingSeen = () => {
-    localStorage.setItem("voyara_onboarding_seen", "true");
+    localStorage.setItem("mapass_onboarding_seen", "true");
     setShowOnboarding(false);
   };
 
@@ -39,10 +39,10 @@ export default function AnalyzeResultModal({ data, onClose }) {
   const handleCreateItinerary = () => {
     if (!user) {
       // Save URLs in sessionStorage and redirect to login
-      sessionStorage.setItem("voyara_pending_urls", JSON.stringify(urls));
-      sessionStorage.setItem("voyara_pending_destination", destination || "");
+      sessionStorage.setItem("mapass_pending_urls", JSON.stringify(urls));
+      sessionStorage.setItem("mapass_pending_destination", destination || "");
       if (shouldShowOnboarding()) {
-        localStorage.setItem("voyara_onboarding_seen", "true");
+        localStorage.setItem("mapass_onboarding_seen", "true");
       }
       navigate("/login");
       return;

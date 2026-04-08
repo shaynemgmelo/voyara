@@ -130,7 +130,7 @@ export default function AuthPage() {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
             <Logo size={30} />
-            <span className="text-xl font-bold text-gray-900 tracking-tight">Voyara</span>
+            <span className="text-xl font-bold text-gray-900 tracking-tight">Mapass</span>
           </Link>
           <button
             onClick={toggle}

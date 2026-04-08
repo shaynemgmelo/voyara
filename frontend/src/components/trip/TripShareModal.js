@@ -62,12 +62,12 @@ export default function TripShareModal({ trip, onClose }) {
         `📍 ${totalPlaces} lugares incríveis em ${dayPlans.length} dias\n` +
         (message ? `\n💬 "${message}"\n` : "") +
         `\nVeja o roteiro completo aqui:\n${shareUrl}\n\n` +
-        `Feito com Voyara — voyara.app`
+        `Feito com Mapass — mapass.app`
       : `Hi!\n\nI'd like to share my travel itinerary for ${trip.destination || trip.name}.\n\n` +
         `📍 ${totalPlaces} amazing places in ${dayPlans.length} days\n` +
         (message ? `\n💬 "${message}"\n` : "") +
         `\nSee the full itinerary here:\n${shareUrl}\n\n` +
-        `Made with Voyara — voyara.app`;
+        `Made with Mapass — mapass.app`;
 
     const body = encodeURIComponent(bodyText);
     const mailto = `mailto:${emailList.join(",")}?subject=${subject}&body=${body}`;

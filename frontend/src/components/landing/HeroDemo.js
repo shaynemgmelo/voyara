@@ -86,7 +86,7 @@ export default function HeroDemo() {
           </div>
           <div className="flex-1 bg-white rounded-lg px-4 py-1 text-xs text-gray-400 text-center border border-gray-200 max-w-md mx-auto flex items-center justify-center gap-2">
             <span className="text-gray-300">🔒</span>
-            voyara.app
+            mapass.app
           </div>
         </div>
 
@@ -225,7 +225,7 @@ function DreamScene({ p, pt }) {
                 { icon: "💬", name: "WhatsApp", color: "bg-green-500" },
                 { icon: "✉️", name: "Messages", color: "bg-blue-500" },
                 { icon: "📋", name: pt ? "Copiar link" : "Copy link", color: "bg-gray-600", highlight: true },
-                { icon: "🔗", name: "Voyara", color: "bg-coral-500" },
+                { icon: "🔗", name: "Mapass", color: "bg-coral-500" },
               ].map((opt, i) => (
                 <div key={i} className="flex flex-col items-center gap-1.5">
                   <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-300 ${opt.color} ${
@@ -654,7 +654,7 @@ function DetailsScene({ p, pt }) {
 
           {/* Tip */}
           <div className="bg-emerald-50 rounded-xl p-2.5 border-l-3 border-emerald-400" style={{ opacity: p > 0.2 ? 1 : 0, transition: "opacity 0.3s" }}>
-            <div className="text-[9px] text-emerald-600 font-bold">💡 {pt ? "Dica da Voyara" : "Voyara tip"}</div>
+            <div className="text-[9px] text-emerald-600 font-bold">💡 {pt ? "Dica da Mapass" : "Mapass tip"}</div>
             <p className="text-[10px] text-emerald-800 leading-relaxed mt-0.5">
               {pt ? "Suba pela escadaria (não pelo funicular). A basílica é grátis, só o domo custa €7." : "Climb the stairs (not the funicular). Basilica is free, dome costs €7."}
             </p>

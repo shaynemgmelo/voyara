@@ -1,7 +1,7 @@
 services:
   # Backend — Rails API
   - type: web
-    name: voyara-api
+    name: mapass-api
     runtime: ruby
     rootDir: backend
     buildCommand: ./bin/render-build.sh
@@ -10,7 +10,7 @@ services:
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-          name: voyara-db
+          name: mapass-db
           property: connectionString
       - key: RAILS_MASTER_KEY
         sync: false
@@ -29,7 +29,7 @@ services:
 
   # AI Service — FastAPI
   - type: web
-    name: voyara-ai
+    name: mapass-ai
     runtime: python
     rootDir: ai_service
     buildCommand: pip install .
@@ -48,7 +48,7 @@ services:
 
 staticSites:
   # Frontend — React Static Site
-  - name: voyara
+  - name: mapass
     buildCommand: npm install && npm run build
     staticPublishPath: build
     rootDir: frontend
@@ -69,5 +69,5 @@ staticSites:
         sync: false
 
 databases:
-  - name: voyara-db
-    databaseName: voyara
+  - name: mapass-db
+    databaseName: mapass

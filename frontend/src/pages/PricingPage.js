@@ -26,7 +26,7 @@ function calcTimeLeft(targetDate) {
 }
 
 function getPromoEndDate() {
-  const key = "voyara_promo_end";
+  const key = "mapass_promo_end";
   let stored = localStorage.getItem(key);
   if (!stored) {
     const end = new Date();
@@ -74,7 +74,7 @@ export default function PricingPage() {
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
             <Logo size={30} />
-            <span className="text-xl font-bold text-white tracking-tight">Voyara</span>
+            <span className="text-xl font-bold text-white tracking-tight">Mapass</span>
           </Link>
           <div className="flex items-center gap-4">
             <Link to="/" className="text-sm text-gray-400 hover:text-white transition-colors hidden sm:block">
@@ -133,8 +133,8 @@ export default function PricingPage() {
           </h1>
           <p className="text-lg text-gray-400 max-w-2xl mx-auto leading-relaxed mb-3">
             {pt
-              ? "Você gasta R$ 5.000 a R$ 15.000 numa viagem. O Voyara garante que cada real seja bem aproveitado — por menos do que você paga num almoço."
-              : "You spend R$ 5,000 to R$ 15,000 on a trip. Voyara makes sure every cent is well spent — for less than you pay for lunch."}
+              ? "Você gasta R$ 5.000 a R$ 15.000 numa viagem. O Mapass garante que cada real seja bem aproveitado — por menos do que você paga num almoço."
+              : "You spend R$ 5,000 to R$ 15,000 on a trip. Mapass makes sure every cent is well spent — for less than you pay for lunch."}
           </p>
           <p className="text-sm text-gray-600">
             {pt
@@ -466,7 +466,7 @@ export default function PricingPage() {
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2.5">
             <Logo size={22} />
-            <span className="text-white text-sm font-bold">Voyara</span>
+            <span className="text-white text-sm font-bold">Mapass</span>
           </div>
           <div className="flex items-center gap-6 text-xs text-gray-600">
             <Link to="/" className="hover:text-gray-400 transition-colors">{t("nav.home")}</Link>

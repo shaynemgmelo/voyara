@@ -89,7 +89,7 @@ export default function FeaturesPage() {
           <div className="flex items-center gap-6">
             <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
               <Logo size={30} />
-              <span className="text-xl font-bold text-gray-900 tracking-tight">Voyara</span>
+              <span className="text-xl font-bold text-gray-900 tracking-tight">Mapass</span>
             </Link>
             <div className="hidden sm:flex items-center gap-1">
               <Link to="/" className="px-3 py-1.5 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors">
@@ -150,7 +150,7 @@ export default function FeaturesPage() {
         <div className="max-w-4xl mx-auto relative text-center">
           <div className="inline-flex items-center gap-2 bg-violet-50 text-violet-600 text-xs font-semibold px-4 py-1.5 rounded-full mb-6 border border-violet-100">
             <span className="w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
-            {pt ? "Veja tudo que a Voyara faz por você" : "See everything Voyara does for you"}
+            {pt ? "Veja tudo que a Mapass faz por você" : "See everything Mapass does for you"}
           </div>
 
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-gray-900 leading-[1.1] tracking-tight mb-6">
@@ -223,13 +223,13 @@ export default function FeaturesPage() {
                       <div className="w-2.5 h-2.5 rounded-full bg-yellow-400" />
                       <div className="w-2.5 h-2.5 rounded-full bg-green-400" />
                     </div>
-                    <div className="flex-1 bg-white rounded-md px-3 py-1 text-[10px] text-gray-400 text-center border border-gray-200">voyara.app</div>
+                    <div className="flex-1 bg-white rounded-md px-3 py-1 text-[10px] text-gray-400 text-center border border-gray-200">mapass.app</div>
                   </div>
 
                   <div className="p-5">
                     <div className="flex items-center gap-2 mb-5">
                       <Logo size={20} />
-                      <span className="text-sm font-bold text-gray-900">Voyara</span>
+                      <span className="text-sm font-bold text-gray-900">Mapass</span>
                     </div>
 
                     {/* Input with real URL */}
@@ -827,7 +827,7 @@ export default function FeaturesPage() {
 
                     {/* Tip */}
                     <div className="bg-emerald-50 rounded-xl p-3 border-l-3 border-emerald-400">
-                      <div className="text-[10px] text-emerald-600 font-bold mb-0.5">💡 {pt ? "Dica da Voyara" : "Voyara tip"}</div>
+                      <div className="text-[10px] text-emerald-600 font-bold mb-0.5">💡 {pt ? "Dica da Mapass" : "Mapass tip"}</div>
                       <p className="text-[11px] text-emerald-800 leading-relaxed">
                         {pt
                           ? "Suba pela escadaria (não pelo funicular) — a vista durante a subida já vale. Chegue antes das 10h pra foto sem multidão. A basílica é grátis, só o domo custa €7."
@@ -1157,7 +1157,7 @@ export default function FeaturesPage() {
             <div>
               <div className="flex items-center gap-2.5 mb-4">
                 <Logo size={28} />
-                <span className="text-white text-lg font-bold">Voyara</span>
+                <span className="text-white text-lg font-bold">Mapass</span>
               </div>
               <p className="text-sm text-gray-500 leading-relaxed">
                 {pt

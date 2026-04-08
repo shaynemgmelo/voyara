@@ -1,4 +1,4 @@
-"""WhatsApp conversation handler for Voyara.
+"""WhatsApp conversation handler for Mapass.
 
 Manages conversation state and processes messages through the itinerary pipeline.
 Flow:
@@ -193,7 +193,7 @@ async def _send_welcome(phone: str, wa: WhatsAppClient) -> None:
     """Send welcome message."""
     await wa.send_text(
         phone,
-        "👋 *Bem-vindo ao Voyara!*\n\n"
+        "👋 *Bem-vindo ao Mapass!*\n\n"
         "Sou seu planejador de viagem com IA. Posso criar roteiros completos "
         "a partir de vídeos do TikTok, Instagram e YouTube.\n\n"
         "🎯 *Como funciona:*\n"
@@ -434,7 +434,7 @@ async def _send_itinerary(
         phone,
         "✅ *Roteiro completo!*\n\n"
         "💡 Quer ver mais detalhes ou ajustar algo?\n"
-        "Acesse: voyara-n5q8.onrender.com\n\n"
+        "Acesse: mapass-n5q8.onrender.com\n\n"
         "Envie *oi* para criar outro roteiro!"
     )
 

@@ -61,7 +61,7 @@ export default function TripPDFExport({ trip, onClose }) {
         <html>
         <head>
           <meta charset="utf-8">
-          <title>${trip.name} — Voyara</title>
+          <title>${trip.name} — Mapass</title>
           <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 
@@ -549,7 +549,7 @@ export default function TripPDFExport({ trip, onClose }) {
                 </div>
               )}
             </div>
-            <div className="brand">VOYARA</div>
+            <div className="brand">MAPASS</div>
             <div className="date">
               {pt ? "Gerado em" : "Generated on"} {new Date().toLocaleDateString(pt ? "pt-BR" : "en-US", { year: "numeric", month: "long", day: "numeric" })}
             </div>
@@ -682,8 +682,8 @@ export default function TripPDFExport({ trip, onClose }) {
 
         {/* ═══ FOOTER ═══ */}
         <div className="footer">
-          <div className="brand-logo">Voyara</div>
-          <div>{pt ? "Planeje com inteligência" : "Plan intelligently"} · voyara.app</div>
+          <div className="brand-logo">Mapass</div>
+          <div>{pt ? "Planeje com inteligência" : "Plan intelligently"} · mapass.app</div>
         </div>
       </div>
     </div>

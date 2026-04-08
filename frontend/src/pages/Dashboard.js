@@ -15,7 +15,7 @@ export default function Dashboard() {
 
   // Persisted order: which trip ID is pinned as hero
   const [pinnedTripId, setPinnedTripId] = useState(() => {
-    const saved = localStorage.getItem("voyara_pinned_trip");
+    const saved = localStorage.getItem("mapass_pinned_trip");
     return saved ? Number(saved) : null;
   });
 
@@ -56,7 +56,7 @@ export default function Dashboard() {
 
   const handlePinTrip = (tripId) => {
     setPinnedTripId(tripId);
-    localStorage.setItem("voyara_pinned_trip", String(tripId));
+    localStorage.setItem("mapass_pinned_trip", String(tripId));
   };
 
   // Drag handlers for hero zone

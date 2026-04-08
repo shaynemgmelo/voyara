@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # WhatsApp Business API
     whatsapp_access_token: str = ""
     whatsapp_phone_number_id: str = ""
-    whatsapp_verify_token: str = "voyara-webhook-verify"
+    whatsapp_verify_token: str = "mapass-webhook-verify"
 
 
 settings = Settings()

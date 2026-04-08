@@ -44,7 +44,7 @@ export default function Header() {
           <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
             <Logo size={32} />
             <span className="text-xl font-bold text-gray-900 tracking-tight">
-              Voyara
+              Mapass
             </span>
           </Link>
 

@@ -1,6 +1,6 @@
 {
   "app": {
-    "name": "Voyara"
+    "name": "Mapass"
   },
   "landing": {
     "login": "Entrar",
@@ -60,7 +60,7 @@
     "ctaTitle": "Sua próxima viagem merece mais que uma planilha",
     "ctaSubtitle": "Cole um link e veja seu roteiro ganhar vida em segundos. Grátis, sem cadastro, sem limites.",
     "ctaButton": "Montar meu roteiro agora",
-    "footerCopy": "2024 Voyara. Planeje com inteligência.",
+    "footerCopy": "2024 Mapass. Planeje com inteligência.",
     "footerDashboard": "Minhas viagens",
     "demoSuggestions": "Sugestões inteligentes para Dia 1",
     "demoProfile": "Perfil do Viajante",

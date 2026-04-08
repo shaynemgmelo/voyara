@@ -33,7 +33,7 @@ processing_status: dict[int, dict] = {}
 
 @router.get("/health", response_model=HealthResponse)
 async def health():
-    return HealthResponse(status="ok", service="ai.itinerary AI Service")
+    return HealthResponse(status="ok", service="Mapass AI Service")
 
 
 @router.post("/analyze-url", response_model=AnalyzeUrlResponse)

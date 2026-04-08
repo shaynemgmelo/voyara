@@ -188,7 +188,7 @@ export default function LandingPage() {
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2.5">
               <Logo size={30} />
-              <span className="text-xl font-bold text-gray-900 tracking-tight">Voyara</span>
+              <span className="text-xl font-bold text-gray-900 tracking-tight">Mapass</span>
             </div>
             <div className="hidden sm:flex items-center gap-1">
               <Link to="/" className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-900">
@@ -373,7 +373,7 @@ export default function LandingPage() {
             {/* AFTER */}
             <div className="bg-gradient-to-br from-emerald-50 to-green-50 rounded-2xl p-8 border border-emerald-200 relative shadow-lg shadow-emerald-100/50">
               <div className="absolute -top-3 left-6 bg-emerald-100 text-emerald-700 text-xs font-bold px-3 py-1 rounded-full">
-                {pt ? "COM VOYARA" : "WITH VOYARA"}
+                {pt ? "COM MAPASS" : "WITH MAPASS"}
               </div>
               <div className="space-y-4 mt-2">
                 {(pt ? AFTER_ITEMS_PT : AFTER_ITEMS_EN).map((item, i) => (
@@ -680,7 +680,7 @@ export default function LandingPage() {
             <div>
               <div className="flex items-center gap-2.5 mb-4">
                 <Logo size={28} />
-                <span className="text-white text-lg font-bold">Voyara</span>
+                <span className="text-white text-lg font-bold">Mapass</span>
               </div>
               <p className="text-sm text-gray-500 leading-relaxed">
                 {pt
