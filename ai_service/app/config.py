@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     port: int = 8000
     service_api_key: str = ""
     log_level: str = "INFO"
+    # WhatsApp Business API
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_verify_token: str = "voyara-webhook-verify"
 
 
 settings = Settings()
