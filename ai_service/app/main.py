@@ -28,6 +28,11 @@ async def lifespan(app: FastAPI):
     global http_client
     http_client = httpx.AsyncClient(timeout=30.0)
     logger.info("AI service started on port %s", settings.port)
+    logger.info(
+        "WhatsApp config: token_len=%d phone_id='%s'",
+        len(settings.whatsapp_access_token),
+        settings.whatsapp_phone_number_id,
+    )
     yield
     await http_client.aclose()
     logger.info("AI service shut down")
