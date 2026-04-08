@@ -32,8 +32,21 @@ class WhatsAppClient:
     def _url(self) -> str:
         return f"{GRAPH_API}/{self.phone_id}/messages"
 
+    @staticmethod
+    def _normalize_br_number(phone: str) -> str:
+        """Fix Brazilian mobile numbers missing the 9 digit."""
+        # Brazilian numbers: 55 + 2-digit area + 8 or 9-digit number
+        # WhatsApp sometimes returns without the 9: 5581XXXXXXXX (12 digits)
+        # API needs the 9: 55819XXXXXXXX (13 digits)
+        if phone.startswith("55") and len(phone) == 12:
+            area = phone[2:4]
+            number = phone[4:]
+            phone = f"55{area}9{number}"
+        return phone
+
     async def send_text(self, to: str, text: str) -> dict:
         """Send a plain text message."""
+        to = self._normalize_br_number(to)
         body = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -49,6 +62,7 @@ class WhatsAppClient:
 
         buttons: [{"id": "btn_1", "title": "Option A"}, ...]
         """
+        to = self._normalize_br_number(to)
         body = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -72,6 +86,7 @@ class WhatsAppClient:
 
         sections: [{"title": "Section", "rows": [{"id": "1", "title": "Item"}]}]
         """
+        to = self._normalize_br_number(to)
         body = {
             "messaging_product": "whatsapp",
             "to": to,
