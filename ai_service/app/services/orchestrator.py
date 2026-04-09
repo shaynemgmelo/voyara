@@ -99,7 +99,8 @@ async def analyze_urls(urls: list[str]) -> dict:
             logger.warning("[analyze-urls] Failed to extract %s: %s", url, e)
 
     if not combined_content.strip():
-        return {"places": [], "destination": None, "summary": "No content could be extracted from the provided URLs."}
+        logger.warning("[analyze-urls] No content extracted from URLs: %s", urls)
+        return {"places": [], "destination": None, "summary": "Não foi possível extrair conteúdo dos links. Tente com outro link de vídeo."}
 
     # 2. Use Haiku to extract place names and destination
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -141,7 +142,25 @@ CRITICAL RULES — Read carefully:
 
     parsed = _parse_json_response(raw)
     if not isinstance(parsed, dict):
-        return {"places": [], "destination": None, "summary": "Could not parse analysis results."}
+        logger.error("[analyze-urls] Failed to parse Haiku response: %s", raw[:500])
+        # Retry once with stricter prompt
+        try:
+            response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=2000,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "{"},
+                    ],
+                )
+            )
+            raw2 = "{" + (response.content[0].text if response.content else "}")
+            parsed = _parse_json_response(raw2)
+        except Exception as e:
+            logger.error("[analyze-urls] Retry failed: %s", e)
+        if not isinstance(parsed, dict):
+            return {"places": [], "destination": None, "summary": "Could not parse analysis results."}
 
     destination = parsed.get("destination", "")
     place_names = parsed.get("places", [])
