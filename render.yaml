@@ -16,6 +16,8 @@ services:
         sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
+      - key: SUPABASE_URL
+        value: https://ekodgupuhlytnikqgufb.supabase.co
       - key: SERVICE_API_KEY
         sync: false
       - key: GOOGLE_PLACES_API_KEY
