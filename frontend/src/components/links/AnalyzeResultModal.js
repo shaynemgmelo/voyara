@@ -68,9 +68,10 @@ export default function AnalyzeResultModal({ data, onClose }) {
                   ? pt
                     ? `Encontramos ${places.length} lugar${places.length > 1 ? "es" : ""}`
                     : `We found ${places.length} place${places.length > 1 ? "s" : ""}`
-                  : pt ? "Analise concluida" : "Analysis complete"
-                }
-                {destination && (
+                  : pt
+                  ? "Pronto para criar seu roteiro"
+                  : "Ready to create your trip"}
+                {destination && places.length > 0 && (
                   <span className="text-gray-400 font-normal text-base"> {pt ? "em" : "in"} {destination}</span>
                 )}
               </h2>
@@ -83,7 +84,43 @@ export default function AnalyzeResultModal({ data, onClose }) {
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6">
           {/* Choice view — two option cards */}
-          {view === "choice" && (
+          {view === "choice" && places.length === 0 && (
+            <div className="text-center py-8">
+              <div className="text-5xl mb-4">🗺️</div>
+              <h3 className="font-semibold text-gray-900 mb-2 text-lg">
+                {pt
+                  ? "Não encontramos lugares específicos neste link"
+                  : "We couldn't find specific places in this link"}
+              </h3>
+              <p className="text-sm text-gray-500 max-w-md mx-auto mb-6">
+                {pt
+                  ? "Sem problemas — podemos criar um roteiro completo do zero baseado no destino ou em outro link."
+                  : "No problem — we can create a complete itinerary from scratch based on the destination or another link."}
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center max-w-sm mx-auto">
+                <button
+                  onClick={handleCreateItinerary}
+                  className="px-5 py-3 rounded-full bg-amber-500 hover:bg-amber-600 text-white font-semibold transition-colors"
+                >
+                  {destination
+                    ? pt
+                      ? `Criar roteiro para ${destination.split(",")[0]}`
+                      : `Create trip for ${destination.split(",")[0]}`
+                    : pt
+                    ? "Criar roteiro manualmente"
+                    : "Create trip manually"}
+                </button>
+                <button
+                  onClick={onClose}
+                  className="px-5 py-3 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold transition-colors"
+                >
+                  {pt ? "Tentar outro link" : "Try another link"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {view === "choice" && places.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Option 1: Learn more */}
               <button

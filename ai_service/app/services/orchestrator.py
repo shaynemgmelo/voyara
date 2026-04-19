@@ -85,86 +85,92 @@ async def analyze_urls(urls: list[str]) -> dict:
     """Analyze URLs and return place info without creating any database records.
 
     This is the lightweight "Learn more" endpoint — purely stateless.
+
+    Never raises and never returns the unhelpful "could not parse" error.
+    Degrades gracefully: if extraction or AI parsing fails, we still return
+    something useful the frontend can show.
     """
     import anthropic
 
     # 1. Extract content from all URLs
     combined_content = ""
+    extraction_errors: list[str] = []
     for url in urls[:5]:  # Max 5 URLs
         try:
             content = await _extract_content(url)
             if content:
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
+            else:
+                extraction_errors.append(url)
         except Exception as e:
             logger.warning("[analyze-urls] Failed to extract %s: %s", url, e)
+            extraction_errors.append(url)
 
     if not combined_content.strip():
-        logger.warning("[analyze-urls] No content extracted from URLs: %s", urls)
-        return {"places": [], "destination": None, "summary": "Não foi possível extrair conteúdo dos links. Tente com outro link de vídeo."}
+        logger.warning(
+            "[analyze-urls] No content extracted from URLs: %s (errors: %s)",
+            urls,
+            extraction_errors,
+        )
+        return {
+            "places": [],
+            "destination": None,
+            "summary": (
+                "Não conseguimos abrir esse link agora (vídeo privado, link "
+                "quebrado ou plataforma bloqueando). Tente outro link, ou "
+                "crie seu roteiro digitando o destino."
+            ),
+        }
 
     # 2. Use Haiku to extract place names and destination
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    prompt = f"""Analyze this content and identify the MAIN place(s) that are the FOCUS of the content. Also identify the destination city/region.
+    base_prompt = f"""Analyze this content and identify the MAIN place(s) that are the FOCUS of the content. Also identify the destination city/region.
 
 Content:
 {combined_content[:6000]}
 
-Return ONLY a JSON object:
-{{"destination": "City, Country", "places": ["Place Name 1", "Place Name 2", ...], "summary": "One sentence about what the content is about"}}
+Return ONLY a JSON object (no markdown, no explanation text, no code fences):
+{{"destination": "City, Country", "places": ["Place Name 1", "Place Name 2"], "summary": "One sentence about what the content is about"}}
 
-CRITICAL RULES — Read carefully:
-1. **IDENTIFY THE FOCUS**: What is this content ABOUT? What is the creator reviewing, recommending, or showcasing?
-   - If it's a review of ONE specific place (e.g., a restaurant review, a hotel tour, an attraction visit) → return ONLY that one place.
-   - If it's a "Top 10 restaurants in Paris" or a list/guide → return ALL the featured places.
-   - If the content mentions other places as COMPARISONS or REFERENCES (e.g., "it's like the Sphere in Vegas but in LA") → do NOT include the comparison. Only include the actual subject.
-2. **IF NO PLACE NAME IS VISIBLE**: Sometimes creators don't say the name. Look at:
-   - Comments from viewers (they often identify the place)
-   - Addresses, neighborhoods, or landmarks visible
-   - Description/caption of the post
-   - Hashtags or tags
-3. Only include real, specific place names (not generic descriptions)
-4. Maximum 10 places
-5. Summary should describe what the content is about in one sentence"""
+CRITICAL RULES:
+1. IDENTIFY THE FOCUS: What is this content ABOUT?
+   - Review of ONE place → return only that place.
+   - Top-N list/guide → return ALL featured places.
+   - Comparison references ("like X in Vegas") → do NOT include them.
+2. If no place names are visible, look at description/caption/comments/hashtags.
+3. Only real, specific place names (not generic descriptions).
+4. Maximum 10 places.
+5. Summary: one sentence.
 
-    try:
-        response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        )
-        raw = response.content[0].text if response.content else "{}"
-    except Exception as e:
-        logger.error("[analyze-urls] Haiku call failed: %s", e)
-        return {"places": [], "destination": None, "summary": "Analysis failed."}
+IMPORTANT: If you cannot find any place names, still return valid JSON with empty "places" array and a summary explaining what the content seems to be about."""
 
-    parsed = _parse_json_response(raw)
+    parsed = await _analyze_urls_with_retries(client, base_prompt)
+
     if not isinstance(parsed, dict):
-        logger.error("[analyze-urls] Failed to parse Haiku response: %s", raw[:500])
-        # Retry once with stricter prompt
-        try:
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=2000,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": "{"},
-                    ],
-                )
-            )
-            raw2 = "{" + (response.content[0].text if response.content else "}")
-            parsed = _parse_json_response(raw2)
-        except Exception as e:
-            logger.error("[analyze-urls] Retry failed: %s", e)
-        if not isinstance(parsed, dict):
-            return {"places": [], "destination": None, "summary": "Could not parse analysis results."}
+        # Final safety net — return a useful empty response.
+        # We'll still try to inform the user what happened.
+        logger.error("[analyze-urls] All parse attempts failed; returning graceful empty")
+        return {
+            "places": [],
+            "destination": None,
+            "summary": (
+                "Conseguimos ler o link, mas a IA teve dificuldade em identificar "
+                "lugares específicos agora. Tente de novo em alguns segundos, "
+                "ou digite o destino manualmente para criar um roteiro."
+            ),
+        }
 
-    destination = parsed.get("destination", "")
-    place_names = parsed.get("places", [])
-    summary = parsed.get("summary", "")
+    destination = parsed.get("destination") or ""
+    place_names = parsed.get("places") or []
+    summary = parsed.get("summary") or ""
+    # Guard against wrong types
+    if not isinstance(place_names, list):
+        place_names = []
+    if not isinstance(destination, str):
+        destination = str(destination) if destination else ""
+    if not isinstance(summary, str):
+        summary = str(summary) if summary else ""
 
     if not place_names:
         return {"places": [], "destination": destination, "summary": summary}
@@ -227,30 +233,183 @@ CRITICAL RULES — Read carefully:
 
 
 def _parse_json_response(raw: str) -> list | dict | None:
-    """Parse JSON from Claude response, handling code fences."""
+    """Parse JSON from Claude response. Tries multiple strategies so that
+    even messy responses (markdown, prefixes, trailing text, truncated) have
+    a good chance of being recoverable."""
+    if not raw or not raw.strip():
+        return None
+
     clean = raw.strip()
-    # Remove opening code fence (```json, ```, etc.)
-    if clean.startswith("```"):
-        first_newline = clean.find("\n")
-        if first_newline != -1:
-            clean = clean[first_newline + 1:]
-        else:
-            clean = clean[3:]
-    # Remove closing code fence
-    if clean.rstrip().endswith("```"):
-        clean = clean.rstrip()[:-3]
+
+    # Strategy 1: strip code fences, then direct parse
+    stripped = clean
+    if stripped.startswith("```"):
+        first_newline = stripped.find("\n")
+        stripped = stripped[first_newline + 1:] if first_newline != -1 else stripped[3:]
+    if stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[:-3]
     try:
-        return json.loads(clean.strip())
+        return json.loads(stripped.strip())
     except json.JSONDecodeError:
         pass
-    # Fallback: find JSON array or object in the raw response
-    for pattern in [r'\[.*\]', r'\{.*\}']:
-        match = re.search(pattern, raw, re.DOTALL)
+
+    # Strategy 2: greedy match widest object/array substring
+    for pattern in [r'\{[\s\S]*\}', r'\[[\s\S]*\]']:
+        match = re.search(pattern, clean)
         if match:
+            candidate = match.group()
             try:
-                return json.loads(match.group())
+                return json.loads(candidate)
             except json.JSONDecodeError:
+                # Strategy 3: fix common trailing garbage / truncation
+                # Try incrementally trimming trailing chars until it parses
+                for cut in range(len(candidate), max(len(candidate) - 200, 1), -1):
+                    try:
+                        return json.loads(candidate[:cut])
+                    except json.JSONDecodeError:
+                        continue
+
+    # Strategy 4: try balancing braces if truncated
+    last_open = clean.rfind("{")
+    last_close = clean.rfind("}")
+    if last_open != -1 and last_close > last_open:
+        try:
+            return json.loads(clean[last_open:last_close + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 5: LAST resort — salvage by closing open braces/brackets
+    salvage = _salvage_truncated_json(clean)
+    if salvage is not None:
+        return salvage
+
+    return None
+
+
+def _salvage_truncated_json(text: str) -> dict | list | None:
+    """If the JSON is truncated mid-value, try to balance and parse."""
+    # Find the first { or [
+    first_open = -1
+    for i, c in enumerate(text):
+        if c in "{[":
+            first_open = i
+            break
+    if first_open == -1:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    last_complete = -1
+
+    for i, c in enumerate(text[first_open:], first_open):
+        if escaped:
+            escaped = False
+            continue
+        if c == "\\":
+            escaped = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in "{[":
+            stack.append(c)
+        elif c in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                last_complete = i + 1
+                break
+
+    # If we found a complete top-level object/array, try that
+    if last_complete > 0:
+        try:
+            return json.loads(text[first_open:last_complete])
+        except json.JSONDecodeError:
+            pass
+
+    # Otherwise close dangling brackets with matching closers
+    partial = text[first_open:]
+    if in_string:
+        partial += '"'
+    # Close in reverse order
+    closers = {"{": "}", "[": "]"}
+    for opener in reversed(stack):
+        partial += closers[opener]
+    try:
+        return json.loads(partial)
+    except json.JSONDecodeError:
+        return None
+
+
+async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
+    """Call Haiku up to 3 times with increasingly strict prompts.
+
+    Attempt 1: standard prompt.
+    Attempt 2: prefill assistant with "{" to force JSON object start.
+    Attempt 3: terse follow-up "Return only the JSON, nothing else".
+    """
+    attempts = [
+        # (messages_builder, label)
+        (lambda: [{"role": "user", "content": base_prompt}], "primary"),
+        (
+            lambda: [
+                {"role": "user", "content": base_prompt},
+                {"role": "assistant", "content": "{"},
+            ],
+            "prefill",
+        ),
+        (
+            lambda: [
+                {
+                    "role": "user",
+                    "content": (
+                        base_prompt
+                        + "\n\nRESPOND WITH ONLY THE JSON OBJECT. NO OTHER TEXT."
+                    ),
+                },
+                {"role": "assistant", "content": '{"destination"'},
+            ],
+            "strict",
+        ),
+    ]
+
+    for build_messages, label in attempts:
+        try:
+            response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=2000,
+                    messages=build_messages(),
+                )
+            )
+            text = response.content[0].text if response.content else ""
+            if not text:
+                logger.warning("[analyze-urls] %s: empty response", label)
                 continue
+
+            # Reconstruct if we prefilled
+            if label == "prefill":
+                text = "{" + text
+            elif label == "strict":
+                text = '{"destination"' + text
+
+            parsed = _parse_json_response(text)
+            if isinstance(parsed, dict):
+                logger.info("[analyze-urls] Parsed on attempt: %s", label)
+                return parsed
+            else:
+                logger.warning(
+                    "[analyze-urls] %s: parse failed, raw=%s",
+                    label,
+                    text[:300],
+                )
+        except Exception as e:
+            logger.error("[analyze-urls] %s attempt failed: %s", label, e)
+            continue
+
     return None
 
 
