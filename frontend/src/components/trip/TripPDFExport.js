@@ -8,7 +8,7 @@ import { useLanguage } from "../../i18n/LanguageContext";
  */
 
 const DAY_COLORS = [
-  "#e8654a", "#8b5cf6", "#10b981", "#f59e0b", "#3b82f6",
+  "#F59E0B", "#8b5cf6", "#10b981", "#f59e0b", "#3b82f6",
   "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
   "#ef4444", "#06b6d4", "#a855f7", "#eab308",
 ];
@@ -80,7 +80,7 @@ export default function TripPDFExport({ trip, onClose }) {
               flex-direction: column;
               justify-content: center;
               align-items: center;
-              background: linear-gradient(135deg, #e8654a 0%, #c73e28 50%, #7c3aed 100%);
+              background: linear-gradient(135deg, #F59E0B 0%, #D97706 50%, #7c3aed 100%);
               color: white;
               text-align: center;
               padding: 60px;
@@ -414,7 +414,7 @@ export default function TripPDFExport({ trip, onClose }) {
             .footer .brand-logo {
               font-size: 18px;
               font-weight: 800;
-              color: #e8654a;
+              color: #F59E0B;
               margin-bottom: 4px;
             }
 
@@ -422,7 +422,7 @@ export default function TripPDFExport({ trip, onClose }) {
               position: fixed;
               bottom: 24px;
               right: 24px;
-              background: #e8654a;
+              background: #F59E0B;
               color: white;
               border: none;
               padding: 14px 28px;
