@@ -299,7 +299,7 @@ export default function TripDetail() {
                 onClick={() => switchView("timeline")}
                 className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
                   viewMode === "timeline"
-                    ? "bg-orange-500 text-white shadow"
+                    ? "bg-emerald-500 text-white shadow"
                     : "text-gray-600 hover:text-gray-900"
                 }`}
               >
@@ -309,7 +309,7 @@ export default function TripDetail() {
                 onClick={() => switchView("list")}
                 className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
                   viewMode === "list"
-                    ? "bg-orange-500 text-white shadow"
+                    ? "bg-emerald-500 text-white shadow"
                     : "text-gray-600 hover:text-gray-900"
                 }`}
               >

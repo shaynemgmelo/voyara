@@ -5,20 +5,30 @@ import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import "swiper/css";
 import "swiper/css/navigation";
 
+// Elfsight-inspired palette: sage / mint greens with warm accents
+const BRAND = {
+  primary: "#10B981", // emerald
+  primaryDark: "#059669",
+  primaryMuted: "#D1FAE5", // pale mint
+  cardBg: "#F0FDF4", // almost-white mint
+  ink: "#0F172A",
+  textMuted: "#64748B",
+};
+
 const CATEGORY_COLORS = {
-  restaurant: "#F59E0B",
-  restaurante: "#F59E0B",
-  food: "#F59E0B",
-  attraction: "#10B981",
-  atracao: "#10B981",
-  atração: "#10B981",
-  museum: "#8B5CF6",
-  bar: "#EF4444",
-  beach: "#06B6D4",
-  praia: "#06B6D4",
-  shopping: "#EC4899",
-  nature: "#10B981",
-  default: "#FF5722",
+  restaurant: "#D97706", // amber
+  restaurante: "#D97706",
+  food: "#D97706",
+  attraction: "#059669", // emerald
+  atracao: "#059669",
+  atração: "#059669",
+  museum: "#7C3AED", // violet
+  bar: "#DC2626", // red
+  beach: "#0891B2", // cyan
+  praia: "#0891B2",
+  shopping: "#DB2777", // pink
+  nature: "#059669",
+  default: BRAND.primary,
 };
 
 const CATEGORY_ICONS = {
@@ -66,9 +76,12 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
 
   return (
     <div
-      className={`flex flex-col bg-white rounded-2xl overflow-hidden shadow-sm border transition ${
-        isDragging ? "shadow-2xl border-orange-400 scale-[1.02]" : "border-gray-200"
+      className={`flex flex-col rounded-2xl overflow-hidden shadow-sm border transition ${
+        isDragging
+          ? "shadow-2xl scale-[1.02] border-emerald-400"
+          : "border-emerald-100 hover:border-emerald-200"
       }`}
+      style={{ backgroundColor: BRAND.cardBg }}
     >
       <div className="relative h-44 w-full overflow-hidden bg-gray-100">
         <img
@@ -179,14 +192,16 @@ export default function TripTimeline({ dayPlans, onReorder }) {
       <div className="flex items-baseline gap-4 mb-6 px-2">
         <div
           className="px-4 py-2 rounded-full text-white font-bold text-sm tracking-wide"
-          style={{ backgroundColor: "#FF5722" }}
+          style={{ backgroundColor: BRAND.primary }}
         >
           DIA {day.day_number}
         </div>
         {day.city && (
-          <h2 className="text-2xl font-bold text-gray-900">{day.city}</h2>
+          <h2 className="text-2xl font-bold" style={{ color: BRAND.ink }}>
+            {day.city}
+          </h2>
         )}
-        <span className="text-sm text-gray-500 ml-auto">
+        <span className="text-sm ml-auto" style={{ color: BRAND.textMuted }}>
           {items.length} {items.length === 1 ? "lugar" : "lugares"}
         </span>
       </div>
@@ -262,8 +277,18 @@ export default function TripTimeline({ dayPlans, onReorder }) {
       </DragDropContext>
 
       {/* Day timeline (dots + labels) */}
-      <div className="mt-8 relative">
+      <div className="mt-10 relative">
         <div className="absolute top-3 left-0 right-0 h-0.5 bg-gray-200" />
+        <div
+          className="absolute top-3 left-0 h-0.5 transition-all"
+          style={{
+            backgroundColor: BRAND.primary,
+            width:
+              daysWithItems.length > 1
+                ? `${(activeDayIdx / (daysWithItems.length - 1)) * 100}%`
+                : "0%",
+          }}
+        />
         <div className="flex justify-between relative">
           {daysWithItems.map((d, idx) => {
             const active = idx === activeDayIdx;
@@ -275,22 +300,29 @@ export default function TripTimeline({ dayPlans, onReorder }) {
                 className="flex flex-col items-center flex-1 group"
               >
                 <div
-                  className={`w-6 h-6 rounded-full border-4 transition-all z-10 ${
-                    active
-                      ? "bg-orange-500 border-orange-500 scale-110"
-                      : past
-                        ? "bg-orange-500 border-orange-500"
-                        : "bg-white border-gray-300 group-hover:border-orange-400"
-                  }`}
+                  className="w-6 h-6 rounded-full border-4 transition-all z-10"
+                  style={{
+                    backgroundColor:
+                      active || past ? BRAND.primary : "#FFFFFF",
+                    borderColor:
+                      active || past ? BRAND.primary : "#D1D5DB",
+                    transform: active ? "scale(1.15)" : "scale(1)",
+                    boxShadow: active
+                      ? "0 0 0 6px rgba(16, 185, 129, 0.15)"
+                      : "none",
+                  }}
                 />
                 <div
-                  className={`mt-2 text-xs font-semibold transition-colors ${
-                    active ? "text-orange-600" : "text-gray-500"
-                  }`}
+                  className="mt-2 text-xs font-semibold transition-colors"
+                  style={{
+                    color: active ? BRAND.primaryDark : BRAND.textMuted,
+                  }}
                 >
                   {d.city || `Dia ${d.day_number}`}
                 </div>
-                <div className="text-xs text-gray-400">Dia {d.day_number}</div>
+                <div className="text-xs" style={{ color: BRAND.textMuted }}>
+                  Dia {d.day_number}
+                </div>
               </button>
             );
           })}
