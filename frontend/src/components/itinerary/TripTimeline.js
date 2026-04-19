@@ -189,8 +189,11 @@ function ItemCard({
             <div
               {...dragHandleProps}
               onClick={(e) => e.stopPropagation()}
-              className="w-8 h-8 rounded-lg bg-black/60 hover:bg-black/80 backdrop-blur-sm flex items-center justify-center cursor-grab active:cursor-grabbing"
-              title="Arrastar"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              className="w-8 h-8 rounded-lg bg-black/70 hover:bg-emerald-600 backdrop-blur-sm flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
+              title="Arrastar para reordenar"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="9" cy="5" r="1" />
@@ -247,6 +250,7 @@ export default function TripTimeline({
   onSwapItem,
 }) {
   const [activeDayIdx, setActiveDayIdx] = useState(0);
+  const [isDraggingCard, setIsDraggingCard] = useState(false);
   const swiperRefs = useRef({});
 
   // Show ALL days (including empty ones). User asked for N days — show N.
@@ -261,7 +265,19 @@ export default function TripTimeline({
     );
   }
 
+  const handleDragStart = () => {
+    setIsDraggingCard(true);
+    // Disable Swiper grab during card drag
+    Object.values(swiperRefs.current).forEach((s) => {
+      if (s && !s.destroyed) s.allowTouchMove = false;
+    });
+  };
+
   const handleDragEnd = (result) => {
+    setIsDraggingCard(false);
+    Object.values(swiperRefs.current).forEach((s) => {
+      if (s && !s.destroyed) s.allowTouchMove = true;
+    });
     if (!result.destination) return;
     if (result.source.index === result.destination.index) return;
     if (onReorder) {
@@ -357,7 +373,7 @@ export default function TripTimeline({
         </div>
       ) : (
 
-      <DragDropContext onDragEnd={handleDragEnd}>
+      <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
         <Droppable
           droppableId={String(day.id)}
           direction="horizontal"
@@ -373,6 +389,8 @@ export default function TripTimeline({
                 modules={[Navigation, Mousewheel, FreeMode, Keyboard]}
                 slidesPerView="auto"
                 spaceBetween={16}
+                allowTouchMove={!isDraggingCard}
+                simulateTouch={!isDraggingCard}
                 freeMode={{
                   enabled: true,
                   momentum: true,
@@ -387,7 +405,7 @@ export default function TripTimeline({
                   releaseOnEdges: true,
                 }}
                 keyboard={{ enabled: true, onlyInViewport: true }}
-                grabCursor
+                grabCursor={!isDraggingCard}
                 navigation={{
                   prevEl: `.timeline-prev-${day.id}`,
                   nextEl: `.timeline-next-${day.id}`,

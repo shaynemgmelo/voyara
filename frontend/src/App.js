@@ -3,6 +3,7 @@ import { LanguageProvider } from "./i18n/LanguageContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import useSmoothScroll from "./hooks/useSmoothScroll";
 import Header from "./components/layout/Header";
+import Footer from "./components/layout/Footer";
 import LandingPage from "./pages/LandingPage";
 import Dashboard from "./pages/Dashboard";
 import TripCreate from "./pages/TripCreate";
@@ -34,10 +35,16 @@ function AppContent() {
   const isTerms = location.pathname === "/terms";
   const isShared = location.pathname.startsWith("/share/");
 
+  // Footer: show on every page except auth flows + pages that already have
+  // their own footer/CTA (landing, pricing, features, share, privacy, terms).
+  const showFooter = !isAuth;
+  const isStandalone =
+    isLanding || isPricing || isFeatures || isPrivacy || isTerms || isShared;
+
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    <div className="min-h-screen flex flex-col bg-gray-50 text-gray-900">
       {!isLanding && !isAuth && !isPricing && !isFeatures && !isPrivacy && !isTerms && !isShared && <Header />}
-      <main>
+      <main className="flex-1">
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<AuthPage />} />
@@ -51,6 +58,7 @@ function AppContent() {
           <Route path="/trips/:id" element={<RequireAuth><TripDetail /></RequireAuth>} />
         </Routes>
       </main>
+      {showFooter && !isStandalone && <Footer />}
     </div>
   );
 }

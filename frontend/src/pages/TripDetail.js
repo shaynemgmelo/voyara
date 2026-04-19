@@ -180,7 +180,7 @@ export default function TripDetail() {
   };
 
   return (
-    <div className="max-w-[1600px] mx-auto">
+    <div className="max-w-[1600px] mx-auto pb-16">
       {/* Trip header */}
       <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">
         <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 transition-colors">
