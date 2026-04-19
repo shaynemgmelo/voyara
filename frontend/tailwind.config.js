@@ -6,11 +6,19 @@ module.exports = {
       fontFamily: {
         sans: [
           "Inter",
+          "Montserrat",
           "ui-sans-serif",
           "system-ui",
           "-apple-system",
           "Segoe UI",
           "Helvetica Neue",
+          "sans-serif",
+        ],
+        display: [
+          "Space Grotesk",
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
           "sans-serif",
         ],
         serif: ["Playfair Display", "Georgia", "serif"],

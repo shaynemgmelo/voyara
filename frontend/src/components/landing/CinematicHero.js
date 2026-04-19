@@ -1,5 +1,6 @@
+import { useRef } from "react";
 import { Link } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, useScroll, useTransform } from "framer-motion";
 
 /**
  * Premium travel palette:
@@ -28,10 +29,25 @@ const CONSTELLATION = [
 ];
 
 export default function CinematicHero({ pt, ctaLink, user }) {
+  const sectionRef = useRef(null);
+  const { scrollYProgress } = useScroll({
+    target: sectionRef,
+    offset: ["start start", "end start"],
+  });
+  // Image drifts down slowly (parallax)
+  const imageY = useTransform(scrollYProgress, [0, 1], ["0%", "25%"]);
+  // Content drifts up & fades as hero exits
+  const contentY = useTransform(scrollYProgress, [0, 1], ["0%", "-20%"]);
+  const contentOpacity = useTransform(scrollYProgress, [0, 0.6], [1, 0]);
+  const contentScale = useTransform(scrollYProgress, [0, 1], [1, 0.95]);
+
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#0B2E4F]">
-      {/* Background image */}
-      <img
+    <section
+      ref={sectionRef}
+      className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#0B2E4F]"
+    >
+      {/* Background image with parallax */}
+      <motion.img
         src={HERO_IMG}
         onError={(e) => {
           if (e.currentTarget.src !== HERO_FALLBACK) {
@@ -39,8 +55,11 @@ export default function CinematicHero({ pt, ctaLink, user }) {
           }
         }}
         alt=""
-        className="absolute inset-0 w-full h-full object-cover object-center"
-        style={{ filter: "saturate(1.1) contrast(1.05)" }}
+        className="absolute inset-0 w-full h-[120%] object-cover object-center"
+        style={{
+          filter: "saturate(1.1) contrast(1.05)",
+          y: imageY,
+        }}
       />
 
       {/* Rich gradient overlay: navy bottom → warm amber top-right */}
@@ -94,8 +113,11 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         />
       ))}
 
-      {/* Content */}
-      <div className="relative z-10 max-w-4xl mx-auto px-6 text-center text-white">
+      {/* Content with scroll-out transform */}
+      <motion.div
+        className="relative z-10 max-w-4xl mx-auto px-6 text-center text-white"
+        style={{ y: contentY, opacity: contentOpacity, scale: contentScale }}
+      >
         {/* Logo pill */}
         <motion.div
           initial={{ opacity: 0, y: -16 }}
@@ -113,11 +135,10 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         <motion.h1
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.1 }}
-          className="font-serif text-5xl sm:text-6xl lg:text-7xl font-bold leading-[1.02] tracking-tight mb-6"
+          transition={{ duration: 0.9, delay: 0.1, ease: [0.21, 0.5, 0.3, 1] }}
+          className="font-display text-5xl sm:text-6xl lg:text-8xl font-bold leading-[0.98] tracking-[-0.035em] mb-6"
           style={{
             textShadow: "0 6px 40px rgba(0,0,0,0.55)",
-            fontFamily: "'Playfair Display', Georgia, serif",
           }}
         >
           {pt ? (
@@ -125,7 +146,6 @@ export default function CinematicHero({ pt, ctaLink, user }) {
               Pare de planejar.
               <br />
               <span
-                className="italic"
                 style={{
                   background:
                     "linear-gradient(135deg, #FBBF24 0%, #F59E0B 50%, #FCD34D 100%)",
@@ -142,7 +162,6 @@ export default function CinematicHero({ pt, ctaLink, user }) {
               Stop planning.
               <br />
               <span
-                className="italic"
                 style={{
                   background:
                     "linear-gradient(135deg, #FBBF24 0%, #F59E0B 50%, #FCD34D 100%)",
@@ -243,7 +262,7 @@ export default function CinematicHero({ pt, ctaLink, user }) {
             </span>
           </div>
         </motion.div>
-      </div>
+      </motion.div>
 
       {/* Scroll indicator */}
       <motion.div

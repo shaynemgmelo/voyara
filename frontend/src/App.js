@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { LanguageProvider } from "./i18n/LanguageContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
+import useSmoothScroll from "./hooks/useSmoothScroll";
 import Header from "./components/layout/Header";
 import LandingPage from "./pages/LandingPage";
 import Dashboard from "./pages/Dashboard";
@@ -23,6 +24,7 @@ function RequireAuth({ children }) {
 }
 
 function AppContent() {
+  useSmoothScroll();
   const location = useLocation();
   const isLanding = location.pathname === "/";
   const isAuth = location.pathname === "/login";

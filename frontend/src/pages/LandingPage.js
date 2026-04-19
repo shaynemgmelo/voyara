@@ -6,6 +6,7 @@ import Logo from "../components/layout/Logo";
 import HeroDemo from "../components/landing/HeroDemo";
 import ShowcaseMap from "../components/landing/ShowcaseMap";
 import CinematicHero from "../components/landing/CinematicHero";
+import { Reveal, RevealStagger } from "../components/Reveal";
 import LinkAnalyzer from "../components/links/LinkAnalyzer";
 import AnalyzeResultModal from "../components/links/AnalyzeResultModal";
 import DestinationPreview from "../components/landing/DestinationPreview";
@@ -280,7 +281,7 @@ export default function LandingPage() {
           LINK ANALYZER — primary action right after hero
       ═══════════════════════════════════════════ */}
       <section className="relative -mt-20 z-20 px-6">
-        <div className="max-w-3xl mx-auto bg-white rounded-3xl shadow-2xl border border-slate-200 p-6 sm:p-8" style={{ boxShadow: "0 30px 60px -15px rgba(11,46,79,0.35)" }}>
+        <Reveal direction="up" duration={0.9} className="max-w-3xl mx-auto bg-white rounded-3xl shadow-2xl border border-slate-200 p-6 sm:p-8" style={{ boxShadow: "0 30px 60px -15px rgba(11,46,79,0.35)" }}>
           <div className="text-center mb-5">
             <h2 className="text-xl sm:text-2xl font-bold text-slate-900 mb-1">
               {pt
@@ -302,7 +303,7 @@ export default function LandingPage() {
               {pt ? "Ver planos" : "View plans"} →
             </Link>
           </div>
-        </div>
+        </Reveal>
       </section>
 
       {/* ═══════════════════════════════════════════
@@ -310,17 +311,19 @@ export default function LandingPage() {
       ═══════════════════════════════════════════ */}
       <section className="pt-24 pb-20 px-6 bg-gradient-to-b from-white via-[#FAF8F3] to-white">
         <div className="max-w-6xl mx-auto">
-          <div className="text-center mb-12">
+          <Reveal className="text-center mb-12">
             <div className="inline-block text-xs font-bold tracking-[0.25em] text-amber-600 mb-3 uppercase">
               {pt ? "Seu roteiro, visual" : "Your trip, visual"}
             </div>
-            <h2 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 max-w-2xl mx-auto leading-[1.1]" style={{ fontFamily: "'Playfair Display', Georgia, serif" }}>
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 max-w-2xl mx-auto leading-[1.05] tracking-[-0.02em]">
               {pt
                 ? "Mapa, horários e fotos — tudo no lugar certo."
                 : "Maps, timing and photos — all in the right place."}
             </h2>
-          </div>
-          <HeroDemo />
+          </Reveal>
+          <Reveal direction="up" duration={0.9}>
+            <HeroDemo />
+          </Reveal>
         </div>
       </section>
 
@@ -370,8 +373,8 @@ export default function LandingPage() {
       ═══════════════════════════════════════════ */}
       <section className="py-20 px-6">
         <div className="max-w-5xl mx-auto">
-          <div className="text-center mb-14">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+          <Reveal className="text-center mb-14">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {pt
                 ? "Planejar viagem não deveria ser um trabalho"
                 : "Planning a trip shouldn't feel like a job"}
@@ -381,9 +384,9 @@ export default function LandingPage() {
                 ? "Você conhece essa sensação. Horas pesquisando, abas infinitas, planilhas... e no final ainda tem medo de estar perdendo o melhor."
                 : "You know the feeling. Hours researching, endless tabs, spreadsheets... and still worried you're missing the best parts."}
             </p>
-          </div>
+          </Reveal>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <RevealStagger className="grid grid-cols-1 md:grid-cols-2 gap-6" stagger={0.12}>
             {/* BEFORE */}
             <div className="bg-gray-50 rounded-2xl p-8 border border-gray-200 relative">
               <div className="absolute -top-3 left-6 bg-red-100 text-red-600 text-xs font-bold px-3 py-1 rounded-full">
@@ -419,7 +422,7 @@ export default function LandingPage() {
                 <span className="text-3xl">🤩</span>
               </div>
             </div>
-          </div>
+          </RevealStagger>
         </div>
       </section>
 
@@ -429,7 +432,7 @@ export default function LandingPage() {
       <section className="py-20 px-6 bg-gray-50">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-14">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {pt ? "Tão simples que parece mágica" : "So simple it feels like magic"}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
@@ -487,7 +490,7 @@ export default function LandingPage() {
       <section id="features" className="py-20 px-6">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-14">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {t("landing.featuresTitle")}
             </h2>
             <p className="text-gray-500 text-lg max-w-2xl mx-auto">
@@ -524,7 +527,7 @@ export default function LandingPage() {
       <section className="py-20 px-6 bg-gray-50">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {pt ? "Onde você quer acordar amanhã?" : "Where do you want to wake up tomorrow?"}
             </h2>
             <p className="text-gray-500 text-lg max-w-2xl mx-auto">
@@ -562,7 +565,7 @@ export default function LandingPage() {
       <section className="py-20 px-6">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {pt ? "Não acredite em nós. Acredite neles." : "Don't take our word for it."}
             </h2>
             <p className="text-gray-500 text-lg max-w-xl mx-auto">
@@ -602,7 +605,7 @@ export default function LandingPage() {
       <section className="py-20 px-6 bg-gray-50">
         <div className="max-w-3xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-4">
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 mb-4 leading-[1.05] tracking-[-0.02em]">
               {pt ? "Ainda tem dúvidas?" : "Still have questions?"}
             </h2>
           </div>
@@ -667,7 +670,7 @@ export default function LandingPage() {
                   <Logo size={24} />
                 </div>
               </div>
-              <h2 className="text-3xl sm:text-4xl font-extrabold text-white mb-4 leading-tight">
+              <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-bold text-white mb-4 leading-[1.05] tracking-[-0.02em]">
                 {pt
                   ? "Sua próxima viagem merece mais do que uma planilha"
                   : "Your next trip deserves more than a spreadsheet"}
