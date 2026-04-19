@@ -1530,26 +1530,56 @@ RULES:
 
 
 async def _call_claude_for_itinerary(
-    prompt: str, cost: CostTracker, expected_items: int = 0,
+    prompt: str,
+    cost: CostTracker,
+    expected_items: int = 0,
+    num_days: int = 0,
 ) -> list[dict] | None:
     """Call Claude Sonnet to generate the itinerary place list (Eco mode).
 
-    Uses Sonnet for better instruction-following (fills all days, 4-5 items each).
-    If the first attempt returns too few items (<60% of expected), retries once
-    with an emphatic reminder.
+    Retry once if either:
+      - fewer than 60% of expected_items returned, OR
+      - fewer than all days are covered (user asked for N days, got <N).
     """
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    last_result: list[dict] | None = None
 
     for attempt in range(2):
         try:
             messages = [{"role": "user", "content": prompt}]
             if attempt == 1:
-                messages.append({"role": "assistant", "content": "["})
-                messages[0]["content"] += (
-                    "\n\nCRITICAL REMINDER: You MUST generate at least "
-                    f"{expected_items} places across ALL days. "
-                    "Every day needs 4-5 items. Do NOT cut short."
+                # Build a precise reminder of what went wrong
+                issues: list[str] = []
+                if last_result is not None:
+                    covered = {
+                        p.get("day")
+                        for p in last_result
+                        if isinstance(p.get("day"), int)
+                    }
+                    missing_days = [
+                        d for d in range(1, num_days + 1) if d not in covered
+                    ]
+                    if missing_days:
+                        issues.append(
+                            f"Days {missing_days} had ZERO places — EVERY day from 1 to {num_days} MUST have 4-5 places."
+                        )
+                    if expected_items > 0 and len(last_result) < expected_items:
+                        issues.append(
+                            f"Only {len(last_result)} places returned but {expected_items} expected."
+                        )
+                reminder = "\n\nCRITICAL REMINDER: The user asked for a "
+                reminder += f"{num_days}-day trip. "
+                if issues:
+                    reminder += " ".join(issues) + " "
+                reminder += (
+                    f"Generate at least {expected_items} places total, "
+                    f"distributed across ALL {num_days} days (4-5 per day). "
+                    "Every single day from 1 to "
+                    f"{num_days} MUST appear. Do NOT cut short."
                 )
+                messages[0]["content"] += reminder
+                messages.append({"role": "assistant", "content": "["})
 
             response = await asyncio.to_thread(
                 lambda: client.messages.create(
@@ -1560,26 +1590,51 @@ async def _call_claude_for_itinerary(
             )
             cost.record_usage(response.usage)
             raw = response.content[0].text if response.content else "[]"
+            if attempt == 1:
+                raw = "[" + raw  # we prefilled
         except Exception as e:
-            logger.error("[eco] Claude itinerary call failed (attempt %d): %s", attempt + 1, e)
+            logger.error(
+                "[eco] Claude itinerary call failed (attempt %d): %s",
+                attempt + 1,
+                e,
+            )
             if attempt == 0:
                 continue
-            return None
+            return last_result
 
         parsed = _parse_json_response(raw)
-        if isinstance(parsed, list):
-            if expected_items > 0 and len(parsed) < expected_items * 0.6 and attempt == 0:
-                logger.warning(
-                    "[eco] Only %d items generated (expected %d), retrying...",
-                    len(parsed), expected_items,
-                )
+        if not isinstance(parsed, list):
+            logger.error(
+                "[eco] Failed to parse response as list. Raw (first 500): %s",
+                raw[:500],
+            )
+            if attempt == 0:
                 continue
+            return last_result
+
+        last_result = parsed
+
+        # Coverage check
+        covered = {p.get("day") for p in parsed if isinstance(p.get("day"), int)}
+        coverage_ok = num_days == 0 or len(covered) >= num_days
+        count_ok = expected_items == 0 or len(parsed) >= expected_items * 0.6
+
+        if coverage_ok and count_ok:
             return parsed
-        logger.error("[eco] Failed to parse Claude response as list. Raw (first 500 chars): %s", raw[:500])
+
         if attempt == 0:
+            logger.warning(
+                "[eco] Retry needed: %d items (expected ~%d), %d/%d days covered",
+                len(parsed),
+                expected_items,
+                len(covered),
+                num_days,
+            )
             continue
 
-    return None
+        return parsed
+
+    return last_result
 
 
 # ──────────────────────────────────────────────
@@ -1902,7 +1957,12 @@ async def _build_itinerary_eco(
         source_urls, places_mentioned, day_plans_from_links,
     )
     expected_items = len(day_plans) * 5
-    place_list = await _call_claude_for_itinerary(prompt, cost, expected_items=expected_items)
+    place_list = await _call_claude_for_itinerary(
+        prompt,
+        cost,
+        expected_items=expected_items,
+        num_days=len(day_plans),
+    )
 
     if not place_list:
         return {"error": "Itinerary generation failed", "places_created": 0}
@@ -2143,7 +2203,12 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
 {"Original link content (for reference):" + chr(10) + combined_content[:4000] if combined_content else ""}"""
 
     # Call Claude
-    place_list = await _call_claude_for_itinerary(prompt, cost, expected_items=total_items_needed)
+    place_list = await _call_claude_for_itinerary(
+        prompt,
+        cost,
+        expected_items=total_items_needed,
+        num_days=num_target_days,
+    )
 
     if not place_list:
         return {"error": "Refine generation failed", "places_created": 0}

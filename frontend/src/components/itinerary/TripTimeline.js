@@ -193,16 +193,14 @@ export default function TripTimeline({ dayPlans, onReorder }) {
   const [activeDayIdx, setActiveDayIdx] = useState(0);
   const swiperRefs = useRef({});
 
-  const daysWithItems = useMemo(
-    () => (dayPlans || []).filter((d) => (d.itinerary_items || []).length > 0),
-    [dayPlans]
-  );
+  // Show ALL days (including empty ones). User asked for N days — show N.
+  const allDays = useMemo(() => dayPlans || [], [dayPlans]);
 
-  if (!daysWithItems.length) {
+  if (!allDays.length) {
     return (
       <div className="text-center py-16 text-gray-500">
         <div className="text-5xl mb-3">📍</div>
-        <p>Nenhum lugar adicionado ainda.</p>
+        <p>Nenhum dia ainda.</p>
       </div>
     );
   }
@@ -219,7 +217,7 @@ export default function TripTimeline({ dayPlans, onReorder }) {
     }
   };
 
-  const day = daysWithItems[activeDayIdx];
+  const day = allDays[activeDayIdx];
   const items = day.itinerary_items || [];
 
   return (
@@ -227,7 +225,7 @@ export default function TripTimeline({ dayPlans, onReorder }) {
       {/* Day tabs — all days side-by-side, scrollable on overflow */}
       <div className="mb-4 -mx-2 overflow-x-auto scrollbar-thin">
         <div className="flex items-center gap-2 px-2 pb-2 min-w-max">
-          {daysWithItems.map((d, idx) => {
+          {allDays.map((d, idx) => {
             const isActive = idx === activeDayIdx;
             const count = (d.itinerary_items || []).length;
             return (
@@ -272,15 +270,37 @@ export default function TripTimeline({ dayPlans, onReorder }) {
       {/* Active day header (contextual) */}
       <div className="flex items-baseline justify-between mb-4 px-2">
         <div className="text-sm" style={{ color: BRAND.textMuted }}>
-          {items.length} {items.length === 1 ? "lugar" : "lugares"}{" "}
-          {day.city ? `em ${day.city}` : ""}
+          {items.length === 0
+            ? "Nenhum lugar ainda neste dia"
+            : `${items.length} ${items.length === 1 ? "lugar" : "lugares"}${
+                day.city ? ` em ${day.city}` : ""
+              }`}
         </div>
-        <div className="text-xs" style={{ color: BRAND.textMuted }}>
-          Arraste para navegar →
-        </div>
+        {items.length > 1 && (
+          <div className="text-xs" style={{ color: BRAND.textMuted }}>
+            Arraste para navegar →
+          </div>
+        )}
       </div>
 
-      {/* Cards carousel with drag & drop */}
+      {/* Empty state for day with no places */}
+      {items.length === 0 ? (
+        <div className="rounded-2xl border-2 border-dashed border-slate-200 bg-white/50 py-14 px-6 text-center">
+          <div className="text-4xl mb-3">🗺️</div>
+          <h3 className="text-lg font-semibold text-slate-900 mb-1">
+            Dia {day.day_number} ainda vazio
+          </h3>
+          <p className="text-sm text-slate-500 max-w-md mx-auto mb-5">
+            A IA ainda não preencheu este dia. Você pode colar um link de
+            viagem ou pedir pra IA sugerir lugares no chat do roteiro.
+          </p>
+          <div className="text-xs text-slate-400">
+            Dica: use o campo "O que mudaria no roteiro geral?" acima e peça
+            "Sugira lugares para o dia {day.day_number}".
+          </div>
+        </div>
+      ) : (
+
       <DragDropContext onDragEnd={handleDragEnd}>
         <Droppable
           droppableId={String(day.id)}
@@ -364,6 +384,7 @@ export default function TripTimeline({ dayPlans, onReorder }) {
           )}
         </Droppable>
       </DragDropContext>
+      )}
 
       {/* Subtle progress bar at bottom — minimal */}
       <div className="mt-8 px-2">
@@ -373,8 +394,8 @@ export default function TripTimeline({ dayPlans, onReorder }) {
             style={{
               backgroundColor: BRAND.primary,
               width:
-                daysWithItems.length > 1
-                  ? `${((activeDayIdx + 1) / daysWithItems.length) * 100}%`
+                allDays.length > 1
+                  ? `${((activeDayIdx + 1) / allDays.length) * 100}%`
                   : "100%",
             }}
           />
