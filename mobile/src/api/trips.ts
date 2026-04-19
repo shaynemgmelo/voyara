@@ -1,32 +1,44 @@
 import { api } from './client';
 
+/**
+ * Trip — matches Rails TripSerializer.
+ * Note: backend uses `name` (not `title`).
+ */
 export interface Trip {
   id: number;
-  title: string;
+  name: string;
   destination: string;
-  start_date: string | null;
-  end_date: string | null;
   num_days: number;
-  cover_photo_url?: string | null;
   status: string;
+  ai_mode?: string;
+  profile_status?: string | null;
+  traveler_profile?: any;
+  day_plans_count?: number;
+  items_count?: number;
+  links_count?: number;
   created_at: string;
   updated_at: string;
+  // Detailed view
+  day_plans?: DayPlan[];
+  links?: any[];
+  flights?: any[];
+  lodgings?: any[];
+  transports?: any[];
+  trip_notes?: any[];
 }
 
 export interface DayPlan {
   id: number;
-  trip_id: number;
   day_number: number;
-  date: string | null;
-  title?: string | null;
-  summary?: string | null;
-  items?: ItineraryItem[];
+  date?: string | null;
+  city?: string | null;
+  itinerary_items?: ItineraryItem[];
 }
 
 export interface ItineraryItem {
   id: number;
   day_plan_id: number;
-  title: string;
+  name: string;
   category?: string | null;
   start_time?: string | null;
   end_time?: string | null;
@@ -38,30 +50,29 @@ export interface ItineraryItem {
   photo_url?: string | null;
   rating?: number | null;
   website?: string | null;
-  order: number;
+  position?: number;
 }
 
 export const tripsApi = {
-  list: () => api.get<{ trips: Trip[] }>('/trips'),
+  // Rails returns array directly (not wrapped)
+  list: () => api.get<Trip[]>('/trips'),
 
-  get: (id: number) =>
-    api.get<{ trip: Trip; day_plans: DayPlan[] }>(`/trips/${id}`),
+  get: (id: number) => api.get<Trip>(`/trips/${id}`),
 
   create: (data: {
-    title: string;
+    name: string;
     destination: string;
     num_days: number;
-    start_date?: string;
-    end_date?: string;
-  }) => api.post<{ trip: Trip }>('/trips', { trip: data }),
+    ai_mode?: 'eco' | 'pro';
+  }) => api.post<Trip>('/trips', { trip: { ai_mode: 'eco', ...data } }),
 
   update: (id: number, data: Partial<Trip>) =>
-    api.patch<{ trip: Trip }>(`/trips/${id}`, { trip: data }),
+    api.patch<Trip>(`/trips/${id}`, { trip: data }),
 
-  delete: (id: number) => api.delete<{ success: boolean }>(`/trips/${id}`),
+  delete: (id: number) => api.delete<void>(`/trips/${id}`),
 
   generate: (id: number, profile?: any) =>
-    api.ai.post<{ ok: boolean }>('/generate-itinerary', {
+    api.ai.post<{ status: string; message: string }>('/generate-itinerary', {
       trip_id: id,
       profile,
     }),
@@ -73,4 +84,7 @@ export const tripsApi = {
       summary: string;
       error?: string;
     }>('/analyze-url', { urls }),
+
+  share: (id: number) =>
+    api.post<{ share_token: string; shared_at: string }>(`/trips/${id}/share`),
 };

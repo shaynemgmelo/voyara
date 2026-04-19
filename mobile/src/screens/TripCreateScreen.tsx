@@ -39,13 +39,13 @@ export function TripCreateScreen() {
 
     setSaving(true);
     try {
-      const finalTitle = title.trim() || `${destination} • ${numDays} dias`;
-      const res = await tripsApi.create({
-        title: finalTitle,
+      const finalName = title.trim() || `${destination} • ${numDays} dias`;
+      const trip = await tripsApi.create({
+        name: finalName,
         destination: destination.trim(),
         num_days: numDays,
       });
-      navigation.replace('TripDetail', { tripId: res.trip.id });
+      navigation.replace('TripDetail', { tripId: trip.id });
     } catch (e: any) {
       Alert.alert('Erro', e.message ?? 'Falha ao criar roteiro');
     } finally {

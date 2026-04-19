@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Clipboard,
   Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import {
   RouteProp,
   useRoute,
@@ -16,7 +16,7 @@ import { Screen } from '../components/Screen';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
 import { colors, typography, spacing, radius } from '../theme';
-import { api } from '../api/client';
+import { tripsApi } from '../api/trips';
 import { RootStackParamList } from '../navigation/types';
 
 type Rt = RouteProp<RootStackParamList, 'Share'>;
@@ -30,12 +30,10 @@ export function ShareScreen() {
 
   const loadShare = useCallback(async () => {
     try {
-      const res = await api.post<{ share_token: string }>(
-        `/trips/${params.tripId}/share`,
-      );
+      const res = await tripsApi.share(params.tripId);
       setShareUrl(`${BASE_SHARE_URL}/${res.share_token}`);
     } catch (e) {
-      setShareUrl(`${BASE_SHARE_URL}/trip-${params.tripId}`);
+      setShareUrl(null);
     } finally {
       setLoading(false);
     }
@@ -45,9 +43,9 @@ export function ShareScreen() {
     loadShare();
   }, [loadShare]);
 
-  const copy = () => {
+  const copy = async () => {
     if (!shareUrl) return;
-    Clipboard.setString(shareUrl);
+    await Clipboard.setStringAsync(shareUrl);
     Alert.alert('Copiado', 'O link foi copiado para a área de transferência.');
   };
 

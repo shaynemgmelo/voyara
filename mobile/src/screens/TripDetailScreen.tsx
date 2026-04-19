@@ -37,9 +37,9 @@ export function TripDetailScreen() {
 
   const load = useCallback(async () => {
     try {
-      const res = await tripsApi.get(params.tripId);
-      setTrip(res.trip);
-      setDayPlans(res.day_plans ?? []);
+      const trip = await tripsApi.get(params.tripId);
+      setTrip(trip);
+      setDayPlans(trip.day_plans ?? []);
     } finally {
       setLoading(false);
     }
@@ -81,8 +81,10 @@ export function TripDetailScreen() {
     );
   }
 
-  const hasItems = dayPlans.some((d) => (d.items?.length ?? 0) > 0);
-  const allItems = dayPlans.flatMap((d) => d.items ?? []);
+  const hasItems = dayPlans.some(
+    (d) => (d.itinerary_items?.length ?? 0) > 0,
+  );
+  const allItems = dayPlans.flatMap((d) => d.itinerary_items ?? []);
   const geocoded = allItems.filter(
     (i) => i.latitude != null && i.longitude != null,
   );
@@ -100,7 +102,7 @@ export function TripDetailScreen() {
     <Screen>
       <View style={styles.header}>
         <Text style={styles.title} numberOfLines={1}>
-          {trip.title}
+          {trip.name}
         </Text>
         <Text style={styles.meta}>
           {trip.destination} • {trip.num_days}{' '}
@@ -133,7 +135,7 @@ export function TripDetailScreen() {
                   latitude: item.latitude!,
                   longitude: item.longitude!,
                 }}
-                title={item.title}
+                title={item.name}
                 description={item.address ?? ''}
               />
             ))}
@@ -172,9 +174,9 @@ export function TripDetailScreen() {
             <View style={styles.daySection}>
               <Text style={styles.dayHeader}>
                 Dia {day.day_number}
-                {day.title ? ` • ${day.title}` : ''}
+                {day.city ? ` • ${day.city}` : ''}
               </Text>
-              {(day.items ?? []).map((it, idx) => (
+              {(day.itinerary_items ?? []).map((it) => (
                 <Pressable
                   key={it.id}
                   onPress={() =>
@@ -197,7 +199,7 @@ export function TripDetailScreen() {
                       </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.itemTitle} numberOfLines={1}>
-                          {it.title}
+                          {it.name}
                         </Text>
                         {it.address ? (
                           <Text style={styles.itemMeta} numberOfLines={1}>

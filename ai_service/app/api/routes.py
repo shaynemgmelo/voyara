@@ -122,6 +122,44 @@ async def get_status(link_id: int):
     )
 
 
+@router.post("/generate-itinerary", response_model=ProcessLinkResponse, status_code=202)
+async def handle_generate_itinerary(request: dict, background_tasks: BackgroundTasks):
+    """Mobile-friendly single-shot: analyze + build itinerary in background.
+
+    Body: {"trip_id": int, "profile": optional dict}
+    """
+    trip_id = request.get("trip_id")
+    if not trip_id:
+        return ProcessLinkResponse(status="error", message="trip_id required")
+
+    background_tasks.add_task(_generate_itinerary_background, int(trip_id))
+    return ProcessLinkResponse(
+        status="accepted",
+        message=f"Generating itinerary for trip {trip_id}",
+    )
+
+
+async def _generate_itinerary_background(trip_id: int):
+    try:
+        analyze_result = await analyze_trip(trip_id)
+        logger.info(
+            "[generate-itinerary] analyze trip=%d status=%s",
+            trip_id,
+            analyze_result.get("status", "unknown"),
+        )
+        # analyze_trip already triggers build when no link content is available,
+        # otherwise build is triggered after user confirms profile.
+        # For mobile flow we always build immediately.
+        build_result = await build_trip_itinerary(trip_id)
+        logger.info(
+            "[generate-itinerary] build trip=%d places=%d",
+            trip_id,
+            build_result.get("places_created", 0),
+        )
+    except Exception:
+        logger.exception("[generate-itinerary] Failed for trip %d", trip_id)
+
+
 @router.post("/analyze-trip/{trip_id}", response_model=ProcessLinkResponse, status_code=202)
 async def handle_analyze_trip(
     trip_id: int, background_tasks: BackgroundTasks

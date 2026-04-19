@@ -27,7 +27,7 @@ export function HomeScreen() {
   const load = useCallback(async () => {
     try {
       const res = await tripsApi.list();
-      setTrips(res.trips ?? []);
+      setTrips(Array.isArray(res) ? res : []);
     } catch (e) {
       // silently fail, show empty state
       setTrips([]);
@@ -123,15 +123,16 @@ export function HomeScreen() {
             style={styles.card}
           >
             <Text style={styles.tripTitle} numberOfLines={1}>
-              {item.title}
+              {item.name}
             </Text>
             <Text style={styles.tripMeta} numberOfLines={1}>
               {item.destination} • {item.num_days}{' '}
               {item.num_days === 1 ? 'dia' : 'dias'}
             </Text>
-            {item.start_date ? (
+            {item.items_count ? (
               <Text style={styles.tripDate}>
-                {formatDateRange(item.start_date, item.end_date)}
+                {item.items_count}{' '}
+                {item.items_count === 1 ? 'lugar' : 'lugares'}
               </Text>
             ) : null}
           </Card>
@@ -142,16 +143,6 @@ export function HomeScreen() {
   );
 }
 
-function formatDateRange(start: string, end: string | null | undefined) {
-  const s = new Date(start);
-  const opts: Intl.DateTimeFormatOptions = { day: '2-digit', month: 'short' };
-  if (!end) return s.toLocaleDateString('pt-BR', opts);
-  const e = new Date(end);
-  return `${s.toLocaleDateString('pt-BR', opts)} — ${e.toLocaleDateString(
-    'pt-BR',
-    opts,
-  )}`;
-}
 
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },

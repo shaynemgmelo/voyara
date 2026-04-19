@@ -65,12 +65,12 @@ export function LinkAnalysisScreen() {
   const handleCreateTrip = async () => {
     if (!result) return;
     try {
-      const res = await tripsApi.create({
-        title: `Roteiro em ${result.destination}`,
+      const trip = await tripsApi.create({
+        name: `Roteiro em ${result.destination}`,
         destination: result.destination,
         num_days: Math.max(1, Math.ceil(result.places.length / 3)),
       });
-      navigation.replace('TripDetail', { tripId: res.trip.id });
+      navigation.replace('TripDetail', { tripId: trip.id });
     } catch (e: any) {
       Alert.alert('Erro', e.message ?? 'Falha ao criar roteiro');
     }
