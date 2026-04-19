@@ -357,6 +357,31 @@ async def _assign_cities_to_days(
                 day_index += 1
 
 
+def _normalize_place_name(name: str) -> str:
+    """Normalize a place name for fuzzy matching — strip accents, lowercase,
+    remove punctuation and common noise words."""
+    import unicodedata
+
+    if not name:
+        return ""
+    # Strip accents
+    n = unicodedata.normalize("NFD", name)
+    n = "".join(c for c in n if unicodedata.category(c) != "Mn")
+    n = n.lower().strip()
+    # Remove punctuation and duplicate whitespace
+    n = re.sub(r"[^a-z0-9\s]", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    # Strip trailing city/state noise ("restaurante aprazivel rio de janeiro"
+    # still matches "restaurante aprazivel")
+    noise_words = {
+        "the", "a", "o", "os", "as", "de", "da", "do", "das", "dos",
+        "restaurant", "restaurante", "cafe", "bar", "museu", "museum",
+        "parque", "park",
+    }
+    tokens = [t for t in n.split() if t and t not in noise_words]
+    return " ".join(tokens) if tokens else n
+
+
 def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]) -> list[dict]:
     """Programmatically tag source='link' for items matching places_mentioned.
 
@@ -364,49 +389,170 @@ def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]
     by fuzzy-matching item names against the extracted places list.
     """
     if not places_mentioned:
+        # Still ensure every item has a source set
+        for item in place_list:
+            if item.get("source") not in ("link", "ai", "manual"):
+                item["source"] = "ai"
         return place_list
 
-    # Build normalized name set from places_mentioned
-    link_names = []
+    # Build normalized name variants from places_mentioned
+    link_variants: list[tuple[str, str]] = []  # (normalized, original)
     for p in places_mentioned:
-        name = p.get("name", "").strip()
+        name = (p.get("name") or "").strip()
         if name:
-            link_names.append(name.lower())
+            link_variants.append((_normalize_place_name(name), name))
 
-    if not link_names:
+    if not link_variants:
         return place_list
 
     tagged_link = 0
     for item in place_list:
-        item_name = (item.get("name") or "").strip().lower()
-        if not item_name:
+        raw = (item.get("name") or "").strip()
+        if not raw:
+            continue
+        item_norm = _normalize_place_name(raw)
+        if not item_norm:
             continue
 
-        # Exact match
-        if item_name in link_names:
-            item["source"] = "link"
-            tagged_link += 1
+        matched = False
+        # 1. Exact normalized match
+        for link_norm, orig in link_variants:
+            if item_norm == link_norm:
+                item["source"] = "link"
+                tagged_link += 1
+                matched = True
+                break
+
+        # 2. Containment (handles "Cristo Redentor Statue" ⊇ "Cristo Redentor")
+        if not matched:
+            for link_norm, _ in link_variants:
+                if not link_norm:
+                    continue
+                if (
+                    link_norm in item_norm
+                    or item_norm in link_norm
+                    or _token_overlap(link_norm, item_norm) >= 0.7
+                ):
+                    item["source"] = "link"
+                    tagged_link += 1
+                    matched = True
+                    break
+
+        # 3. Sequence similarity fallback (lowered threshold 0.75→0.68)
+        if not matched:
+            for link_norm, _ in link_variants:
+                ratio = SequenceMatcher(None, item_norm, link_norm).ratio()
+                if ratio >= 0.68:
+                    item["source"] = "link"
+                    tagged_link += 1
+                    matched = True
+                    break
+
+        if not matched and item.get("source") != "link":
+            item["source"] = "ai"
+
+    logger.info(
+        "[source-tag] Tagged %d/%d items as 'link' (from %d places_mentioned)",
+        tagged_link,
+        len(place_list),
+        len(link_variants),
+    )
+    return place_list
+
+
+def _token_overlap(a: str, b: str) -> float:
+    """Jaccard overlap on tokens — catches word-order differences.
+
+    'observatorio griffith' vs 'griffith observatorio' → 1.0
+    """
+    sa = set(a.split())
+    sb = set(b.split())
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _ensure_link_places_present(
+    place_list: list[dict],
+    places_mentioned: list[dict] | None,
+    day_plans: list[dict],
+) -> list[dict]:
+    """After Claude returns, verify every link-mentioned place is actually in
+    the itinerary. If any are missing, inject them on an appropriate day.
+
+    This is the safety net that enforces 'user's link places are mandatory'.
+    """
+    if not places_mentioned:
+        return place_list
+
+    # Names currently present in the itinerary (normalized)
+    present = {_normalize_place_name(it.get("name", "")) for it in place_list}
+
+    missing: list[dict] = []
+    for p in places_mentioned:
+        name = (p.get("name") or "").strip()
+        if not name:
             continue
+        norm = _normalize_place_name(name)
+        if norm and norm not in present and not any(
+            norm in pn or pn in norm for pn in present if pn
+        ):
+            missing.append(p)
 
-        # Fuzzy match — check if any link name is substantially similar
-        for link_name in link_names:
-            # Check containment (e.g., "In-N-Out Burger (Hollywood location)" contains "In-N-Out Burger")
-            if link_name in item_name or item_name in link_name:
-                item["source"] = "link"
-                tagged_link += 1
-                break
-            # Sequence similarity for close matches (e.g., "Griffith Observatory" vs "Griffith Park Observatory")
-            ratio = SequenceMatcher(None, item_name, link_name).ratio()
-            if ratio >= 0.75:
-                item["source"] = "link"
-                tagged_link += 1
-                break
-        else:
-            # No match found — ensure it's tagged as "ai"
-            if item.get("source") != "link":
-                item["source"] = "ai"
+    if not missing:
+        return place_list
 
-    logger.info("[source-tag] Tagged %d/%d items as 'link' (from %d places_mentioned)", tagged_link, len(place_list), len(link_names))
+    logger.warning(
+        "[link-coverage] Claude dropped %d link place(s): %s",
+        len(missing),
+        [p.get("name") for p in missing],
+    )
+
+    # Distribute missing places: prefer day suggested by extractor, else
+    # the least-packed day, capped at 6 items per day.
+    num_days = len(day_plans)
+    items_per_day: dict[int, int] = {}
+    for it in place_list:
+        d = it.get("day") or 1
+        items_per_day[d] = items_per_day.get(d, 0) + 1
+
+    for p in missing:
+        target_day = p.get("day") or None
+        if not target_day or target_day < 1 or target_day > num_days:
+            # Pick day with fewest items, avoiding days already full
+            target_day = min(
+                range(1, num_days + 1),
+                key=lambda d: items_per_day.get(d, 0),
+            )
+        if items_per_day.get(target_day, 0) >= 6:
+            # Day is full — pick any other under 6
+            candidates = [
+                d for d in range(1, num_days + 1)
+                if items_per_day.get(d, 0) < 6
+            ]
+            if candidates:
+                target_day = min(candidates, key=lambda d: items_per_day.get(d, 0))
+
+        injected = {
+            "day": target_day,
+            "name": p.get("name"),
+            "category": "attraction",
+            "time_slot": "15:00",
+            "duration_minutes": 90,
+            "description": "Lugar mencionado no seu link salvo.",
+            "notes": None,
+            "vibe_tags": [],
+            "alerts": [],
+            "alternative_group": None,
+            "source": "link",
+            "source_url": p.get("source_url"),
+        }
+        place_list.append(injected)
+        items_per_day[target_day] = items_per_day.get(target_day, 0) + 1
+        logger.info(
+            "[link-coverage] Injected '%s' on day %d", p.get("name"), target_day
+        )
+
     return place_list
 
 
@@ -684,27 +830,43 @@ Prioritize places matching their interests while still creating a complete trip 
             place_lines.append(f"- {p['name']} (from: {src})")
 
         num_link_places = len(places_mentioned)
-        # Cap link places at 60% of total slots to guarantee AI mix
-        max_link_places = max(3, int(total_slots * 0.6))
-        if num_link_places <= max_link_places:
-            # All link places fit — include all
+        # Link places are the BASE of the itinerary. Reserve at least 20%
+        # of slots for AI to add mandatory landmarks + fill gaps with
+        # geographically-sensible companions. Only cap link places if
+        # they would exceed 80% of total slots (huge vlog with 30+ places).
+        max_link_places = max(num_link_places, int(total_slots * 0.8))
+        if num_link_places <= int(total_slots * 0.8):
+            # Normal case: include ALL link places as the base
             places_section = f"""
-PLACES FROM USER'S LINKS (you MUST include ALL of these — tag as source: "link"):
+╔═══════════════════════════════════════════════════════════════╗
+║  BASE DO ROTEIRO — LUGARES DOS LINKS DO USUÁRIO               ║
+║  ESTES SÃO OBRIGATÓRIOS E DEVEM SER OS PRINCIPAIS DO ROTEIRO  ║
+╚═══════════════════════════════════════════════════════════════╝
 {chr(10).join(place_lines)}
 
-Include ALL {num_link_places} places above with "source": "link".
-Then ADD at least {total_slots - num_link_places} MORE places from your own expertise tagged "source": "ai".
-The itinerary MUST have a MIX of link places AND your own AI recommendations.
+REGRAS DURAS SOBRE ESTES LUGARES (NÃO NEGOCIÁVEIS):
+1. TODOS os {num_link_places} lugares acima DEVEM aparecer no roteiro final.
+2. TODOS devem ter "source": "link" — use exatamente o NOME da lista acima.
+3. ELES SÃO OS PROTAGONISTAS — distribua-os ao longo dos {num_days} dias de forma geograficamente coerente.
+4. O roteiro é CONSTRUÍDO AO REDOR deles. Os lugares adicionais da sua expertise (source: "ai") existem para:
+   a) Incluir marcos obrigatórios da cidade que o vídeo não mencionou (landmarks imperdíveis).
+   b) Agrupar por proximidade geográfica — se um lugar do link fica no bairro X, complete esse dia com outros lugares do bairro X.
+   c) Preencher refeições, viewpoints no pôr-do-sol, cafés — completar os dias sem deslocamento longo.
+5. Adicione cerca de {total_slots - num_link_places} lugares seus (source: "ai") para completar {total_slots} vagas totais.
+6. Se algum lugar do link não fizer sentido geográfico com os outros, agrupe-o com outros do mesmo bairro (mesmo que você precise adicionar companheiros AI).
 """
         else:
-            # Too many link places — pick the best ones
+            # Huge vlog — too many places to fit. Cap at 80% but still MANDATORY for chosen ones.
             places_section = f"""
-PLACES FROM USER'S LINKS (pick the BEST {max_link_places} from this list — tag as source: "link"):
+╔═══════════════════════════════════════════════════════════════╗
+║  BASE DO ROTEIRO — LUGARES DOS LINKS DO USUÁRIO               ║
+╚═══════════════════════════════════════════════════════════════╝
 {chr(10).join(place_lines)}
 
-The user saved {num_link_places} places from their links. Pick the {max_link_places} most iconic/interesting ones and tag them "source": "link".
-Then ADD at least {total_slots - max_link_places} MORE places from your own expertise tagged "source": "ai".
-The itinerary MUST have a MIX of link places AND your own AI recommendations. NEVER make an itinerary that is 100% from links or 100% AI.
+O usuário salvou {num_link_places} lugares dos links dele. O roteiro tem {total_slots} vagas ({num_days} dias × ~5 por dia).
+DEVE ESCOLHER os {max_link_places} lugares MAIS ICÔNICOS desta lista e incluí-los obrigatoriamente como "source": "link".
+Estes lugares são a BASE do roteiro — os adicionais "source": "ai" existem apenas para agrupar geograficamente e incluir landmarks imperdíveis que o vídeo não mencionou.
+Adicione cerca de {total_slots - max_link_places} lugares seus (source: "ai") para completar as vagas.
 """
 
     # Pre-planned day structure from links (e.g., "Day 1: X, Y, Z" from a travel video)
@@ -838,8 +1000,35 @@ The traveler expects a COMPLETE trip, not a copy of one video.
 {sources_info}
 {places_section}
 {preplanned_section}
-Include link places as instructed above AND add your own expert recommendations for {destination}. The itinerary MUST be a MIX of both link-sourced and AI-recommended places. NEVER return an itinerary that is 100% one source.
-If there is a PRE-PLANNED ITINERARY section above, that structure has ABSOLUTE PRIORITY — do NOT rearrange those days.
+╔═══════════════════════════════════════════════════════════════╗
+║  WORKFLOW FOR THIS ITINERARY (FOLLOW IN ORDER)               ║
+╚═══════════════════════════════════════════════════════════════╝
+STEP 1 — ANCHOR THE LINK PLACES
+   Look at the PLACES FROM USER'S LINKS section. Mentally locate each on a map of {destination}.
+   Group them by NEIGHBORHOOD / PROXIMITY. Places in the same area = same day.
+
+STEP 2 — ADD MANDATORY LANDMARKS
+   Check the DESTINATION LANDMARKS list above. Any iconic landmark from {destination} that is
+   NOT covered by the link places MUST be added. Place it on the day whose neighborhood matches.
+   Never skip a top-5 landmark of the city because the video didn't mention it.
+
+STEP 3 — FILL EACH DAY BY PROXIMITY (NOT BY THEME)
+   For each day, pick ONE neighborhood/zone. Group all morning/lunch/afternoon/evening activities
+   within that zone. Maximum walking/driving between consecutive stops: 20 minutes.
+   Do NOT build a "beach day" with beaches from 3 different parts of town. Do NOT build a "food day"
+   with restaurants scattered across the city.
+
+STEP 4 — COMPLETE THE DAY (10:00 → 20:00)
+   Each day needs 4-5 places filling morning → lunch → afternoon → late afternoon → dinner/viewpoint.
+   Sunset viewpoints ALWAYS near the end of the day.
+
+RULES RECAP:
+- Every link place MUST appear in the final itinerary (unless there are >80% of slots worth of them).
+- Every link place MUST have "source": "link".
+- Every AI-added place MUST have "source": "ai".
+- Same-day places MUST be in the same neighborhood/zone.
+- Top landmarks of {destination} MUST be present even if the video didn't mention them.
+- If there is a PRE-PLANNED ITINERARY section above, that structure has ABSOLUTE PRIORITY.
 
 Return ONLY a JSON array with {total_slots} places across ALL {num_days} days (about 5 per day). Each object:
 {{"day": <1-{num_days}>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "10:00", "duration_minutes": 90, "description": "What makes this special + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert text in Portuguese"], "alternative_group": null, "source": "link|ai"}}
@@ -1564,6 +1753,9 @@ async def _build_itinerary_eco(
     # Force-tag sources programmatically (Claude often ignores the instruction)
     place_list = _tag_sources_from_links(place_list, places_mentioned)
 
+    # Safety net: inject any link places Claude dropped
+    place_list = _ensure_link_places_present(place_list, places_mentioned, day_plans)
+
     place_list = _rebalance_days(place_list, len(day_plans))
 
     # Verification step: optimize timing, proximity grouping, and landmark injection
@@ -1801,6 +1993,7 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
 
     # Force-tag sources programmatically
     place_list = _tag_sources_from_links(place_list, places_mentioned)
+    place_list = _ensure_link_places_present(place_list, places_mentioned, target_days)
 
     # Delete existing items in target days
     deleted = 0

@@ -68,34 +68,28 @@ function placeholderImage(name, color) {
 }
 
 function sourceBadge(source, sourceUrl) {
-  if (!source || source === "manual") return null;
-  if (source === "link") {
-    const platform = (sourceUrl || "").toLowerCase();
-    let label = "Do link";
-    let emoji = "📎";
-    if (platform.includes("tiktok")) {
-      emoji = "🎵";
-      label = "Do TikTok";
-    } else if (platform.includes("instagram")) {
-      emoji = "📸";
-      label = "Do Instagram";
-    } else if (
-      platform.includes("youtube") ||
-      platform.includes("youtu.be")
-    ) {
-      emoji = "▶️";
-      label = "Do YouTube";
-    }
-    return { emoji, label, style: "bg-blue-100 text-blue-700" };
+  // Only show badge for places that came FROM the user's link.
+  // AI-suggested and manually-added places get NO badge (default state).
+  if (source !== "link") return null;
+
+  const platform = (sourceUrl || "").toLowerCase();
+  let label = "Do seu link";
+  let emoji = "📎";
+  if (platform.includes("tiktok")) {
+    emoji = "🎵";
+    label = "Do TikTok";
+  } else if (platform.includes("instagram")) {
+    emoji = "📸";
+    label = "Do Instagram";
+  } else if (platform.includes("youtube") || platform.includes("youtu.be")) {
+    emoji = "▶️";
+    label = "Do YouTube";
   }
-  if (source === "ai") {
-    return {
-      emoji: "✨",
-      label: "Sugerido pela IA",
-      style: "bg-violet-100 text-violet-700",
-    };
-  }
-  return null;
+  return {
+    emoji,
+    label,
+    style: "bg-white/95 text-slate-900 ring-1 ring-slate-900/10",
+  };
 }
 
 function ItemCard({ item, dragHandleProps, isDragging }) {

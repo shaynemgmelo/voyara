@@ -31,29 +31,21 @@ function sourceBadge(
   source: ItineraryItem['source'],
   sourceUrl?: string | null,
 ) {
-  if (!source || source === 'manual') return null;
+  // Only show badge for places that came from the user's link.
+  if (source !== 'link') return null;
 
   let emoji = '📎';
-  let label = 'Do link';
-  let tint = '#3B82F6';
-  const bg = 'rgba(59, 130, 246, 0.15)';
-
-  if (source === 'ai') {
-    emoji = '✨';
-    label = 'IA';
-    tint = '#8B5CF6';
-  } else if (source === 'link') {
-    const u = (sourceUrl || '').toLowerCase();
-    if (u.includes('tiktok')) {
-      emoji = '🎵';
-      label = 'TikTok';
-    } else if (u.includes('instagram')) {
-      emoji = '📸';
-      label = 'Instagram';
-    } else if (u.includes('youtube') || u.includes('youtu.be')) {
-      emoji = '▶️';
-      label = 'YouTube';
-    }
+  let label = 'Link';
+  const u = (sourceUrl || '').toLowerCase();
+  if (u.includes('tiktok')) {
+    emoji = '🎵';
+    label = 'TikTok';
+  } else if (u.includes('instagram')) {
+    emoji = '📸';
+    label = 'Instagram';
+  } else if (u.includes('youtube') || u.includes('youtu.be')) {
+    emoji = '▶️';
+    label = 'YouTube';
   }
 
   return (
@@ -64,13 +56,12 @@ function sourceBadge(
         paddingHorizontal: 8,
         paddingVertical: 3,
         borderRadius: 999,
-        backgroundColor:
-          source === 'ai' ? 'rgba(139, 92, 246, 0.15)' : bg,
+        backgroundColor: 'rgba(59, 130, 246, 0.15)',
         marginLeft: 8,
       }}
     >
       <Text style={{ fontSize: 10, marginRight: 3 }}>{emoji}</Text>
-      <Text style={{ fontSize: 10, fontWeight: '700', color: tint }}>
+      <Text style={{ fontSize: 10, fontWeight: '700', color: '#2563EB' }}>
         {label}
       </Text>
     </View>
