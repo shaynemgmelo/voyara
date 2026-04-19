@@ -1,6 +1,6 @@
 class Api::V1::TripsController < ApplicationController
-  before_action :authenticate_user!
-  before_action :set_trip, only: [:show, :update, :destroy]
+  before_action :authenticate_user!, except: [:shared]
+  before_action :set_trip, only: [:show, :update, :destroy, :share, :unshare]
 
   def index
     trips = user_trips
@@ -35,6 +35,25 @@ class Api::V1::TripsController < ApplicationController
   def destroy
     @trip.destroy
     head :no_content
+  end
+
+  def share
+    if @trip.share_token.blank?
+      @trip.update!(share_token: SecureRandom.urlsafe_base64(16), shared_at: Time.current)
+    end
+    render json: { share_token: @trip.share_token, shared_at: @trip.shared_at }
+  end
+
+  def unshare
+    @trip.update!(share_token: nil, shared_at: nil)
+    head :no_content
+  end
+
+  def shared
+    trip = Trip.find_by(share_token: params[:token])
+    return render(json: { error: "not_found" }, status: :not_found) unless trip
+
+    render json: TripSerializer.new(trip, include_details: true).as_json
   end
 
   private

@@ -13,7 +13,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Screen } from '../components/Screen';
 import { Button } from '../components/Button';
 import { colors, typography, spacing, radius } from '../theme';
-import { purchasePackage, PLAN_IDS } from '../api/purchases';
+import { purchasePackage, restorePurchases, PLAN_IDS } from '../api/purchases';
 import { RootStackParamList } from '../navigation/types';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Paywall'>;
@@ -55,6 +55,15 @@ export function PaywallScreen() {
       Alert.alert('Erro', e.message ?? 'Falha na compra');
     } finally {
       setPurchasing(false);
+    }
+  };
+
+  const handleRestore = async () => {
+    try {
+      await restorePurchases();
+      Alert.alert('Compras restauradas', 'Se você já tem uma assinatura ativa, ela foi ativada.');
+    } catch (e: any) {
+      Alert.alert('Erro', e.message ?? 'Falha ao restaurar compras');
     }
   };
 
@@ -111,6 +120,14 @@ export function PaywallScreen() {
           loading={purchasing}
           onPress={handlePurchase}
           style={{ marginTop: spacing.xl }}
+        />
+        <Button
+          label="Restaurar compras"
+          variant="ghost"
+          size="md"
+          fullWidth
+          onPress={handleRestore}
+          style={{ marginTop: spacing.sm }}
         />
 
         <View style={styles.footer}>

@@ -64,3 +64,19 @@ class AnalyzeUrlResponse(BaseModel):
     destination: str | None = None
     summary: str | None = None
     error: str | None = None
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    trip_id: int | None = None
+    message: str
+    history: list[ChatMessage] = []
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    error: str | None = None

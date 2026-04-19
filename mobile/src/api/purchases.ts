@@ -1,12 +1,23 @@
 /**
- * Purchase module — stub for RevenueCat integration.
+ * RevenueCat integration for Mapass subscriptions.
  *
- * To enable real IAP:
- *   1. `npm install react-native-purchases`
- *   2. Create products in App Store Connect matching PLAN_IDS values
- *   3. Get RevenueCat API key and set REVENUECAT_IOS_KEY in app.config
- *   4. Replace stub implementation below with real Purchases SDK calls
+ * Before this works in production:
+ *   1. Create products in App Store Connect with these identifiers:
+ *      - mapass_pro_monthly
+ *      - mapass_pro_annual
+ *   2. Submit IAPs for Apple approval (~24-48h)
+ *   3. Create RevenueCat project, connect to App Store Connect
+ *   4. Create Entitlement "pro" with the two products
+ *   5. Set EXPO_PUBLIC_REVENUECAT_IOS_KEY in .env from RevenueCat dashboard
  */
+
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+import Purchases, {
+  CustomerInfo,
+  PurchasesOffering,
+  PurchasesPackage,
+} from 'react-native-purchases';
 
 export const PLAN_IDS = {
   monthly: 'mapass_pro_monthly',
@@ -15,30 +26,90 @@ export const PLAN_IDS = {
 
 export type PlanId = keyof typeof PLAN_IDS;
 
-export async function configurePurchases(userId: string | null): Promise<void> {
-  // TODO: Purchases.configure({ apiKey: REVENUECAT_IOS_KEY, appUserID: userId });
-  return;
-}
+export const PRO_ENTITLEMENT = 'pro';
 
-export async function getOfferings(): Promise<any | null> {
-  // TODO: return Purchases.getOfferings();
-  return null;
-}
+let configured = false;
 
-export async function purchasePackage(planId: PlanId): Promise<void> {
-  // TODO: real purchase via Purchases.purchasePackage
-  // For now, block so dev builds don't silently "succeed":
-  throw new Error(
-    'Compras ainda não configuradas. Instale react-native-purchases e configure a RevenueCat.',
+function getApiKey(): string | undefined {
+  if (Platform.OS === 'ios') {
+    return (
+      Constants.expoConfig?.extra?.revenueCatIosKey ??
+      process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY
+    );
+  }
+  return (
+    Constants.expoConfig?.extra?.revenueCatAndroidKey ??
+    process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_KEY
   );
 }
 
-export async function restorePurchases(): Promise<void> {
-  // TODO: Purchases.restorePurchases();
-  return;
+export async function configurePurchases(userId: string | null): Promise<void> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.warn('[purchases] No RevenueCat API key, skipping configure');
+    return;
+  }
+  if (configured) {
+    if (userId) await Purchases.logIn(userId);
+    return;
+  }
+  Purchases.configure({ apiKey, appUserID: userId ?? undefined });
+  configured = true;
+}
+
+export async function getOfferings(): Promise<PurchasesOffering | null> {
+  if (!configured) return null;
+  const offerings = await Purchases.getOfferings();
+  return offerings.current;
+}
+
+async function packageFor(planId: PlanId): Promise<PurchasesPackage | null> {
+  const current = await getOfferings();
+  if (!current) return null;
+  const target = PLAN_IDS[planId];
+  return (
+    current.availablePackages.find(
+      (p) => p.product.identifier === target,
+    ) ?? null
+  );
+}
+
+export async function purchasePackage(planId: PlanId): Promise<CustomerInfo> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error(
+      'Compras ainda não configuradas. Entre em contato com o suporte.',
+    );
+  }
+  if (!configured) {
+    throw new Error('Purchases não configurado. Reinicie o app.');
+  }
+  const pkg = await packageFor(planId);
+  if (!pkg) {
+    throw new Error('Plano indisponível no momento.');
+  }
+  const { customerInfo } = await Purchases.purchasePackage(pkg);
+  return customerInfo;
+}
+
+export async function restorePurchases(): Promise<CustomerInfo | null> {
+  if (!configured) return null;
+  return Purchases.restorePurchases();
 }
 
 export async function isPro(): Promise<boolean> {
-  // TODO: check Purchases.getCustomerInfo().entitlements.active
-  return false;
+  if (!configured) return false;
+  try {
+    const info = await Purchases.getCustomerInfo();
+    return !!info.entitlements.active[PRO_ENTITLEMENT];
+  } catch {
+    return false;
+  }
+}
+
+export async function logOutPurchases(): Promise<void> {
+  if (!configured) return;
+  try {
+    await Purchases.logOut();
+  } catch {}
 }

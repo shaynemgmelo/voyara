@@ -11,6 +11,7 @@ import * as AppleAuthentication from 'expo-apple-authentication';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { supabase } from './supabase';
+import { configurePurchases, logOutPurchases } from '../api/purchases';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -36,10 +37,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setLoading(false);
+      configurePurchases(data.session?.user?.id ?? null).catch(() => {});
     });
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
+      configurePurchases(s?.user?.id ?? null).catch(() => {});
     });
 
     return () => {
@@ -101,6 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    await logOutPurchases();
     await supabase.auth.signOut();
   }, []);
 

@@ -9,7 +9,17 @@ Rails.application.routes.draw do
     namespace :v1 do
       get "health", to: "health#index"
 
+      # Public shared trip (by token, no auth)
+      get "shared/:token", to: "trips#shared"
+
+      # User purge (called by Supabase delete-account edge function)
+      delete "users/:id/purge", to: "users#purge"
+
       resources :trips do
+        member do
+          post :share
+          delete :unshare
+        end
         resources :flights, except: [:new, :edit]
         resources :lodgings, except: [:new, :edit]
         resources :transports, except: [:new, :edit]

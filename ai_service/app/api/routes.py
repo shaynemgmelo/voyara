@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks
 from app.api.schemas import (
     AnalyzeUrlRequest,
     AnalyzeUrlResponse,
+    ChatRequest,
+    ChatResponse,
     HealthResponse,
     LinkStatusResponse,
     ProcessLinkRequest,
@@ -15,6 +17,7 @@ from app.api.schemas import (
     RefineItineraryRequest,
     ResumeLinkRequest,
 )
+from app.services.chat_service import chat_reply
 from app.services.orchestrator import (
     analyze_urls,
     process_link,
@@ -34,6 +37,30 @@ processing_status: dict[int, dict] = {}
 @router.get("/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(status="ok", service="Mapass AI Service")
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def handle_chat(request: ChatRequest):
+    """Conversational assistant — optionally grounded on a trip."""
+    logger.info(
+        "Chat request: trip_id=%s msg_len=%d history=%d",
+        request.trip_id,
+        len(request.message),
+        len(request.history),
+    )
+    try:
+        reply = await chat_reply(
+            message=request.message,
+            history=request.history,
+            trip_id=request.trip_id,
+        )
+        return ChatResponse(reply=reply)
+    except Exception as e:
+        logger.exception("Chat failed")
+        return ChatResponse(
+            reply="Tive um problema agora. Tenta de novo em instantes?",
+            error=str(e),
+        )
 
 
 @router.post("/analyze-url", response_model=AnalyzeUrlResponse)
