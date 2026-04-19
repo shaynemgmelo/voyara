@@ -247,8 +247,8 @@ export default function TripDetail() {
 
       {/* Main content: itinerary + map */}
       {activeTab === "itinerary" && <div className="flex flex-col lg:flex-row">
-        {/* Left panel: itinerary */}
-        <div className="w-full lg:w-3/5 p-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 120px)" }}>
+        {/* Left panel: itinerary (rolls with the page, no inner scroll) */}
+        <div className="w-full lg:w-3/5 p-4">
           {/* Link input section */}
           <div className="mb-4">
             <LinkInput onSubmit={(url) => addLink(url)} />
@@ -392,7 +392,7 @@ export default function TripDetail() {
         </div>
 
         {/* Right panel: hotel input + map */}
-        <div className="w-full lg:w-2/5 h-[400px] lg:h-auto lg:sticky lg:top-0 flex flex-col" style={{ maxHeight: "calc(100vh - 60px)" }}>
+        <div className="w-full lg:w-2/5 h-[400px] lg:h-[calc(100vh-80px)] lg:sticky lg:top-4 flex flex-col">
           <HotelMapInput
             lodgings={trip.lodgings || []}
             onLodgingCreated={addLodging}
