@@ -65,10 +65,10 @@ function Nav({ pt, toggle, user, t }) {
           </button>
           {user ? (
             <Link to="/dashboard" className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">
-              <div className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center text-white text-xs font-bold">
+              <div className="w-7 h-7 rounded-full bg-amber-500 flex items-center justify-center text-white text-xs font-bold">
                 {user.name?.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2)}
               </div>
-              <span className={`hidden sm:block text-sm font-medium ${scrolled ? "text-gray-700" : "text-white"}`}>
+              <span className={`hidden sm:block text-sm font-medium ${scrolled ? "text-slate-700" : "text-white"}`}>
                 {user.name}
               </span>
             </Link>
@@ -79,7 +79,11 @@ function Nav({ pt, toggle, user, t }) {
               </Link>
               <Link
                 to="/login"
-                className="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold px-5 py-2 rounded-full transition-colors shadow-sm"
+                className={`text-sm font-bold px-5 py-2 rounded-full transition-all shadow-sm ${
+                  scrolled
+                    ? "bg-[#0B2E4F] hover:bg-[#0A2642] text-white"
+                    : "bg-amber-500 hover:bg-amber-400 text-[#0B2E4F]"
+                }`}
               >
                 {t("landing.startPlanning")}
               </Link>
@@ -275,15 +279,15 @@ export default function LandingPage() {
       {/* ═══════════════════════════════════════════
           LINK ANALYZER — primary action right after hero
       ═══════════════════════════════════════════ */}
-      <section className="relative -mt-16 z-20 px-6">
-        <div className="max-w-3xl mx-auto bg-white rounded-3xl shadow-2xl border border-emerald-100 p-6 sm:p-8">
+      <section className="relative -mt-20 z-20 px-6">
+        <div className="max-w-3xl mx-auto bg-white rounded-3xl shadow-2xl border border-slate-200 p-6 sm:p-8" style={{ boxShadow: "0 30px 60px -15px rgba(11,46,79,0.35)" }}>
           <div className="text-center mb-5">
-            <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-1">
+            <h2 className="text-xl sm:text-2xl font-bold text-slate-900 mb-1">
               {pt
                 ? "Cole um link de viagem"
                 : "Paste a travel link"}
             </h2>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-slate-500">
               {pt
                 ? "TikTok, Instagram, YouTube ou blog — a IA extrai os lugares e monta o roteiro."
                 : "TikTok, Instagram, YouTube or blog — AI extracts the places and builds the trip."}
@@ -291,10 +295,10 @@ export default function LandingPage() {
           </div>
           <LinkAnalyzer onResult={setAnalyzeResult} />
           <div className="mt-5 flex items-center justify-center gap-6 flex-wrap text-sm">
-            <Link to={ctaLink} className="text-gray-500 hover:text-gray-900 font-medium">
+            <Link to={ctaLink} className="text-slate-500 hover:text-slate-900 font-medium">
               {pt ? "ou crie manualmente" : "or create manually"} →
             </Link>
-            <Link to="/pricing" className="text-emerald-600 hover:text-emerald-700 font-semibold">
+            <Link to="/pricing" className="text-amber-600 hover:text-amber-700 font-semibold">
               {pt ? "Ver planos" : "View plans"} →
             </Link>
           </div>
@@ -304,13 +308,13 @@ export default function LandingPage() {
       {/* ═══════════════════════════════════════════
           SHOWCASE — app preview (map + profile) full width
       ═══════════════════════════════════════════ */}
-      <section className="pt-24 pb-20 px-6 bg-gradient-to-b from-white via-emerald-50/30 to-white">
+      <section className="pt-24 pb-20 px-6 bg-gradient-to-b from-white via-[#FAF8F3] to-white">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <div className="inline-block text-xs font-bold tracking-widest text-emerald-600 mb-3">
-              {pt ? "SEU ROTEIRO, VISUAL" : "YOUR TRIP, VISUAL"}
+            <div className="inline-block text-xs font-bold tracking-[0.25em] text-amber-600 mb-3 uppercase">
+              {pt ? "Seu roteiro, visual" : "Your trip, visual"}
             </div>
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 max-w-2xl mx-auto leading-tight">
+            <h2 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold text-slate-900 max-w-2xl mx-auto leading-[1.1]" style={{ fontFamily: "'Playfair Display', Georgia, serif" }}>
               {pt
                 ? "Mapa, horários e fotos — tudo no lugar certo."
                 : "Maps, timing and photos — all in the right place."}
