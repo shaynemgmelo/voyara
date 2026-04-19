@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -20,6 +19,7 @@ import { Screen } from '../components/Screen';
 import { Input } from '../components/Input';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
+import { useToast } from '../components/Toast';
 import { colors, typography, spacing, radius } from '../theme';
 import { tripsApi } from '../api/trips';
 import { RootStackParamList } from '../navigation/types';
@@ -37,6 +37,7 @@ interface Place {
 export function LinkAnalysisScreen() {
   const navigation = useNavigation<Nav>();
   const { params } = useRoute<Rt>();
+  const toast = useToast();
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{
@@ -47,16 +48,23 @@ export function LinkAnalysisScreen() {
 
   const handleAnalyze = async () => {
     if (!url.trim()) {
-      Alert.alert('Cole um link', 'Informe um link do TikTok, Instagram ou YouTube.');
+      toast.error('Cole um link do TikTok, Instagram ou YouTube.');
       return;
     }
     setLoading(true);
     setResult(null);
     try {
       const res = await tripsApi.analyzeUrl([url.trim()]);
-      setResult(res);
+      if (res.error) {
+        toast.error(res.error);
+      } else if (!res.places?.length) {
+        toast.error(res.summary || 'Não consegui extrair lugares deste link.');
+        setResult(res);
+      } else {
+        setResult(res);
+      }
     } catch (e: any) {
-      Alert.alert('Erro', e.message ?? 'Falha ao analisar link');
+      toast.error(e.message ?? 'Falha ao analisar link');
     } finally {
       setLoading(false);
     }
@@ -72,7 +80,7 @@ export function LinkAnalysisScreen() {
       });
       navigation.replace('TripDetail', { tripId: trip.id });
     } catch (e: any) {
-      Alert.alert('Erro', e.message ?? 'Falha ao criar roteiro');
+      toast.error(e.message ?? 'Falha ao criar roteiro');
     }
   };
 

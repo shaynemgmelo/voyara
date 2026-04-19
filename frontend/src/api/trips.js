@@ -21,6 +21,22 @@ export function deleteTrip(id) {
   return del(`/trips/${id}`);
 }
 
+export function shareTrip(id) {
+  return post(`/trips/${id}/share`);
+}
+
+export function unshareTrip(id) {
+  return del(`/trips/${id}/unshare`);
+}
+
+// Public shared trip (no auth)
+export async function getSharedTrip(token) {
+  const API_URL = process.env.REACT_APP_API_URL || "http://localhost:3000/api/v1";
+  const resp = await fetch(`${API_URL}/shared/${token}`);
+  if (!resp.ok) throw new Error("Not found");
+  return resp.json();
+}
+
 const AI_URL = process.env.REACT_APP_AI_SERVICE_URL || "http://localhost:8000/api";
 
 export async function refineItinerary(tripId, feedback, scope = "trip", dayPlanId = null) {

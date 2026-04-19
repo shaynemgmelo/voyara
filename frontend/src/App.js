@@ -11,6 +11,7 @@ import PricingPage from "./pages/PricingPage";
 import FeaturesPage from "./pages/FeaturesPage";
 import PrivacyPage from "./pages/PrivacyPage";
 import TermsPage from "./pages/TermsPage";
+import SharedTripPage from "./pages/SharedTripPage";
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth();
@@ -29,10 +30,11 @@ function AppContent() {
   const isFeatures = location.pathname === "/features";
   const isPrivacy = location.pathname === "/privacy";
   const isTerms = location.pathname === "/terms";
+  const isShared = location.pathname.startsWith("/share/");
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
-      {!isLanding && !isAuth && !isPricing && !isFeatures && !isPrivacy && !isTerms && <Header />}
+      {!isLanding && !isAuth && !isPricing && !isFeatures && !isPrivacy && !isTerms && !isShared && <Header />}
       <main>
         <Routes>
           <Route path="/" element={<LandingPage />} />
@@ -41,6 +43,7 @@ function AppContent() {
           <Route path="/features" element={<FeaturesPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/terms" element={<TermsPage />} />
+          <Route path="/share/:token" element={<SharedTripPage />} />
           <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
           <Route path="/trips/new" element={<RequireAuth><TripCreate /></RequireAuth>} />
           <Route path="/trips/:id" element={<RequireAuth><TripDetail /></RequireAuth>} />

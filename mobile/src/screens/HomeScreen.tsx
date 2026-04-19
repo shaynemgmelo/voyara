@@ -12,6 +12,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Screen } from '../components/Screen';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { useToast } from '../components/Toast';
 import { colors, typography, spacing, radius } from '../theme';
 import { Trip, tripsApi } from '../api/trips';
 import { RootStackParamList } from '../navigation/types';
@@ -20,6 +21,7 @@ type Nav = NativeStackNavigationProp<RootStackParamList>;
 
 export function HomeScreen() {
   const navigation = useNavigation<Nav>();
+  const toast = useToast();
   const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -28,14 +30,17 @@ export function HomeScreen() {
     try {
       const res = await tripsApi.list();
       setTrips(Array.isArray(res) ? res : []);
-    } catch (e) {
-      // silently fail, show empty state
+    } catch (e: any) {
+      // Only toast if it's not the first page load (avoid spam on cold start)
+      if (!loading) {
+        toast.error('Não consegui atualizar agora. Veja sua conexão.');
+      }
       setTrips([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [loading, toast]);
 
   useFocusEffect(
     useCallback(() => {

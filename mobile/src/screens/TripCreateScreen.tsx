@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import {
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -13,6 +12,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Screen } from '../components/Screen';
 import { Input } from '../components/Input';
 import { Button } from '../components/Button';
+import { useToast } from '../components/Toast';
 import { colors, typography, spacing, radius } from '../theme';
 import { tripsApi } from '../api/trips';
 import { RootStackParamList } from '../navigation/types';
@@ -21,6 +21,7 @@ type Nav = NativeStackNavigationProp<RootStackParamList, 'TripCreate'>;
 
 export function TripCreateScreen() {
   const navigation = useNavigation<Nav>();
+  const toast = useToast();
   const [destination, setDestination] = useState('');
   const [days, setDays] = useState('5');
   const [title, setTitle] = useState('');
@@ -29,11 +30,11 @@ export function TripCreateScreen() {
   const handleCreate = async () => {
     const numDays = parseInt(days, 10);
     if (!destination.trim()) {
-      Alert.alert('Destino obrigatório', 'Informe para onde você vai.');
+      toast.error('Informe para onde você vai.');
       return;
     }
     if (isNaN(numDays) || numDays < 1 || numDays > 30) {
-      Alert.alert('Dias inválidos', 'Informe entre 1 e 30 dias.');
+      toast.error('Dias inválidos — informe entre 1 e 30.');
       return;
     }
 
@@ -47,7 +48,7 @@ export function TripCreateScreen() {
       });
       navigation.replace('TripDetail', { tripId: trip.id });
     } catch (e: any) {
-      Alert.alert('Erro', e.message ?? 'Falha ao criar roteiro');
+      toast.error(e.message ?? 'Falha ao criar roteiro');
     } finally {
       setSaving(false);
     }
