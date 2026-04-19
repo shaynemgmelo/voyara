@@ -5,10 +5,91 @@ import { useAuth } from "../auth/AuthContext";
 import Logo from "../components/layout/Logo";
 import HeroDemo from "../components/landing/HeroDemo";
 import ShowcaseMap from "../components/landing/ShowcaseMap";
+import CinematicHero from "../components/landing/CinematicHero";
 import LinkAnalyzer from "../components/links/LinkAnalyzer";
 import AnalyzeResultModal from "../components/links/AnalyzeResultModal";
 import DestinationPreview from "../components/landing/DestinationPreview";
 
+/* ── Scroll-aware nav (transparent on hero, solid on scroll) ── */
+function Nav({ pt, toggle, user, t }) {
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 60);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const base = "fixed top-0 left-0 right-0 z-50 transition-all duration-300";
+  const dressing = scrolled
+    ? "bg-white/90 backdrop-blur-md border-b border-gray-100"
+    : "bg-transparent border-b border-transparent";
+  const linkBase = scrolled
+    ? "text-gray-500 hover:text-gray-900 hover:bg-gray-50"
+    : "text-white/85 hover:text-white hover:bg-white/10";
+  const activeLink = scrolled
+    ? "bg-gray-100 text-gray-900"
+    : "bg-white/20 text-white backdrop-blur";
+  const brandText = scrolled ? "text-gray-900" : "text-white";
+  const langBtn = scrolled
+    ? "text-gray-500 hover:text-gray-900"
+    : "text-white/80 hover:text-white";
+
+  return (
+    <nav className={`${base} ${dressing}`}>
+      <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2.5">
+            <Logo size={30} />
+            <span className={`text-xl font-bold tracking-tight transition-colors ${brandText}`}>
+              Mapass
+            </span>
+          </div>
+          <div className="hidden sm:flex items-center gap-1">
+            <Link to="/" className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${activeLink}`}>
+              {t("nav.home")}
+            </Link>
+            <Link to="/dashboard" className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${linkBase}`}>
+              {t("nav.myTrips")}
+            </Link>
+            <Link to="/pricing" className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${linkBase}`}>
+              {t("nav.pricing")}
+            </Link>
+            <Link to="/features" className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${linkBase}`}>
+              {pt ? "Como funciona" : "How it works"}
+            </Link>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={toggle} className={`text-sm font-medium transition-colors ${langBtn}`}>
+            {pt ? "EN" : "PT"}
+          </button>
+          {user ? (
+            <Link to="/dashboard" className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">
+              <div className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center text-white text-xs font-bold">
+                {user.name?.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2)}
+              </div>
+              <span className={`hidden sm:block text-sm font-medium ${scrolled ? "text-gray-700" : "text-white"}`}>
+                {user.name}
+              </span>
+            </Link>
+          ) : (
+            <>
+              <Link to="/login" className={`text-sm font-medium transition-colors hidden sm:block ${linkBase.replace("hover:bg-", "")}`}>
+                {t("auth.login")}
+              </Link>
+              <Link
+                to="/login"
+                className="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold px-5 py-2 rounded-full transition-colors shadow-sm"
+              >
+                {t("landing.startPlanning")}
+              </Link>
+            </>
+          )}
+        </div>
+      </div>
+    </nav>
+  );
+}
 /* ── Destination showcase ── */
 const DESTINATIONS = [
   { city: "Paris", country: "France", img: "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=600&h=400&fit=crop&q=80", days: 5 },
@@ -183,112 +264,59 @@ export default function LandingPage() {
       {/* ═══════════════════════════════════════════
           NAVIGATION
       ═══════════════════════════════════════════ */}
-      <nav className="fixed top-0 left-0 right-0 bg-white/90 backdrop-blur-md z-50 border-b border-gray-100">
-        <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2.5">
-              <Logo size={30} />
-              <span className="text-xl font-bold text-gray-900 tracking-tight">Mapass</span>
-            </div>
-            <div className="hidden sm:flex items-center gap-1">
-              <Link to="/" className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-900">
-                {t("nav.home")}
-              </Link>
-              <Link to="/dashboard" className="px-3 py-1.5 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors">
-                {t("nav.myTrips")}
-              </Link>
-              <Link to="/pricing" className="px-3 py-1.5 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors">
-                {t("nav.pricing")}
-              </Link>
-              <Link to="/features" className="px-3 py-1.5 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors">
-                {pt ? "Como funciona" : "How it works"}
-              </Link>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button onClick={toggle} className="text-sm text-gray-500 hover:text-gray-900 transition-colors">
-              {pt ? "EN" : "PT"}
-            </button>
-            {user ? (
-              <Link to="/dashboard" className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors">
-                <div className="w-7 h-7 rounded-full bg-coral-500 flex items-center justify-center text-white text-xs font-bold">
-                  {user.name?.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2)}
-                </div>
-                <span className="hidden sm:block text-sm text-gray-700 font-medium">{user.name}</span>
-              </Link>
-            ) : (
-              <>
-                <Link to="/login" className="text-sm text-gray-600 hover:text-gray-900 font-medium transition-colors hidden sm:block">
-                  {t("auth.login")}
-                </Link>
-                <Link to="/login" className="bg-coral-500 hover:bg-coral-600 text-white text-sm font-semibold px-5 py-2 rounded-full transition-colors shadow-sm">
-                  {t("landing.startPlanning")}
-                </Link>
-              </>
-            )}
-          </div>
-        </div>
-      </nav>
+      <Nav pt={pt} toggle={toggle} user={user} t={t} />
+      {/* spacer is not needed because hero is full-screen */}
 
       {/* ═══════════════════════════════════════════
-          HERO — Pain → Dream → Bridge (BAB)
+          HERO — Cinematic airplane sunset
       ═══════════════════════════════════════════ */}
-      <section className="pt-28 pb-20 px-6 relative overflow-hidden">
-        {/* Subtle background gradient */}
-        <div className="absolute inset-0 bg-gradient-to-b from-coral-50/40 via-white to-white pointer-events-none" />
+      <CinematicHero pt={pt} ctaLink={ctaLink} user={user} />
 
-        <div className="max-w-6xl mx-auto relative">
-          <div className="text-center max-w-3xl mx-auto mb-14">
-            {/* Micro-label */}
-            <div className="inline-flex items-center gap-2 bg-coral-50 text-coral-600 text-xs font-semibold px-4 py-1.5 rounded-full mb-6 border border-coral-100">
-              <span className="w-2 h-2 rounded-full bg-coral-500 animate-pulse" />
-              {pt ? "Seu primeiro roteiro é grátis" : "Your first itinerary is free"}
-            </div>
-
-            {/* Headline — Emotional hook */}
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-gray-900 leading-[1.1] tracking-tight mb-6">
-              {t("landing.headline")}
-            </h1>
-
-            {/* Subheadline — Agitate the pain, show the dream */}
-            <p className="text-lg sm:text-xl text-gray-500 leading-relaxed mb-10 max-w-2xl mx-auto">
-              {t("landing.subheadline")}
+      {/* ═══════════════════════════════════════════
+          LINK ANALYZER — primary action right after hero
+      ═══════════════════════════════════════════ */}
+      <section className="relative -mt-16 z-20 px-6">
+        <div className="max-w-3xl mx-auto bg-white rounded-3xl shadow-2xl border border-emerald-100 p-6 sm:p-8">
+          <div className="text-center mb-5">
+            <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-1">
+              {pt
+                ? "Cole um link de viagem"
+                : "Paste a travel link"}
+            </h2>
+            <p className="text-sm text-gray-500">
+              {pt
+                ? "TikTok, Instagram, YouTube ou blog — a IA extrai os lugares e monta o roteiro."
+                : "TikTok, Instagram, YouTube or blog — AI extracts the places and builds the trip."}
             </p>
-
-            {/* CTA — LinkAnalyzer */}
-            <div className="max-w-xl mx-auto">
-              <LinkAnalyzer onResult={setAnalyzeResult} />
-              <p className="mt-3 text-sm text-gray-400">
-                {pt
-                  ? "Instagram, YouTube, TikTok, blog — cole qualquer link de viagem"
-                  : "Instagram, YouTube, TikTok, blog — paste any travel link"}
-              </p>
-            </div>
-
-            <div className="flex items-center justify-center gap-6 mt-5">
-              <Link to={ctaLink} className="text-gray-400 hover:text-gray-600 font-medium text-sm transition-colors">
-                {pt ? "ou crie manualmente" : "or create manually"} →
-              </Link>
-              <Link to="/features" className="text-violet-500 hover:text-violet-600 font-semibold text-sm transition-colors">
-                {pt ? "Ver como funciona" : "See how it works"} →
-              </Link>
-              <Link to="/pricing" className="text-coral-500 hover:text-coral-600 font-semibold text-sm transition-colors">
-                {pt ? "Ver planos" : "View plans"} →
-              </Link>
-            </div>
           </div>
-
-          {/* Hero Demo + Mini Map */}
-          <div className="flex gap-4 px-2">
-            {/* Main walkthrough */}
-            <div className="flex-1 min-w-0">
-              <HeroDemo />
-            </div>
-            {/* Mini animated map */}
-            <div className="hidden lg:block w-72 xl:w-80 flex-shrink-0">
-              <HeroMiniMap />
-            </div>
+          <LinkAnalyzer onResult={setAnalyzeResult} />
+          <div className="mt-5 flex items-center justify-center gap-6 flex-wrap text-sm">
+            <Link to={ctaLink} className="text-gray-500 hover:text-gray-900 font-medium">
+              {pt ? "ou crie manualmente" : "or create manually"} →
+            </Link>
+            <Link to="/pricing" className="text-emerald-600 hover:text-emerald-700 font-semibold">
+              {pt ? "Ver planos" : "View plans"} →
+            </Link>
           </div>
+        </div>
+      </section>
+
+      {/* ═══════════════════════════════════════════
+          SHOWCASE — app preview (map + profile) full width
+      ═══════════════════════════════════════════ */}
+      <section className="pt-24 pb-20 px-6 bg-gradient-to-b from-white via-emerald-50/30 to-white">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <div className="inline-block text-xs font-bold tracking-widest text-emerald-600 mb-3">
+              {pt ? "SEU ROTEIRO, VISUAL" : "YOUR TRIP, VISUAL"}
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-extrabold text-gray-900 max-w-2xl mx-auto leading-tight">
+              {pt
+                ? "Mapa, horários e fotos — tudo no lugar certo."
+                : "Maps, timing and photos — all in the right place."}
+            </h2>
+          </div>
+          <HeroDemo />
         </div>
       </section>
 
