@@ -2,23 +2,29 @@ import { useEffect } from "react";
 import Lenis from "lenis";
 
 /**
- * Smooth scroll — inspired by Onwardify / premium landing pages.
- * Call once at the app root.
+ * Smooth scroll — tuned for a fluid, professional feel.
+ * Snappy response (~0.7s) with premium easing, never lagging.
  */
 export default function useSmoothScroll() {
   useEffect(() => {
-    // Don't apply on touch devices — native iOS/Android feel is already
-    // polished and Lenis on touch can feel unnatural.
+    // Skip on touch devices and when user prefers reduced motion
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const isTouch =
       typeof window !== "undefined" &&
       (window.matchMedia?.("(pointer: coarse)").matches ||
         "ontouchstart" in window);
-    if (isTouch) return;
+    if (reducedMotion || isTouch) return;
 
     const lenis = new Lenis({
-      duration: 1.15,
-      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+      // Much snappier than before — feels responsive, not draggy
+      duration: 0.7,
+      // Exponential easing (Onwardify-like): fast start, soft landing
+      easing: (t) => 1 - Math.pow(1 - t, 3),
       smoothWheel: true,
+      wheelMultiplier: 1,
+      touchMultiplier: 2,
       syncTouch: false,
     });
 

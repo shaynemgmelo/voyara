@@ -34,12 +34,10 @@ export default function CinematicHero({ pt, ctaLink, user }) {
     target: sectionRef,
     offset: ["start start", "end start"],
   });
-  // Image drifts down slowly (parallax)
-  const imageY = useTransform(scrollYProgress, [0, 1], ["0%", "25%"]);
-  // Content drifts up & fades as hero exits
-  const contentY = useTransform(scrollYProgress, [0, 1], ["0%", "-20%"]);
-  const contentOpacity = useTransform(scrollYProgress, [0, 0.6], [1, 0]);
-  const contentScale = useTransform(scrollYProgress, [0, 1], [1, 0.95]);
+  // Subtle parallax — not too extreme, keeps things snappy
+  const imageY = useTransform(scrollYProgress, [0, 1], ["0%", "12%"]);
+  const contentY = useTransform(scrollYProgress, [0, 1], ["0%", "-10%"]);
+  const contentOpacity = useTransform(scrollYProgress, [0, 0.5], [1, 0]);
 
   return (
     <section
@@ -116,7 +114,11 @@ export default function CinematicHero({ pt, ctaLink, user }) {
       {/* Content with scroll-out transform */}
       <motion.div
         className="relative z-10 max-w-4xl mx-auto px-6 text-center text-white"
-        style={{ y: contentY, opacity: contentOpacity, scale: contentScale }}
+        style={{
+          y: contentY,
+          opacity: contentOpacity,
+          willChange: "transform, opacity",
+        }}
       >
         {/* Logo pill */}
         <motion.div
@@ -135,7 +137,7 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         <motion.h1
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.9, delay: 0.1, ease: [0.21, 0.5, 0.3, 1] }}
+          transition={{ duration: 0.55, delay: 0.05, ease: [0.16, 1, 0.3, 1] }}
           className="font-display text-5xl sm:text-6xl lg:text-8xl font-bold leading-[0.98] tracking-[-0.035em] mb-6"
           style={{
             textShadow: "0 6px 40px rgba(0,0,0,0.55)",
@@ -180,7 +182,7 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         <motion.p
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.3 }}
+          transition={{ duration: 0.5, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
           className="text-lg sm:text-xl text-white/85 max-w-2xl mx-auto mb-10 leading-relaxed"
         >
           {pt
@@ -192,7 +194,7 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         <motion.div
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.5 }}
+          transition={{ duration: 0.5, delay: 0.35, ease: [0.16, 1, 0.3, 1] }}
           className="flex flex-col sm:flex-row items-center justify-center gap-3"
         >
           <Link

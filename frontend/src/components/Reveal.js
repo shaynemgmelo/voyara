@@ -1,55 +1,59 @@
 import React from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
 const PRESETS = {
-  up: { hidden: { opacity: 0, y: 40 }, show: { opacity: 1, y: 0 } },
-  down: { hidden: { opacity: 0, y: -40 }, show: { opacity: 1, y: 0 } },
-  left: { hidden: { opacity: 0, x: -40 }, show: { opacity: 1, x: 0 } },
-  right: { hidden: { opacity: 0, x: 40 }, show: { opacity: 1, x: 0 } },
+  up: { hidden: { opacity: 0, y: 24 }, show: { opacity: 1, y: 0 } },
+  down: { hidden: { opacity: 0, y: -24 }, show: { opacity: 1, y: 0 } },
+  left: { hidden: { opacity: 0, x: -24 }, show: { opacity: 1, x: 0 } },
+  right: { hidden: { opacity: 0, x: 24 }, show: { opacity: 1, x: 0 } },
   scale: {
-    hidden: { opacity: 0, scale: 0.92 },
+    hidden: { opacity: 0, scale: 0.96 },
     show: { opacity: 1, scale: 1 },
   },
   fade: { hidden: { opacity: 0 }, show: { opacity: 1 } },
 };
 
+// Fast, snappy cubic-bezier (easeOutExpo-like)
+const EASE = [0.16, 1, 0.3, 1];
+
 /**
- * Reveal — wraps children with a scroll-triggered fade/slide animation.
- * Runs once when it enters viewport (Onwardify-style reveal-on-scroll).
- *
- * Usage:
- *   <Reveal>   — default fade + slide up
- *   <Reveal direction="left" delay={0.2}>
- *   <Reveal preset="scale">
+ * Reveal — scroll-triggered reveal with hardware acceleration.
+ * Tuned for responsiveness, not slow drama.
  */
 export function Reveal({
   children,
   direction = "up",
   preset,
   delay = 0,
-  duration = 0.7,
+  duration = 0.45,
   once = true,
-  amount = 0.25,
+  amount = 0.1,
   className,
   style,
   as = "div",
 }) {
+  const reduced = useReducedMotion();
   const variant = PRESETS[preset || direction] || PRESETS.up;
   const MotionTag = motion[as] || motion.div;
+
+  if (reduced) {
+    const Tag = as;
+    return (
+      <Tag className={className} style={style}>
+        {children}
+      </Tag>
+    );
+  }
 
   return (
     <MotionTag
       className={className}
-      style={style}
+      style={{ willChange: "transform, opacity", ...(style || {}) }}
       initial="hidden"
       whileInView="show"
       viewport={{ once, amount }}
       variants={variant}
-      transition={{
-        duration,
-        delay,
-        ease: [0.21, 0.5, 0.3, 1], // smooth premium cubic
-      }}
+      transition={{ duration, delay, ease: EASE }}
     >
       {children}
     </MotionTag>
@@ -57,17 +61,27 @@ export function Reveal({
 }
 
 /**
- * RevealStagger — animate multiple children with a staggered delay.
- * Wrap a group of items. Each direct child fades in after the previous.
+ * RevealStagger — staggered children. Fast cascade (default 60ms).
  */
 export function RevealStagger({
   children,
-  stagger = 0.08,
+  stagger = 0.06,
   initialDelay = 0,
   direction = "up",
+  duration = 0.4,
   className,
   style,
 }) {
+  const reduced = useReducedMotion();
+
+  if (reduced) {
+    return (
+      <div className={className} style={style}>
+        {children}
+      </div>
+    );
+  }
+
   const parentVariants = {
     hidden: {},
     show: {
@@ -82,17 +96,17 @@ export function RevealStagger({
   return (
     <motion.div
       className={className}
-      style={style}
+      style={{ willChange: "transform, opacity", ...(style || {}) }}
       initial="hidden"
       whileInView="show"
-      viewport={{ once: true, amount: 0.2 }}
+      viewport={{ once: true, amount: 0.1 }}
       variants={parentVariants}
     >
       {React.Children.map(children, (child, i) => (
         <motion.div
           key={i}
           variants={childVariants}
-          transition={{ duration: 0.65, ease: [0.21, 0.5, 0.3, 1] }}
+          transition={{ duration, ease: EASE }}
         >
           {child}
         </motion.div>
