@@ -35,11 +35,14 @@ export function TripDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<Trip | null> => {
     try {
-      const trip = await tripsApi.get(params.tripId);
-      setTrip(trip);
-      setDayPlans(trip.day_plans ?? []);
+      const t = await tripsApi.get(params.tripId);
+      setTrip(t);
+      setDayPlans(t.day_plans ?? []);
+      return t;
+    } catch {
+      return null;
     } finally {
       setLoading(false);
     }
@@ -55,7 +58,19 @@ export function TripDetailScreen() {
     setGenerating(true);
     try {
       await tripsApi.generate(params.tripId);
-      await load();
+      // Poll every 4s up to 2 minutes for items to appear
+      const started = Date.now();
+      const maxMs = 2 * 60 * 1000;
+      let found = false;
+      while (Date.now() - started < maxMs && !found) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const t = await load();
+        if (t && (t.items_count ?? 0) > 0) {
+          found = true;
+        }
+      }
+    } catch {
+      // swallow — error already visible if load fails
     } finally {
       setGenerating(false);
     }
@@ -143,16 +158,26 @@ export function TripDetailScreen() {
         </View>
       ) : null}
 
-      {!hasItems ? (
+      {generating ? (
+        <View style={styles.emptyCenter}>
+          <ActivityIndicator color={colors.primary} size="large" />
+          <Text style={[styles.emptyTitle, { marginTop: spacing.xl }]}>
+            Montando seu roteiro
+          </Text>
+          <Text style={styles.emptyText}>
+            Isso leva de 30s a 2 minutos. A IA está selecionando lugares reais,
+            organizando por dia e ajustando horários.
+          </Text>
+        </View>
+      ) : !hasItems ? (
         <View style={styles.emptyCenter}>
           <Text style={styles.emptyTitle}>Pronto pra gerar?</Text>
           <Text style={styles.emptyText}>
             A IA vai montar um roteiro dia a dia com lugares reais.
           </Text>
           <Button
-            label={generating ? 'Gerando...' : 'Gerar roteiro com IA'}
+            label="Gerar roteiro com IA"
             size="lg"
-            loading={generating}
             onPress={handleGenerate}
             style={{ marginTop: spacing.xxl }}
           />
