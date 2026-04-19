@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { DragDropContext } from "@hello-pangea/dnd";
 import useTripDetail from "../hooks/useTripDetail";
 import DayPlanColumn from "../components/itinerary/DayPlanColumn";
+import TripTimeline from "../components/itinerary/TripTimeline";
 import ItemDetail from "../components/itinerary/ItemDetail";
 import ItemForm from "../components/itinerary/ItemForm";
 import LinkInput from "../components/links/LinkInput";
@@ -48,6 +49,17 @@ export default function TripDetail() {
   const [selectedItemId, setSelectedItemId] = useState(null);
   const [selectedDayNumber, setSelectedDayNumber] = useState(null);
   const [hoveredItemId, setHoveredItemId] = useState(null);
+  const [viewMode, setViewMode] = useState(() => {
+    if (typeof window === "undefined") return "list";
+    return localStorage.getItem("mapass.viewMode") || "timeline";
+  });
+
+  const switchView = (mode) => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem("mapass.viewMode", mode);
+    } catch {}
+  };
   const [showItemForm, setShowItemForm] = useState(null);
   const [showSuggestions, setShowSuggestions] = useState(null); // dayPlanId
   const [expandedItem, setExpandedItem] = useState(null);
@@ -280,6 +292,32 @@ export default function TripDetail() {
             onCityChange={setActiveCity}
           />
 
+          {/* View toggle: Timeline / List */}
+          <div className="flex justify-end mb-4">
+            <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+              <button
+                onClick={() => switchView("timeline")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
+                  viewMode === "timeline"
+                    ? "bg-orange-500 text-white shadow"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                ✨ Timeline
+              </button>
+              <button
+                onClick={() => switchView("list")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
+                  viewMode === "list"
+                    ? "bg-orange-500 text-white shadow"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                ☰ Lista
+              </button>
+            </div>
+          </div>
+
           {/* Trip-level AI feedback */}
           {trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0) && (
             <div className="mb-4">
@@ -292,43 +330,54 @@ export default function TripDetail() {
             </div>
           )}
 
-          {/* Day plans with drag-and-drop */}
-          <DragDropContext onDragEnd={handleDragEnd}>
-            {(activeCity
-              ? trip.day_plans?.filter((dp) => dp.city === activeCity)
-              : trip.day_plans
-            )?.map((dayPlan) => (
-              <DayPlanColumn
-                key={dayPlan.id}
-                dayPlan={dayPlan}
-                tripId={trip.id}
-                selectedItemId={selectedItemId}
-                hoveredItemId={hoveredItemId}
-                vibeFilters={vibeFilters}
-                travelSegments={travelTimes[dayPlan.id] || []}
-                hotelLodging={(trip.lodgings || []).find(l => l.latitude && l.longitude) || null}
-                onItemClick={handleItemClick}
-                onItemHover={setHoveredItemId}
-                onAddClick={() => setShowSuggestions(dayPlan.id)}
-                onDeleteItem={(itemId) => removeItem(dayPlan.id, itemId)}
-                onSwapItem={handleSwapItem}
-                onSelectDay={() =>
-                  setSelectedDayNumber(
-                    selectedDayNumber === dayPlan.day_number ? null : dayPlan.day_number
-                  )
-                }
-                isSelectedDay={selectedDayNumber === dayPlan.day_number}
-                onRefine={(dayPlanId, feedback) => refineItinerary(feedback, "day", dayPlanId)}
-                refineLoading={refining}
-                onRecalculate={async () => {
-                  try {
-                    const data = await recalculateSchedule(trip.id, dayPlan.id);
-                    setSchedulePreview({ dayPlanId: dayPlan.id, proposals: data.proposals || [] });
-                  } catch { /* ignore */ }
-                }}
-              />
-            ))}
-          </DragDropContext>
+          {/* Day plans — Timeline carousel OR classic list */}
+          {viewMode === "timeline" ? (
+            <TripTimeline
+              dayPlans={(activeCity
+                ? trip.day_plans?.filter((dp) => dp.city === activeCity)
+                : trip.day_plans) || []}
+              onReorder={({ dayPlanId, fromIndex, toIndex }) =>
+                reorderItems(dayPlanId, fromIndex, toIndex)
+              }
+            />
+          ) : (
+            <DragDropContext onDragEnd={handleDragEnd}>
+              {(activeCity
+                ? trip.day_plans?.filter((dp) => dp.city === activeCity)
+                : trip.day_plans
+              )?.map((dayPlan) => (
+                <DayPlanColumn
+                  key={dayPlan.id}
+                  dayPlan={dayPlan}
+                  tripId={trip.id}
+                  selectedItemId={selectedItemId}
+                  hoveredItemId={hoveredItemId}
+                  vibeFilters={vibeFilters}
+                  travelSegments={travelTimes[dayPlan.id] || []}
+                  hotelLodging={(trip.lodgings || []).find(l => l.latitude && l.longitude) || null}
+                  onItemClick={handleItemClick}
+                  onItemHover={setHoveredItemId}
+                  onAddClick={() => setShowSuggestions(dayPlan.id)}
+                  onDeleteItem={(itemId) => removeItem(dayPlan.id, itemId)}
+                  onSwapItem={handleSwapItem}
+                  onSelectDay={() =>
+                    setSelectedDayNumber(
+                      selectedDayNumber === dayPlan.day_number ? null : dayPlan.day_number
+                    )
+                  }
+                  isSelectedDay={selectedDayNumber === dayPlan.day_number}
+                  onRefine={(dayPlanId, feedback) => refineItinerary(feedback, "day", dayPlanId)}
+                  refineLoading={refining}
+                  onRecalculate={async () => {
+                    try {
+                      const data = await recalculateSchedule(trip.id, dayPlan.id);
+                      setSchedulePreview({ dayPlanId: dayPlan.id, proposals: data.proposals || [] });
+                    } catch { /* ignore */ }
+                  }}
+                />
+              ))}
+            </DragDropContext>
+          )}
         </div>
 
         {/* Right panel: hotel input + map */}
