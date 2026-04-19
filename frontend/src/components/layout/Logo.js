@@ -1,33 +1,42 @@
-export default function Logo({ size = 32, color }) {
-  // Default: deep navy ring + amber pins (premium travel feel).
-  // Pass color="white" for use over dark hero.
-  const stroke = color || "#0B2E4F";
-  const pin = "#F59E0B";
-  const pinAccent = "#D97706";
+export default function Logo({ size = 32, variant = "default" }) {
+  // variant: "default" (navy circle, white M) | "light" (white circle, navy M) | "mono"
+  const isLight = variant === "light";
+  const isMono = variant === "mono";
+
+  const bg = isMono ? "transparent" : isLight ? "#FFFFFF" : "#0B2E4F";
+  const stroke = isMono ? "currentColor" : isLight ? "#0B2E4F" : "#FFFFFF";
+  const pin = isMono ? "currentColor" : "#F59E0B";
+  const border = isMono ? "currentColor" : isLight ? "#0B2E4F" : "#0B2E4F";
 
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 40 40"
+      viewBox="0 0 44 44"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Ring */}
-      <circle cx="20" cy="20" r="19" stroke={stroke} strokeWidth="2" fill="none" />
-      {/* Route — inverted V */}
+      {/* Filled circle */}
+      <circle
+        cx="22"
+        cy="22"
+        r="20"
+        fill={bg}
+        stroke={border}
+        strokeWidth="1.5"
+      />
+      {/* M letter — clean geometric */}
       <path
-        d="M12 12 L20 30 L28 12"
+        d="M11 31 V15 L18 25 L22 20 L26 25 L33 15 V31"
         stroke={stroke}
-        strokeWidth="2.5"
+        strokeWidth="3"
         strokeLinecap="round"
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Waypoints */}
-      <circle cx="12" cy="12" r="2.5" fill={pin} />
-      <circle cx="28" cy="12" r="2.5" fill={pin} />
-      <circle cx="20" cy="30" r="2.8" fill={pinAccent} />
+      {/* Pin dot — amber accent on the left leg top */}
+      <circle cx="33" cy="15" r="2.6" fill={pin} />
+      <circle cx="33" cy="15" r="1" fill={isLight ? "#FFFFFF" : "#0B2E4F"} />
     </svg>
   );
 }

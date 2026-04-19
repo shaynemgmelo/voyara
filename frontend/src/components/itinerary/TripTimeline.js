@@ -230,22 +230,60 @@ export default function TripTimeline({ dayPlans, onReorder }) {
 
   return (
     <div className="w-full">
-      {/* Day header with date pill */}
-      <div className="flex items-baseline gap-4 mb-6 px-2">
-        <div
-          className="px-4 py-2 rounded-full text-white font-bold text-sm tracking-wide"
-          style={{ backgroundColor: BRAND.primary }}
-        >
-          DIA {day.day_number}
+      {/* Day tabs — all days side-by-side, scrollable on overflow */}
+      <div className="mb-4 -mx-2 overflow-x-auto scrollbar-thin">
+        <div className="flex items-center gap-2 px-2 pb-2 min-w-max">
+          {daysWithItems.map((d, idx) => {
+            const isActive = idx === activeDayIdx;
+            const count = (d.itinerary_items || []).length;
+            return (
+              <button
+                key={d.id}
+                onClick={() => setActiveDayIdx(idx)}
+                className={`group flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-full font-semibold text-sm transition-all ${
+                  isActive
+                    ? "text-white shadow-lg"
+                    : "bg-white border border-slate-200 text-slate-600 hover:border-emerald-300 hover:text-slate-900"
+                }`}
+                style={
+                  isActive
+                    ? {
+                        backgroundColor: BRAND.primary,
+                        boxShadow: "0 10px 24px -8px rgba(16,185,129,0.55)",
+                      }
+                    : {}
+                }
+              >
+                <span className="text-xs font-bold tracking-wide">
+                  DIA {d.day_number}
+                </span>
+                {d.city ? (
+                  <span className="opacity-80 font-normal">• {d.city}</span>
+                ) : null}
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                    isActive
+                      ? "bg-white/25 text-white"
+                      : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
         </div>
-        {day.city && (
-          <h2 className="text-2xl font-bold" style={{ color: BRAND.ink }}>
-            {day.city}
-          </h2>
-        )}
-        <span className="text-sm ml-auto" style={{ color: BRAND.textMuted }}>
-          {items.length} {items.length === 1 ? "lugar" : "lugares"}
-        </span>
+      </div>
+
+      {/* Active day header (contextual) */}
+      <div className="flex items-baseline justify-between mb-4 px-2">
+        <div className="text-sm" style={{ color: BRAND.textMuted }}>
+          {items.length} {items.length === 1 ? "lugar" : "lugares"}{" "}
+          {day.city ? `em ${day.city}` : ""}
+        </div>
+        <div className="text-xs" style={{ color: BRAND.textMuted }}>
+          Arraste para navegar →
+        </div>
       </div>
 
       {/* Cards carousel with drag & drop */}
@@ -333,56 +371,19 @@ export default function TripTimeline({ dayPlans, onReorder }) {
         </Droppable>
       </DragDropContext>
 
-      {/* Day timeline (dots + labels) */}
-      <div className="mt-10 relative">
-        <div className="absolute top-3 left-0 right-0 h-0.5 bg-gray-200" />
-        <div
-          className="absolute top-3 left-0 h-0.5 transition-all"
-          style={{
-            backgroundColor: BRAND.primary,
-            width:
-              daysWithItems.length > 1
-                ? `${(activeDayIdx / (daysWithItems.length - 1)) * 100}%`
-                : "0%",
-          }}
-        />
-        <div className="flex justify-between relative">
-          {daysWithItems.map((d, idx) => {
-            const active = idx === activeDayIdx;
-            const past = idx < activeDayIdx;
-            return (
-              <button
-                key={d.id}
-                onClick={() => setActiveDayIdx(idx)}
-                className="flex flex-col items-center flex-1 group"
-              >
-                <div
-                  className="w-6 h-6 rounded-full border-4 transition-all z-10"
-                  style={{
-                    backgroundColor:
-                      active || past ? BRAND.primary : "#FFFFFF",
-                    borderColor:
-                      active || past ? BRAND.primary : "#D1D5DB",
-                    transform: active ? "scale(1.15)" : "scale(1)",
-                    boxShadow: active
-                      ? "0 0 0 6px rgba(16, 185, 129, 0.15)"
-                      : "none",
-                  }}
-                />
-                <div
-                  className="mt-2 text-xs font-semibold transition-colors"
-                  style={{
-                    color: active ? BRAND.primaryDark : BRAND.textMuted,
-                  }}
-                >
-                  {d.city || `Dia ${d.day_number}`}
-                </div>
-                <div className="text-xs" style={{ color: BRAND.textMuted }}>
-                  Dia {d.day_number}
-                </div>
-              </button>
-            );
-          })}
+      {/* Subtle progress bar at bottom — minimal */}
+      <div className="mt-8 px-2">
+        <div className="h-1 bg-slate-100 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{
+              backgroundColor: BRAND.primary,
+              width:
+                daysWithItems.length > 1
+                  ? `${((activeDayIdx + 1) / daysWithItems.length) * 100}%`
+                  : "100%",
+            }}
+          />
         </div>
       </div>
     </div>

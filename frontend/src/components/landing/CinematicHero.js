@@ -18,11 +18,13 @@ const HERO_IMG =
 const HERO_FALLBACK =
   "https://images.unsplash.com/photo-1488085061387-422e29b40080?w=2400&q=85&auto=format&fit=crop";
 
-const FLOAT_ICONS = [
-  { emoji: "✈️", x: "8%", y: "22%", delay: 0, size: 46 },
-  { emoji: "📍", x: "86%", y: "26%", delay: 0.3, size: 42 },
-  { emoji: "🗺️", x: "10%", y: "70%", delay: 0.6, size: 44 },
-  { emoji: "📸", x: "84%", y: "74%", delay: 0.9, size: 42 },
+// Minimal SVG constellation dots, no emojis
+const CONSTELLATION = [
+  { x: "12%", y: "24%", delay: 0, size: 4 },
+  { x: "88%", y: "28%", delay: 0.3, size: 5 },
+  { x: "18%", y: "72%", delay: 0.6, size: 3 },
+  { x: "82%", y: "68%", delay: 0.9, size: 4 },
+  { x: "50%", y: "12%", delay: 1.1, size: 3 },
 ];
 
 export default function CinematicHero({ pt, ctaLink, user }) {
@@ -66,34 +68,30 @@ export default function CinematicHero({ pt, ctaLink, user }) {
         }}
       />
 
-      {/* Floating icons */}
-      {FLOAT_ICONS.map((ic, i) => (
+      {/* Constellation — subtle amber pinpoints, no emojis */}
+      {CONSTELLATION.map((dot, i) => (
         <motion.div
           key={i}
-          className="absolute pointer-events-none select-none hidden md:block"
+          className="absolute pointer-events-none hidden md:block"
           style={{
-            left: ic.x,
-            top: ic.y,
-            fontSize: ic.size,
-            filter: "drop-shadow(0 12px 28px rgba(0,0,0,0.5))",
+            left: dot.x,
+            top: dot.y,
+            width: dot.size,
+            height: dot.size,
+            borderRadius: "50%",
+            background: "#FBBF24",
+            boxShadow:
+              "0 0 18px rgba(251,191,36,0.9), 0 0 34px rgba(245,158,11,0.5)",
           }}
-          initial={{ opacity: 0, y: 20 }}
-          animate={{
-            opacity: 1,
-            y: [0, -12, 0],
-          }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: [0.4, 1, 0.4] }}
           transition={{
-            opacity: { duration: 1.2, delay: ic.delay },
-            y: {
-              duration: 4 + i * 0.4,
-              delay: ic.delay,
-              repeat: Infinity,
-              ease: "easeInOut",
-            },
+            duration: 3 + i * 0.3,
+            delay: dot.delay,
+            repeat: Infinity,
+            ease: "easeInOut",
           }}
-        >
-          <span>{ic.emoji}</span>
-        </motion.div>
+        />
       ))}
 
       {/* Content */}
