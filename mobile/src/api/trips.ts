@@ -51,6 +51,8 @@ export interface ItineraryItem {
   rating?: number | null;
   website?: string | null;
   position?: number;
+  source?: "ai" | "link" | "manual" | null;
+  source_url?: string | null;
 }
 
 export const tripsApi = {

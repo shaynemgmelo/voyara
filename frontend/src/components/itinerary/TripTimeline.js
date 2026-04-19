@@ -67,6 +67,37 @@ function placeholderImage(name, color) {
   return `data:image/svg+xml;utf8,${svg}`;
 }
 
+function sourceBadge(source, sourceUrl) {
+  if (!source || source === "manual") return null;
+  if (source === "link") {
+    const platform = (sourceUrl || "").toLowerCase();
+    let label = "Do link";
+    let emoji = "📎";
+    if (platform.includes("tiktok")) {
+      emoji = "🎵";
+      label = "Do TikTok";
+    } else if (platform.includes("instagram")) {
+      emoji = "📸";
+      label = "Do Instagram";
+    } else if (
+      platform.includes("youtube") ||
+      platform.includes("youtu.be")
+    ) {
+      emoji = "▶️";
+      label = "Do YouTube";
+    }
+    return { emoji, label, style: "bg-blue-100 text-blue-700" };
+  }
+  if (source === "ai") {
+    return {
+      emoji: "✨",
+      label: "Sugerido pela IA",
+      style: "bg-violet-100 text-violet-700",
+    };
+  }
+  return null;
+}
+
 function ItemCard({ item, dragHandleProps, isDragging }) {
   const color = categoryColor(item.category);
   const icon = categoryIcon(item.category);
@@ -74,6 +105,7 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
     item.photo_url ||
     (item.photos && item.photos[0]) ||
     placeholderImage(item.name, color);
+  const badge = sourceBadge(item.source, item.source_url);
 
   return (
     <div
@@ -93,6 +125,15 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
             e.target.src = placeholderImage(item.name, color);
           }}
         />
+        {badge && (
+          <div
+            className={`absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide shadow-md backdrop-blur-sm ${badge.style}`}
+            title={item.source_url || ""}
+          >
+            <span>{badge.emoji}</span>
+            <span>{badge.label}</span>
+          </div>
+        )}
         {dragHandleProps && (
           <div
             {...dragHandleProps}
