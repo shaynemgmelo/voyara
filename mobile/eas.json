@@ -1,0 +1,36 @@
+{
+  "cli": {
+    "version": ">= 5.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "ios": {
+        "resourceClass": "m-medium"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "seu-apple-id@email.com",
+        "ascAppId": "PREENCHER_APP_STORE_CONNECT_APP_ID",
+        "appleTeamId": "PREENCHER_TEAM_ID"
+      }
+    }
+  }
+}

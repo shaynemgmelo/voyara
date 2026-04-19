@@ -1,0 +1,69 @@
+{
+  "expo": {
+    "name": "Mapass",
+    "slug": "mapass",
+    "scheme": "mapass",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0B0F"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.mapass.travel",
+      "buildNumber": "1",
+      "usesAppleSignIn": true,
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "O Mapass usa sua localização para mostrar lugares próximos e ajudar na navegação do roteiro.",
+        "NSCameraUsageDescription": "Use a câmera para adicionar fotos aos seus roteiros.",
+        "NSPhotoLibraryUsageDescription": "Selecione fotos para adicionar aos seus roteiros.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "app.mapass.travel",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0B0B0F"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-web-browser",
+      "expo-secure-store",
+      "expo-apple-authentication",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "O Mapass usa sua localização para sugerir lugares próximos."
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "https://voyara-api.onrender.com/api/v1",
+      "aiUrl": "https://voyara-ai.onrender.com",
+      "supabaseUrl": "https://ekodgupuhlytnikqgufb.supabase.co",
+      "eas": {
+        "projectId": ""
+      }
+    },
+    "owner": "shaynemgmelo"
+  }
+}
