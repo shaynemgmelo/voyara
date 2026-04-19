@@ -518,7 +518,7 @@ async def _assign_cities_to_days(
 
 def _normalize_place_name(name: str) -> str:
     """Normalize a place name for fuzzy matching — strip accents, lowercase,
-    remove punctuation and common noise words."""
+    remove punctuation and common noise words including multilingual connectors."""
     import unicodedata
 
     if not name:
@@ -530,15 +530,60 @@ def _normalize_place_name(name: str) -> str:
     # Remove punctuation and duplicate whitespace
     n = re.sub(r"[^a-z0-9\s]", " ", n)
     n = re.sub(r"\s+", " ", n).strip()
-    # Strip trailing city/state noise ("restaurante aprazivel rio de janeiro"
-    # still matches "restaurante aprazivel")
+    # Remove multi-word connectors: "de la", "de los", "de las" (Spanish)
+    # and Portuguese/English/French equivalents
+    n = re.sub(r"\b(de la|de los|de las|del|do|da|dos|das|de|of the|of|du|de la|en el|en)\b", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    # Strip trailing city/state noise + common qualifiers
     noise_words = {
-        "the", "a", "o", "os", "as", "de", "da", "do", "das", "dos",
-        "restaurant", "restaurante", "cafe", "bar", "museu", "museum",
-        "parque", "park",
+        "the", "a", "an", "o", "os", "as", "el", "la", "los", "las",
+        "restaurant", "restaurante", "restaurante", "ristorante",
+        "cafe", "cafeteria", "bar", "museu", "museum", "musee",
+        "parque", "park", "parc", "statue", "estatua", "statua",
+        "iglesia", "igreja", "church", "eglise",
+        "praca", "plaza", "place", "square",
     }
     tokens = [t for t in n.split() if t and t not in noise_words]
     return " ".join(tokens) if tokens else n
+
+
+def _deduplicate_places(place_list: list[dict]) -> list[dict]:
+    """Remove duplicate places — same normalized name, same or adjacent day.
+    Keeps the first occurrence (preserving order)."""
+    if not place_list:
+        return place_list
+
+    seen: dict[str, dict] = {}
+    result: list[dict] = []
+    removed = 0
+
+    for item in place_list:
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        norm = _normalize_place_name(name)
+        if not norm:
+            result.append(item)
+            continue
+
+        existing = seen.get(norm)
+        if existing is None:
+            seen[norm] = item
+            result.append(item)
+            continue
+
+        # Same normalized name already exists — prefer the link-sourced one
+        if item.get("source") == "link" and existing.get("source") != "link":
+            # Replace the existing with this one (link takes priority)
+            idx = result.index(existing)
+            result[idx] = item
+            seen[norm] = item
+        # else: drop this duplicate
+        removed += 1
+
+    if removed:
+        logger.info("[dedup] Removed %d duplicate place(s)", removed)
+    return result
 
 
 def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]) -> list[dict]:
@@ -1974,6 +2019,10 @@ async def _build_itinerary_eco(
 
     # Safety net: inject any link places Claude dropped
     place_list = _ensure_link_places_present(place_list, places_mentioned, day_plans)
+
+    # Remove duplicates (handles language variants like "Cemitério da Recoleta"
+    # vs "Cemitério de la Recoleta" — same place)
+    place_list = _deduplicate_places(place_list)
 
     place_list = _rebalance_days(place_list, len(day_plans))
 

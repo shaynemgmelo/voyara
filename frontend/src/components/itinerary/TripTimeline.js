@@ -92,7 +92,14 @@ function sourceBadge(source, sourceUrl) {
   };
 }
 
-function ItemCard({ item, dragHandleProps, isDragging }) {
+function ItemCard({
+  item,
+  dragHandleProps,
+  isDragging,
+  onClick,
+  onDelete,
+  onSwap,
+}) {
   const color = categoryColor(item.category);
   const icon = categoryIcon(item.category);
   const image =
@@ -103,10 +110,23 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
 
   return (
     <div
-      className={`flex flex-col rounded-2xl overflow-hidden shadow-sm border transition ${
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+      className={`flex flex-col rounded-2xl overflow-hidden shadow-sm border transition cursor-pointer ${
         isDragging
           ? "shadow-2xl scale-[1.02] border-emerald-400"
-          : "border-emerald-100 hover:border-emerald-200"
+          : "border-emerald-100 hover:border-emerald-300 hover:shadow-md"
       }`}
       style={{ backgroundColor: BRAND.cardBg }}
     >
@@ -128,31 +148,61 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
             <span>{badge.label}</span>
           </div>
         )}
-        {dragHandleProps && (
-          <div
-            {...dragHandleProps}
-            className="absolute top-2 right-2 w-8 h-8 rounded-lg bg-black/60 hover:bg-black/80 backdrop-blur-sm flex items-center justify-center cursor-grab active:cursor-grabbing"
-            title="Arrastar"
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+        {/* Action buttons overlay (top-right) */}
+        <div className="absolute top-2 right-2 flex gap-1.5">
+          {onSwap && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onSwap();
+              }}
+              className="w-8 h-8 rounded-lg bg-black/60 hover:bg-emerald-600 backdrop-blur-sm flex items-center justify-center transition-colors"
+              title="Substituir por outra sugestão"
+              aria-label="Substituir"
             >
-              <circle cx="9" cy="5" r="1" />
-              <circle cx="9" cy="12" r="1" />
-              <circle cx="9" cy="19" r="1" />
-              <circle cx="15" cy="5" r="1" />
-              <circle cx="15" cy="12" r="1" />
-              <circle cx="15" cy="19" r="1" />
-            </svg>
-          </div>
-        )}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="17 1 21 5 17 9" />
+                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                <polyline points="7 23 3 19 7 15" />
+                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+              </svg>
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="w-8 h-8 rounded-lg bg-black/60 hover:bg-red-600 backdrop-blur-sm flex items-center justify-center transition-colors"
+              title="Remover"
+              aria-label="Remover"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          )}
+          {dragHandleProps && (
+            <div
+              {...dragHandleProps}
+              onClick={(e) => e.stopPropagation()}
+              className="w-8 h-8 rounded-lg bg-black/60 hover:bg-black/80 backdrop-blur-sm flex items-center justify-center cursor-grab active:cursor-grabbing"
+              title="Arrastar"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="9" cy="5" r="1" />
+                <circle cx="9" cy="12" r="1" />
+                <circle cx="9" cy="19" r="1" />
+                <circle cx="15" cy="5" r="1" />
+                <circle cx="15" cy="12" r="1" />
+                <circle cx="15" cy="19" r="1" />
+              </svg>
+            </div>
+          )}
+        </div>
       </div>
       <div className="p-5 flex-1 flex flex-col">
         <div
@@ -189,7 +239,13 @@ function ItemCard({ item, dragHandleProps, isDragging }) {
   );
 }
 
-export default function TripTimeline({ dayPlans, onReorder }) {
+export default function TripTimeline({
+  dayPlans,
+  onReorder,
+  onItemClick,
+  onDeleteItem,
+  onSwapItem,
+}) {
   const [activeDayIdx, setActiveDayIdx] = useState(0);
   const swiperRefs = useRef({});
 
@@ -358,6 +414,29 @@ export default function TripTimeline({ dayPlans, onReorder }) {
                             item={item}
                             dragHandleProps={dragProvided.dragHandleProps}
                             isDragging={snapshot.isDragging}
+                            onClick={
+                              onItemClick
+                                ? () => onItemClick(item.id, day.id)
+                                : undefined
+                            }
+                            onSwap={
+                              onSwapItem
+                                ? () => onSwapItem(item.id, day.id)
+                                : undefined
+                            }
+                            onDelete={
+                              onDeleteItem
+                                ? () => {
+                                    if (
+                                      window.confirm(
+                                        `Remover "${item.name}" do roteiro?`
+                                      )
+                                    ) {
+                                      onDeleteItem(item.id, day.id);
+                                    }
+                                  }
+                                : undefined
+                            }
                           />
                         </div>
                       )}

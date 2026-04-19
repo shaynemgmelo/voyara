@@ -339,6 +339,17 @@ export default function TripDetail() {
               onReorder={({ dayPlanId, fromIndex, toIndex }) =>
                 reorderItems(dayPlanId, fromIndex, toIndex)
               }
+              onItemClick={(itemId, dayPlanId) => {
+                const dp = trip.day_plans?.find((d) => d.id === dayPlanId);
+                const item = dp?.itinerary_items?.find((i) => i.id === itemId);
+                if (item) handleItemClick(item);
+              }}
+              onDeleteItem={(itemId, dayPlanId) => removeItem(dayPlanId, itemId)}
+              onSwapItem={(itemId, dayPlanId) => {
+                const dp = trip.day_plans?.find((d) => d.id === dayPlanId);
+                const item = dp?.itinerary_items?.find((i) => i.id === itemId);
+                if (item) handleSwapItem(itemId, { dayPlanId });
+              }}
             />
           ) : (
             <DragDropContext onDragEnd={handleDragEnd}>
