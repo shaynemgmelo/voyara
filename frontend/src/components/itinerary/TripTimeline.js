@@ -1,9 +1,10 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Swiper, SwiperSlide } from "swiper/react";
-import { Navigation } from "swiper/modules";
+import { Navigation, Mousewheel, FreeMode, Keyboard } from "swiper/modules";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import "swiper/css";
 import "swiper/css/navigation";
+import "swiper/css/free-mode";
 
 // Elfsight-inspired palette: sage / mint greens with warm accents
 const BRAND = {
@@ -220,9 +221,24 @@ export default function TripTimeline({ dayPlans, onReorder }) {
               className="relative"
             >
               <Swiper
-                modules={[Navigation]}
+                modules={[Navigation, Mousewheel, FreeMode, Keyboard]}
                 slidesPerView="auto"
                 spaceBetween={16}
+                freeMode={{
+                  enabled: true,
+                  momentum: true,
+                  momentumRatio: 0.8,
+                  momentumBounce: true,
+                  sticky: false,
+                }}
+                mousewheel={{
+                  enabled: true,
+                  forceToAxis: true,
+                  sensitivity: 1.2,
+                  releaseOnEdges: true,
+                }}
+                keyboard={{ enabled: true, onlyInViewport: true }}
+                grabCursor
                 navigation={{
                   prevEl: `.timeline-prev-${day.id}`,
                   nextEl: `.timeline-next-${day.id}`,
