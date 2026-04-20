@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app.api.schemas import (
     AnalyzeUrlRequest,
@@ -32,6 +35,21 @@ router = APIRouter()
 
 # In-memory status tracking (use Redis in production)
 processing_status: dict[int, dict] = {}
+
+# Async analyze jobs — key: job_id, value: {status, result, started_at, urls}
+analyze_jobs: dict[str, dict[str, Any]] = {}
+
+_JOB_TTL_SECONDS = 60 * 15  # 15 minutes; old jobs get GC'd lazily
+
+
+def _gc_old_jobs() -> None:
+    now = time.time()
+    dead = [
+        jid for jid, info in analyze_jobs.items()
+        if now - info.get("started_at", now) > _JOB_TTL_SECONDS
+    ]
+    for jid in dead:
+        analyze_jobs.pop(jid, None)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -65,10 +83,10 @@ async def handle_chat(request: ChatRequest):
 
 @router.post("/analyze-url", response_model=AnalyzeUrlResponse)
 async def handle_analyze_url(request: AnalyzeUrlRequest):
-    """Analyze URLs and return place info without creating database records.
+    """Fast preview — caption/oEmbed only, ≤15s.
 
-    This is the lightweight 'Learn more' endpoint — purely stateless.
-    Synchronous because it typically takes 5-10 seconds.
+    For deep analysis (audio transcription + on-screen OCR) use the
+    async endpoint /analyze-url/start.
     """
     logger.info("Received analyze-url request: %d URL(s)", len(request.urls))
 
@@ -78,6 +96,73 @@ async def handle_analyze_url(request: AnalyzeUrlRequest):
     except Exception as e:
         logger.exception("Failed to analyze URLs")
         return AnalyzeUrlResponse(error=str(e))
+
+
+@router.post("/analyze-url/start")
+async def analyze_url_start(
+    request: AnalyzeUrlRequest, background_tasks: BackgroundTasks
+):
+    """Start a deep analyze job (audio transcription + on-screen OCR).
+
+    Returns immediately with a job_id. Client polls /analyze-url/status/{id}.
+    """
+    _gc_old_jobs()
+
+    job_id = str(uuid.uuid4())
+    analyze_jobs[job_id] = {
+        "status": "pending",
+        "stage": "extracting",
+        "started_at": time.time(),
+        "urls": list(request.urls),
+        "result": None,
+        "error": None,
+    }
+
+    background_tasks.add_task(_run_deep_analyze_job, job_id, list(request.urls))
+    logger.info("[analyze-deep] Started job %s for %d URL(s)", job_id, len(request.urls))
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/analyze-url/status/{job_id}")
+async def analyze_url_status(job_id: str):
+    """Poll-friendly status endpoint. Returns
+    {status: 'pending'|'ready'|'error', stage, result, error}."""
+    info = analyze_jobs.get(job_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "job_id": job_id,
+        "status": info.get("status"),
+        "stage": info.get("stage"),
+        "result": info.get("result"),
+        "error": info.get("error"),
+        "elapsed": round(time.time() - info.get("started_at", time.time()), 1),
+    }
+
+
+async def _run_deep_analyze_job(job_id: str, urls: list[str]) -> None:
+    """Run full deep extraction for a list of URLs, store result."""
+    from app.services.orchestrator import analyze_urls_deep
+
+    info = analyze_jobs.get(job_id)
+    if info is None:
+        return
+
+    try:
+        info["stage"] = "transcribing_and_reading_frames"
+        result = await analyze_urls_deep(urls)
+        info["result"] = result
+        info["status"] = "ready"
+        info["stage"] = "done"
+        logger.info(
+            "[analyze-deep] Job %s done: %d places",
+            job_id,
+            len(result.get("places", [])),
+        )
+    except Exception as e:
+        logger.exception("[analyze-deep] Job %s failed", job_id)
+        info["status"] = "error"
+        info["error"] = str(e)
 
 
 @router.post("/process-link", response_model=ProcessLinkResponse, status_code=202)

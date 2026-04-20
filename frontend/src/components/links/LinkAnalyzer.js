@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
-import { analyzeUrls } from "../../api/analyze";
+import { analyzeUrls, analyzeUrlsDeep } from "../../api/analyze";
 
 function extractUrls(text) {
   const matches = text.match(/https?:\/\/[^\s,;)<>]+/g) || [];
@@ -8,29 +8,83 @@ function extractUrls(text) {
 }
 
 export default function LinkAnalyzer({ onResult }) {
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
+  const pt = lang === "pt-BR";
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
 
   const detectedUrls = text.trim() ? extractUrls(text) : [];
+
+  const humanStage = (stage, elapsed) => {
+    if (!stage) return null;
+    if (stage === "extracting" || stage === "transcribing_and_reading_frames") {
+      if (elapsed < 8) {
+        return pt
+          ? "Lendo legenda e descrição dos vídeos..."
+          : "Reading video captions...";
+      }
+      if (elapsed < 30) {
+        return pt
+          ? "Transcrevendo áudio dos vídeos..."
+          : "Transcribing video audio...";
+      }
+      if (elapsed < 60) {
+        return pt
+          ? "Lendo texto sobreposto nos frames..."
+          : "Reading on-screen text from frames...";
+      }
+      return pt
+        ? "Cruzando tudo pra identificar lugares..."
+        : "Cross-referencing to identify places...";
+    }
+    if (stage === "done") return pt ? "Pronto!" : "Done!";
+    return null;
+  };
 
   const handleAnalyze = async () => {
     if (detectedUrls.length === 0) return;
     setLoading(true);
     setError(null);
+    setProgress(null);
+
     try {
-      const result = await analyzeUrls(detectedUrls);
-      if (result.error) {
-        setError(result.error);
+      // Kick off deep analysis (polling) and fast preview in parallel
+      const deepPromise = analyzeUrlsDeep(detectedUrls, (stage, elapsed) => {
+        setProgress({ stage, elapsed, message: humanStage(stage, elapsed) });
+      });
+
+      // Fast preview so user sees something immediately if they wait
+      let fastResult = null;
+      try {
+        fastResult = await analyzeUrls(detectedUrls);
+      } catch {
+        // preview failing is fine, we still wait for deep
+      }
+
+      // Now wait for deep to finish (it reads audio + vision)
+      let deepResult = null;
+      try {
+        deepResult = await deepPromise;
+      } catch (e) {
+        // Deep failed — fall back to fast preview
+        if (!fastResult) throw e;
+      }
+
+      const finalResult = deepResult || fastResult;
+      if (!finalResult) throw new Error("No result");
+      if (finalResult.error) {
+        setError(finalResult.error);
       } else {
-        onResult({ ...result, urls: detectedUrls });
+        onResult({ ...finalResult, urls: detectedUrls });
         setText("");
       }
     } catch (err) {
-      setError(t("linkAnalyzer.error"));
+      setError(t("linkAnalyzer.error") || err.message);
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   };
 
@@ -55,7 +109,7 @@ export default function LinkAnalyzer({ onResult }) {
               </span>
             )}
           </div>
-          <div className="mt-4 flex items-center gap-3">
+          <div className="mt-4 flex items-center gap-3 flex-wrap">
             <button
               onClick={handleAnalyze}
               disabled={loading || detectedUrls.length === 0}
@@ -72,6 +126,11 @@ export default function LinkAnalyzer({ onResult }) {
                 t("linkAnalyzer.analyze")
               )}
             </button>
+            {loading && progress?.message && (
+              <span className="text-xs text-gray-300 animate-pulse">
+                {progress.message}
+              </span>
+            )}
             {error && <p className="text-red-400 text-xs">{error}</p>}
           </div>
         </div>

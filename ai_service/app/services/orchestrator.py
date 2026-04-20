@@ -109,10 +109,23 @@ def is_shallow_extraction() -> bool:
     return _SHALLOW_EXTRACTION.value
 
 
-async def analyze_urls(urls: list[str]) -> dict:
-    """Analyze URLs and return place info without creating any database records.
+async def analyze_urls_deep(urls: list[str]) -> dict:
+    """Deep analyze — runs audio transcription + on-screen OCR in addition
+    to caption/oEmbed. Used by the async /analyze-url/start job.
+    Typically 30-90s per URL. Never raises.
+    """
+    return await _analyze_urls_impl(urls, deep=True)
 
-    This is the lightweight "Learn more" endpoint — purely stateless.
+
+async def analyze_urls(urls: list[str]) -> dict:
+    """Fast preview — caption/oEmbed only. Used by /analyze-url sync.
+    Fits under 15s per URL even cold. Never raises.
+    """
+    return await _analyze_urls_impl(urls, deep=False)
+
+
+async def _analyze_urls_impl(urls: list[str], deep: bool) -> dict:
+    """Analyze URLs and return place info without creating database records.
 
     Never raises and never returns the unhelpful "could not parse" error.
     Degrades gracefully: if extraction or AI parsing fails, we still return
@@ -120,13 +133,12 @@ async def analyze_urls(urls: list[str]) -> dict:
     """
     import anthropic
 
-    # 1. Extract content from all URLs (shallow mode: fast caption/oEmbed
-    # only, no audio/vision — this endpoint must respond under 30s).
+    # 1. Extract content from all URLs. Depth depends on caller.
     combined_content = ""
     extraction_errors: list[str] = []
     for url in urls[:5]:  # Max 5 URLs
         try:
-            content = await _extract_content(url, deep=False)
+            content = await _extract_content(url, deep=deep)
             if content:
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
                 logger.info(
