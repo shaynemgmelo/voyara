@@ -348,8 +348,8 @@ about."""
         "destination": destination,
         "summary": summary,
         "debug": debug_stats,
-        "debug_raw": combined_content[:8000] if deep else None,
-        "debug_haiku_raw": _last_haiku_response.get("raw", "") if deep else None,
+        "debug_raw": combined_content[:8000],
+        "debug_haiku_raw": _last_haiku_response.get("raw", ""),
     }
 
 
