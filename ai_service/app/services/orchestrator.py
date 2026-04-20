@@ -76,9 +76,9 @@ async def _extract_content(url: str, deep: bool = True) -> str:
             # thread-local flag; extractors check it and skip heavy work.
             _SHALLOW_EXTRACTION.value = not deep
             try:
-                # Deep: Whisper (60s) + Vision OCR (60s) in parallel → ~65s
-                # clock. 180s gives headroom for cold start.
-                timeout = 180 if deep else 15
+                # Deep: Whisper (90s) + Vision OCR (75s, 12 frames) run in
+                # parallel → ~95s clock. 240s absorbs cold start.
+                timeout = 240 if deep else 15
                 content = await asyncio.wait_for(ext.extract(url), timeout=timeout)
                 parts = [content.title or "", content.description or ""]
                 if content.captions:

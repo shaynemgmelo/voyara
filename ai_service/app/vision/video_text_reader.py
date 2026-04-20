@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, str]] = {}
 _CACHE_TTL_SECONDS = 60 * 60 * 6
 
-# Tuning
-MAX_FRAMES = 6
+# Tuning — 12 frames gives much better coverage of numbered lists
+# that unfold over the video (Day 1 / Day 2 / Day 3 cards etc).
+MAX_FRAMES = 12
 FRAME_QUALITY = 3  # ffmpeg -q:v (1=best, 31=worst). 3 is plenty for OCR.
 MAX_FRAME_SIDE_PX = 1280  # downscale giant frames
 
@@ -194,23 +195,36 @@ def _vision_ocr(frames: list[bytes]) -> str:
         {
             "type": "text",
             "text": (
-                "Estas são {n} imagens extraídas de um vídeo curto de viagem. "
-                "Sua tarefa é apenas LER e TRANSCREVER todo TEXTO VISÍVEL em cada frame. "
-                "Preste MUITA atenção a:\n"
-                "- Texto sobreposto/overlay do criador (legendas, listas numeradas tipo '1. NomeDoLugar', '2. ...')\n"
-                "- Placas, fachadas, letreiros, nomes de estabelecimentos\n"
-                "- Nomes de ruas, bairros, estações\n"
-                "- Menus, cardápios, preços que indiquem nome do lugar\n"
-                "- Tatuagens na tela, carimbos geográficos ('PARIS', 'TOKYO'), emojis de bandeira\n\n"
-                "FORMATO DE RESPOSTA: lista, um item por linha, sem comentários. "
+                "Estas são {n} imagens extraídas de um vídeo de viagem "
+                "(TikTok/Reel/Short). "
+                "Sua tarefa é LER e TRANSCREVER exaustivamente "
+                "TODO o texto visível. NÃO resuma, NÃO parafraseie — "
+                "transcreva literal.\n\n"
+                "PRIORIDADE MÁXIMA (capture isso sem falta):\n"
+                "• Listas numeradas sobrepostas (1. ... 2. ... 3. ...)\n"
+                "• Cabeçalhos tipo 'DIA 1', 'DIA 2', 'ROTEIRO DE X DIAS'\n"
+                "• Nomes de lugares, bairros, ruas, estabelecimentos, museus, "
+                "parques, mercados, praças, restaurantes, bares, miradores\n"
+                "• Placas, fachadas, letreiros com nomes próprios\n"
+                "• Instruções tipo 'siga para X', 'vá até Y', 'pare em Z'\n\n"
+                "CAPTURE TAMBÉM se aparecer:\n"
+                "• Menus com nomes de pratos/casas\n"
+                "• Preços com nome do estabelecimento\n"
+                "• Hashtags geográficas\n\n"
+                "FORMATO: uma linha por item, transcrição literal, sem "
+                "comentários. Mesmo que o mesmo texto apareça em vários "
+                "frames, liste uma vez apenas (ignore duplicatas).\n\n"
                 "Exemplo:\n"
                 "1. Campanópolis\n"
                 "2. Barrio Chino\n"
-                "3. Barco Humberto M\n"
-                "Café Tortoni\n"
-                "Avenida 9 de Julio\n\n"
-                "Se não houver texto legível em alguma frame, pule. "
-                "Se todos os frames forem vazios, responda apenas 'NENHUM TEXTO'."
+                "DIA 1\n"
+                "Casa Rosada\n"
+                "Avenida 9 de Julho\n"
+                "Praça Domingo Perón\n"
+                "Galerías Pacífico\n"
+                "Catedral Metropolitana\n\n"
+                "Se não houver nenhum texto legível em nenhum frame, "
+                "responda apenas 'NENHUM TEXTO'."
             ).format(n=len(frames)),
         }
     ]
@@ -230,7 +244,7 @@ def _vision_ocr(frames: list[bytes]) -> str:
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",  # Haiku with vision — cheaper/faster
-            max_tokens=900,
+            max_tokens=2000,  # room for full numbered lists
             messages=[{"role": "user", "content": content}],
         )
         text = response.content[0].text if response.content else ""

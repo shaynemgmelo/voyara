@@ -53,10 +53,10 @@ class TikTokExtractor(BaseExtractor):
         if not is_shallow_extraction():
             transcript, on_screen_text = await asyncio.gather(
                 _safe_call(
-                    transcribe_video_url(url, timeout=60.0), "transcript", url
+                    transcribe_video_url(url, timeout=90.0), "transcript", url
                 ),
                 _safe_call(
-                    read_video_text(url, timeout=60.0), "vision-ocr", url
+                    read_video_text(url, timeout=75.0), "vision-ocr", url
                 ),
             )
 

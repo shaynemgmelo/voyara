@@ -42,8 +42,8 @@ class InstagramExtractor(BaseExtractor):
                 return ""
 
             transcript, on_screen_text = await asyncio.gather(
-                _safe(transcribe_video_url(url, timeout=60.0), "ig-transcript"),
-                _safe(read_video_text(url, timeout=60.0), "ig-vision-ocr"),
+                _safe(transcribe_video_url(url, timeout=90.0), "ig-transcript"),
+                _safe(read_video_text(url, timeout=75.0), "ig-vision-ocr"),
             )
 
         captions: list[str] = []
