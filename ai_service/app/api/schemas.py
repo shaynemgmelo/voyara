@@ -64,6 +64,9 @@ class AnalyzeUrlResponse(BaseModel):
     destination: str | None = None
     summary: str | None = None
     error: str | None = None
+    # Phase 2 — structured content classification per input link + consolidated
+    # view. Frontend uses this to decide badges, day rigidity, conflict warnings.
+    content_classification: dict | None = None
 
 
 class ChatMessage(BaseModel):

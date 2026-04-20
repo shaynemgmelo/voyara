@@ -132,10 +132,18 @@ async def _analyze_urls_impl(urls: list[str], deep: bool) -> dict:
     Never raises and never returns the unhelpful "could not parse" error.
     Degrades gracefully: if extraction or AI parsing fails, we still return
     something useful the frontend can show.
+
+    Phase 2 addition: each URL is classified (A-F) individually, then the
+    per-URL results are consolidated by `_resolve_multi_video_conflicts`.
+    The flat `places` + `destination` fields stay in the response shape for
+    backward compat with the current frontend, while the new
+    `content_classification` blob carries the structured data that Phase 3
+    will read to decide day rigidity.
     """
     import anthropic
 
     # 1. Extract content from all URLs. Depth depends on caller.
+    per_url_content: dict[str, str] = {}  # url -> content
     combined_content = ""
     extraction_errors: list[str] = []
     debug_stats: dict[str, dict] = {}
@@ -143,6 +151,7 @@ async def _analyze_urls_impl(urls: list[str], deep: bool) -> dict:
         try:
             content = await _extract_content(url, deep=deep)
             if content:
+                per_url_content[url] = content
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
                 logger.info(
                     "[analyze-urls] Extracted %d chars from %s (has [ON-SCREEN]: %s)",
@@ -189,8 +198,39 @@ async def _analyze_urls_impl(urls: list[str], deep: bool) -> dict:
             ),
         }
 
-    # 2. Use Haiku to extract place names and destination
+    # 2. Classify + extract per URL in parallel (Phase 2)
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    classify_tasks = [
+        _classify_and_extract(client, u, c) for u, c in per_url_content.items()
+    ]
+    classify_results = await asyncio.gather(*classify_tasks, return_exceptions=True)
+
+    classified: list[dict] = []
+    for url, res in zip(per_url_content.keys(), classify_results):
+        if isinstance(res, dict):
+            row = dict(res)
+            row["source_url"] = url
+            classified.append(row)
+        elif isinstance(res, Exception):
+            logger.warning("[classify] Exception for %s: %s", url, res)
+
+    content_classification: dict = {}
+    if classified:
+        content_classification = _resolve_multi_video_conflicts(classified)
+        logger.info(
+            "[classify] Consolidated: destination=%s canonical_days=%d loose=%d "
+            "tips=%d conflicts=%d",
+            content_classification.get("destination"),
+            len(content_classification.get("canonical_days") or {}),
+            len(content_classification.get("loose_places") or []),
+            len(content_classification.get("complementary_tips") or []),
+            len(content_classification.get("conflicts_detected") or []),
+        )
+
+    # 3. Use legacy Haiku extractor for the flat `places` list that the
+    # current frontend still reads. Phase 3 will retire this path and let
+    # the UI consume content_classification directly.
 
     base_prompt = f"""Analyze this content and identify EVERY specific place mentioned, named, shown, or spoken about.
 
@@ -353,10 +393,19 @@ about."""
     finally:
         await places_client.close()
 
+    # If the Phase 2 classifier agrees on a destination and we don't have
+    # one yet, use it.
+    if not destination and content_classification.get("destination"):
+        destination = content_classification["destination"]
+
     return {
         "places": enriched_places,
         "destination": destination,
         "summary": summary,
+        # Phase 2 structured output. Downstream phases (day rigidity, refine,
+        # frontend badges) read from here. When empty, behavior falls back
+        # to the legacy flat `places` list.
+        "content_classification": content_classification,
         "debug": debug_stats,
         "debug_raw": combined_content[:8000],
         "debug_haiku_raw": _last_haiku_response.get("raw", ""),
@@ -407,9 +456,15 @@ def _regex_extract_places(text: str) -> dict:
         "6 PASSEIOS EM X 1️⃣ Place A 2️⃣ Place B 3️⃣ Place C ..."
     and the numbered fallback "1. Name 2. Name". Returns at most 20 places.
     Conservative by design — prefers false negatives over bogus matches.
+
+    Also infers a heuristic `content_type` when possible:
+      - "DIA 1/2/3" or "Day 1/2/3" markers → D (closed_day_by_day)
+      - Single keycap/numbered item                → A (single_place)
+      - Multiple keycap items, no day markers      → B (loose_list)
+      - No signal                                   → B with low confidence
     """
     if not text:
-        return {"places": [], "destination": None, "summary": ""}
+        return {"places": [], "destination": None, "summary": "", "content_type": "B", "confidence": 0.0}
 
     places: list[str] = []
 
@@ -463,7 +518,27 @@ def _regex_extract_places(text: str) -> dict:
             "recuperação — a análise de IA não estava disponível no momento)."
         )
 
-    return {"places": unique, "destination": destination, "summary": summary}
+    # Heuristic content_type for the fallback path.
+    has_day_marker = bool(
+        re.search(r"(?i)(dia|day)\s*[1-9]", text)
+        or re.search(r"roteiro\s+de\s+\d+\s+dias?", text, re.I)
+    )
+    if not unique:
+        content_type, confidence = "B", 0.0
+    elif has_day_marker:
+        content_type, confidence = "D", 0.55  # regex can't tell order reliably
+    elif len(unique) == 1:
+        content_type, confidence = "A", 0.6
+    else:
+        content_type, confidence = "B", 0.7
+
+    return {
+        "places": unique,
+        "destination": destination,
+        "summary": summary,
+        "content_type": content_type,
+        "confidence": confidence,
+    }
 
 
 def _parse_json_response(raw: str) -> list | dict | None:
@@ -579,6 +654,352 @@ def _salvage_truncated_json(text: str) -> dict | list | None:
 
 
 _last_haiku_response: dict[str, str] = {"raw": ""}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 2 — Content-type classifier A-F
+# ──────────────────────────────────────────────────────────────────
+#
+# Every link gets classified into one of six categories so the downstream
+# pipeline can decide HOW to respect it:
+#
+#   A — single_place          1 place mentioned ("this café is worth it")
+#   B — loose_list            List of places, no day structure ("6 passeios")
+#   C — partial_itinerary     Conditional ("if you have 2 days, do...")
+#   D — closed_day_by_day     Explicit "Day 1: X / Day 2: Y" — MOST structured
+#   E — day_trip              Full-day out-of-city trip ("Tigre from BA")
+#   F — complementary_tip     Single non-day-filling tip (a restaurant, a bar)
+#
+# Priority when multiple videos disagree: D > C > E > B > A > F.
+# Higher-priority categories "own" the days they cover; lower categories
+# contribute complementary_tips that get encaixed later.
+
+CONTENT_TYPES = ("A", "B", "C", "D", "E", "F")
+CONTENT_TYPE_PRIORITY = {t: p for p, t in enumerate(("F", "A", "B", "E", "C", "D"))}
+
+
+def _build_classify_prompt(url: str, content: str) -> str:
+    """Prompt that asks Haiku to classify + extract in a single pass."""
+    return f"""You are analyzing ONE travel video/link for a travel-planning app. Your job is to
+(1) classify the content into one of 6 categories, and (2) extract every place plus any
+explicit day-by-day structure.
+
+Content from {url}:
+{content[:12000]}
+
+Return ONLY a JSON object (no markdown, no prose, no code fences):
+{{
+  "destination": "City, Country",
+  "base_city": "Buenos Aires",
+  "content_type": "A|B|C|D|E|F",
+  "confidence": 0.0-1.0,
+  "creator_handle": "@handle or null",
+  "detected_days": [
+    {{"day": 1, "places": ["Place A", "Place B"], "region_hint": "Microcentro", "is_day_trip": false}}
+  ],
+  "loose_places": ["Place X", "Place Y"],
+  "complementary_tips": [{{"name": "Café X", "category": "cafe"}}],
+  "day_trip_suggestions": [{{"base_city": "Buenos Aires", "destination": "Tigre", "mentioned_duration_hours": 8}}],
+  "pace_signals": {{"items_per_day_avg": 4, "pace": "leve|moderado|acelerado"}},
+  "vibe_signature": ["urbano", "estetico", "cafes"],
+  "raw_summary": "One sentence."
+}}
+
+CATEGORY CRITERIA (strict — pick one, set confidence honestly):
+
+A — single_place: ONE place is the entire content ("this café in BA is amazing").
+   → `loose_places` has exactly 1 entry. `detected_days` is empty.
+
+B — loose_list: 2+ places WITHOUT day structure ("6 passeios em Buenos Aires").
+   Keycap emojis (1️⃣2️⃣) or "Top N" intros = strong signal.
+   → `loose_places` has the items. `detected_days` is empty.
+
+C — partial_itinerary: Conditional ("if you have 2 days, do X Y / if 3 days, add Z").
+   → `detected_days` may have structure but marked with `partial: true` in region_hint.
+
+D — closed_day_by_day: EXPLICIT "Dia 1: ..., Dia 2: ..., Dia 3: ..." with at least
+   2 numbered days. This is the MOST structured category. Transcript or on-screen
+   text must say "dia 1" / "day 1" / "1️⃣" before a list.
+   → `detected_days` is filled with one entry per day.
+
+E — day_trip: A full-day out-of-city trip described ("Tigre saindo de Buenos Aires",
+   "day trip from Paris to Versailles"). Content is one day, in a city that is NOT
+   the base_city.
+   → `detected_days` has 1 entry with `is_day_trip: true`.
+
+F — complementary_tip: ONE place that is a tip, not a full day ("this restaurant",
+   "this bar", "this hidden café"). Distinguished from A by: A is the WHOLE content
+   focus; F is a small tip inside a broader vlog.
+   → `complementary_tips` has 1 entry. `loose_places` and `detected_days` are empty.
+
+CONFIDENCE CALIBRATION:
+- 0.90-1.00: explicit day numbering or unambiguous single-place focus.
+- 0.70-0.89: strong signals but some ambiguity.
+- 0.50-0.69: mixed signals — pick best category but flag via low confidence.
+- <0.50: DO NOT use — downgrade to a more general category (D→C→B).
+
+EXTRACTION RULES:
+- Capture EVERY proper-noun place mentioned in caption, transcript, or on-screen text.
+- Categorize places by day ONLY when the content explicitly assigns them to a day.
+- Otherwise put them in `loose_places`.
+- `complementary_tips` is ONLY for clear tips ("essa cafeteria vale") inside a broader list.
+- Creator handle: extract "@user" from captions if present, else null.
+- pace.items_per_day_avg: count items per day when explicit; null if unclear.
+- vibe_signature: 3-6 short tags describing the mood (urbano, estetico, aventura, gastronomia).
+
+IF the content is empty/broken: return content_type "B", confidence 0.0, empty arrays, summary "Conteúdo não disponível."."""
+
+
+async def _classify_and_extract(
+    client, url: str, content: str
+) -> dict | None:
+    """Phase 2 — single Haiku call that classifies AND extracts per URL.
+
+    Returns the classification dict, or None if every retry failed. The
+    caller falls back to `_regex_extract_places` (which now also fills a
+    heuristic content_type) when None is returned.
+    """
+    prompt = _build_classify_prompt(url, content)
+    attempts = [
+        (lambda: [{"role": "user", "content": prompt}], "primary"),
+        (
+            lambda: [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": '{"destination"'},
+            ],
+            "prefill",
+        ),
+    ]
+
+    for build_messages, label in attempts:
+        try:
+            response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=3000,
+                    messages=build_messages(),
+                )
+            )
+            text = response.content[0].text if response.content else ""
+            if not text:
+                continue
+            if label == "prefill":
+                text = '{"destination"' + text
+            parsed = _parse_json_response(text)
+            if not isinstance(parsed, dict):
+                logger.warning("[classify] %s: parse failed (%s...)", label, text[:200])
+                continue
+            if parsed.get("content_type") not in CONTENT_TYPES:
+                logger.warning(
+                    "[classify] %s: unknown content_type=%r, coercing to B",
+                    label, parsed.get("content_type"),
+                )
+                parsed["content_type"] = "B"
+                parsed["confidence"] = min(float(parsed.get("confidence") or 0.5), 0.5)
+            logger.info(
+                "[classify] %s: type=%s confidence=%.2f days=%d loose=%d for %s",
+                label,
+                parsed["content_type"],
+                float(parsed.get("confidence") or 0),
+                len(parsed.get("detected_days") or []),
+                len(parsed.get("loose_places") or []),
+                url,
+            )
+            return parsed
+        except Exception as e:
+            logger.warning("[classify] %s attempt failed for %s: %s", label, url, e)
+
+    return None
+
+
+def _resolve_multi_video_conflicts(classified: list[dict]) -> dict:
+    """Merge per-URL classifications into one consolidated plan.
+
+    Rules (confirmed with user):
+      1. Higher-priority category WINS ownership of the day it covers.
+         Priority: D > C > E > B > A > F
+      2. Ties broken by submission order (first URL wins).
+      3. Low-confidence classifications (<0.5) are downgraded — their
+         detected_days become loose_places instead.
+      4. Losing video's places go to `complementary_tips` (still usable).
+
+    Output shape:
+      {
+        "destination": str,                 # first non-empty one
+        "base_city": str,
+        "canonical_days": {int: {...}},     # day_number -> owning video's data
+        "loose_places": [name, ...],
+        "complementary_tips": [{name, category, source_url}],
+        "day_trip_suggestions": [...],
+        "pace_signals": {...},              # averaged from D-category videos
+        "vibe_signature": [...],            # union
+        "conflicts_detected": [...],        # for UI surfacing
+        "creator_handles_by_day": {int: "@handle"},
+        "per_url_types": {url: "D", ...},   # traceability
+      }
+    """
+    canonical_days: dict[int, dict] = {}
+    loose_places: list[str] = []
+    complementary_tips: list[dict] = []
+    day_trip_suggestions: list[dict] = []
+    conflicts_detected: list[dict] = []
+    vibe_tags: set[str] = set()
+    pace_votes: list[str] = []
+    items_per_day_votes: list[int] = []
+    creator_handles_by_day: dict[int, str] = {}
+    per_url_types: dict[str, str] = {}
+    destination = ""
+    base_city = ""
+
+    for row in classified:
+        url = row.get("source_url") or ""
+        ctype = row.get("content_type") or "B"
+        confidence = float(row.get("confidence") or 0.0)
+        per_url_types[url] = ctype
+
+        if not destination and row.get("destination"):
+            destination = row["destination"]
+        if not base_city and row.get("base_city"):
+            base_city = row["base_city"]
+
+        # Downgrade very low-confidence D/C into loose_list B.
+        if confidence < 0.5 and ctype in ("D", "C", "E"):
+            logger.info(
+                "[resolve] Downgrading %s (conf=%.2f) to B for %s",
+                ctype, confidence, url,
+            )
+            ctype = "B"
+
+        my_priority = CONTENT_TYPE_PRIORITY[ctype]
+        detected = row.get("detected_days") or []
+
+        for dd in detected:
+            if not isinstance(dd, dict):
+                continue
+            day = dd.get("day")
+            if not isinstance(day, int) or day < 1:
+                continue
+            places = [p for p in (dd.get("places") or []) if isinstance(p, str) and p.strip()]
+            if not places:
+                continue
+            proposal = {
+                "places": places,
+                "region_hint": dd.get("region_hint"),
+                "is_day_trip": bool(dd.get("is_day_trip")),
+                "source_url": url,
+                "content_type": ctype,
+                "confidence": confidence,
+                "creator": row.get("creator_handle"),
+            }
+
+            existing = canonical_days.get(day)
+            if existing is None:
+                canonical_days[day] = proposal
+                if row.get("creator_handle"):
+                    creator_handles_by_day[day] = row["creator_handle"]
+                continue
+
+            # Conflict — resolve by category priority, then submission order.
+            existing_priority = CONTENT_TYPE_PRIORITY[existing["content_type"]]
+            if my_priority > existing_priority:
+                # I win: demote existing's places to complementary tips.
+                for p in existing["places"]:
+                    complementary_tips.append({
+                        "name": p, "category": "other",
+                        "source_url": existing["source_url"],
+                        "demoted_from_day": day,
+                    })
+                conflicts_detected.append({
+                    "day": day,
+                    "winner_url": url,
+                    "loser_url": existing["source_url"],
+                    "reason": f"{ctype} beats {existing['content_type']}",
+                })
+                canonical_days[day] = proposal
+                if row.get("creator_handle"):
+                    creator_handles_by_day[day] = row["creator_handle"]
+            elif my_priority < existing_priority:
+                # Existing wins: my places become tips.
+                for p in places:
+                    complementary_tips.append({
+                        "name": p, "category": "other",
+                        "source_url": url,
+                        "demoted_from_day": day,
+                    })
+                conflicts_detected.append({
+                    "day": day,
+                    "winner_url": existing["source_url"],
+                    "loser_url": url,
+                    "reason": f"{existing['content_type']} beats {ctype}",
+                })
+            else:
+                # Same priority: first-submitted wins (already stored).
+                for p in places:
+                    complementary_tips.append({
+                        "name": p, "category": "other",
+                        "source_url": url,
+                        "demoted_from_day": day,
+                    })
+                conflicts_detected.append({
+                    "day": day,
+                    "winner_url": existing["source_url"],
+                    "loser_url": url,
+                    "reason": "same category — first submitted wins",
+                })
+
+        # Non-detected-day items
+        for p in (row.get("loose_places") or []):
+            if isinstance(p, str) and p.strip():
+                loose_places.append(p.strip())
+        for tip in (row.get("complementary_tips") or []):
+            if isinstance(tip, dict) and tip.get("name"):
+                t = dict(tip)
+                t["source_url"] = url
+                complementary_tips.append(t)
+        for dts in (row.get("day_trip_suggestions") or []):
+            if isinstance(dts, dict):
+                day_trip_suggestions.append(dts)
+        for v in (row.get("vibe_signature") or []):
+            if isinstance(v, str):
+                vibe_tags.add(v)
+        ps = row.get("pace_signals") or {}
+        if ps.get("pace"):
+            pace_votes.append(ps["pace"])
+        if isinstance(ps.get("items_per_day_avg"), (int, float)):
+            items_per_day_votes.append(int(ps["items_per_day_avg"]))
+
+    # Aggregate pace: mode
+    pace = None
+    if pace_votes:
+        from collections import Counter
+        pace = Counter(pace_votes).most_common(1)[0][0]
+
+    items_per_day = None
+    if items_per_day_votes:
+        items_per_day = round(sum(items_per_day_votes) / len(items_per_day_votes))
+
+    # Dedupe loose_places case-insensitively (preserve order)
+    seen = set()
+    deduped_loose: list[str] = []
+    for p in loose_places:
+        k = p.lower().strip()
+        if k not in seen:
+            seen.add(k)
+            deduped_loose.append(p)
+
+    return {
+        "destination": destination,
+        "base_city": base_city,
+        "canonical_days": canonical_days,
+        "loose_places": deduped_loose,
+        "complementary_tips": complementary_tips,
+        "day_trip_suggestions": day_trip_suggestions,
+        "pace_signals": {"pace": pace, "items_per_day_avg": items_per_day},
+        "vibe_signature": sorted(vibe_tags),
+        "conflicts_detected": conflicts_detected,
+        "creator_handles_by_day": creator_handles_by_day,
+        "per_url_types": per_url_types,
+    }
 
 
 async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
