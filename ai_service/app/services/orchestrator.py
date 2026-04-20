@@ -870,7 +870,8 @@ def _tighten_day_clusters(
             if diameter <= max_diameter_km:
                 continue
 
-            # Find the place furthest from the centroid — that's the outlier
+            # Find the place furthest from the centroid — that's the outlier.
+            # Skip places already flagged for user review (prevents infinite loop).
             centroid = _compute_centroid(geocoded)
             if centroid is None:
                 continue
@@ -878,6 +879,8 @@ def _tighten_day_clusters(
             outlier = None
             outlier_dist = 0.0
             for p in geocoded:
+                if p.get("_review_flagged"):
+                    continue
                 try:
                     dist = _haversine_km(
                         c_lat, c_lng, float(p["latitude"]), float(p["longitude"])
@@ -917,6 +920,8 @@ def _tighten_day_clusters(
                     best_dist = d
                     best_day = other_day
 
+            is_from_link = outlier.get("source") == "link"
+
             if best_day is not None:
                 outlier["day"] = best_day
                 by_day[day].remove(outlier)
@@ -926,6 +931,30 @@ def _tighten_day_clusters(
                     "[geo] Moved '%s' from day %d to day %d (%.0fkm to new cluster)",
                     outlier.get("name"), day, best_day, best_dist,
                 )
+            elif is_from_link:
+                # LINK PLACE with no compatible day — do NOT drop. Flag it
+                # so the user can decide. The creator of the video mentioned
+                # this place, so it deserves user review, not silent removal.
+                outlier["needs_review"] = True
+                outlier["review_reason"] = "far_from_day_cluster"
+                outlier["review_distance_km"] = round(outlier_dist, 1)
+                outlier["review_day"] = day
+                alerts = list(outlier.get("alerts") or [])
+                warn = (
+                    f"⚠️ Este lugar fica a {round(outlier_dist)}km do resto "
+                    f"do Dia {day}. Como veio do seu link, deixamos aqui para "
+                    f"você decidir: manter (e trocar de dia manualmente) ou "
+                    f"remover do roteiro."
+                )
+                if not any("⚠️" in a for a in alerts):
+                    alerts.append(warn)
+                outlier["alerts"] = alerts
+                logger.info(
+                    "[geo] FLAGGED link-sourced outlier '%s' (day %d, %.0fkm) for user review",
+                    outlier.get("name"), day, outlier_dist,
+                )
+                # Don't re-process this outlier — mark as reviewed to break loop
+                outlier["_review_flagged"] = True
             else:
                 by_day[day].remove(outlier)
                 dropped_total += 1
@@ -945,14 +974,17 @@ def _tighten_day_clusters(
             moved_total, dropped_total, int(max_diameter_km),
         )
 
-    # Flatten back preserving original day order
+    # Flatten back preserving original day order and strip internal flags
     result: list[dict] = []
     for d in order:
-        result.extend(by_day.get(d, []))
-    # Include any days that appeared only as destinations of moves
+        for p in by_day.get(d, []):
+            p.pop("_review_flagged", None)
+            result.append(p)
     for d in by_day:
         if d not in order:
-            result.extend(by_day[d])
+            for p in by_day[d]:
+                p.pop("_review_flagged", None)
+                result.append(p)
     return result
 
 

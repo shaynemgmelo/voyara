@@ -4,6 +4,7 @@ import { DragDropContext } from "@hello-pangea/dnd";
 import useTripDetail from "../hooks/useTripDetail";
 import DayPlanColumn from "../components/itinerary/DayPlanColumn";
 import TripTimeline from "../components/itinerary/TripTimeline";
+import GeoReviewModal, { collectFlaggedItems } from "../components/itinerary/GeoReviewModal";
 import ItemDetail from "../components/itinerary/ItemDetail";
 import ItemForm from "../components/itinerary/ItemForm";
 import LinkInput from "../components/links/LinkInput";
@@ -44,11 +45,13 @@ export default function TripDetail() {
     refining,
     addLodging,
     removeLodging,
+    fetchTrip,
   } = useTripDetail(id);
 
   const [selectedItemId, setSelectedItemId] = useState(null);
   const [selectedDayNumber, setSelectedDayNumber] = useState(null);
   const [hoveredItemId, setHoveredItemId] = useState(null);
+  const [geoModalDismissed, setGeoModalDismissed] = useState(false);
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === "undefined") return "list";
     return localStorage.getItem("mapass.viewMode") || "timeline";
@@ -500,6 +503,20 @@ export default function TripDetail() {
       {/* Share modal */}
       {showShareModal && (
         <TripShareModal trip={trip} onClose={() => setShowShareModal(false)} />
+      )}
+
+      {/* Geo review modal — shown once when link-sourced places were
+          flagged by the backend as too far from the rest of their day.
+          The user decides keep or remove (we never drop silently). */}
+      {!geoModalDismissed && collectFlaggedItems(trip.day_plans).length > 0 && (
+        <GeoReviewModal
+          trip={trip}
+          pt={lang === "pt-BR"}
+          onClose={() => setGeoModalDismissed(true)}
+          onReload={async () => {
+            if (fetchTrip) await fetchTrip();
+          }}
+        />
       )}
     </div>
   );
