@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, str]] = {}
 _CACHE_TTL_SECONDS = 60 * 60 * 6
 
-# Tuning — 12 frames gives much better coverage of numbered lists
-# that unfold over the video (Day 1 / Day 2 / Day 3 cards etc).
-MAX_FRAMES = 12
+# Tuning — 20 frames across the video catches Day 1/2/3 card reveals
+# even in long itinerary videos. Each frame ~60KB after downscale.
+MAX_FRAMES = 20
 FRAME_QUALITY = 3  # ffmpeg -q:v (1=best, 31=worst). 3 is plenty for OCR.
 MAX_FRAME_SIDE_PX = 1280  # downscale giant frames
 
@@ -195,36 +195,36 @@ def _vision_ocr(frames: list[bytes]) -> str:
         {
             "type": "text",
             "text": (
-                "Estas são {n} imagens extraídas de um vídeo de viagem "
-                "(TikTok/Reel/Short). "
-                "Sua tarefa é LER e TRANSCREVER exaustivamente "
-                "TODO o texto visível. NÃO resuma, NÃO parafraseie — "
-                "transcreva literal.\n\n"
-                "PRIORIDADE MÁXIMA (capture isso sem falta):\n"
-                "• Listas numeradas sobrepostas (1. ... 2. ... 3. ...)\n"
-                "• Cabeçalhos tipo 'DIA 1', 'DIA 2', 'ROTEIRO DE X DIAS'\n"
-                "• Nomes de lugares, bairros, ruas, estabelecimentos, museus, "
-                "parques, mercados, praças, restaurantes, bares, miradores\n"
-                "• Placas, fachadas, letreiros com nomes próprios\n"
-                "• Instruções tipo 'siga para X', 'vá até Y', 'pare em Z'\n\n"
-                "CAPTURE TAMBÉM se aparecer:\n"
-                "• Menus com nomes de pratos/casas\n"
-                "• Preços com nome do estabelecimento\n"
-                "• Hashtags geográficas\n\n"
-                "FORMATO: uma linha por item, transcrição literal, sem "
-                "comentários. Mesmo que o mesmo texto apareça em vários "
-                "frames, liste uma vez apenas (ignore duplicatas).\n\n"
-                "Exemplo:\n"
+                "Estou enviando {n} frames de um vídeo curto de viagem. "
+                "Preciso que você leia cada frame um por um e transcreva "
+                "EXAUSTIVAMENTE todo texto visível relacionado a lugares.\n\n"
+                "PARA CADA FRAME, liste tudo que for:\n"
+                "• Texto sobreposto (legendas, captions, listas numeradas)\n"
+                "• Nome de lugar (rua, avenida, bairro, praça, ponte, "
+                "museu, teatro, parque, mercado, restaurante, bar, igreja, "
+                "catedral, centro cultural, galeria, shopping, mirante)\n"
+                "• Placas, fachadas, letreiros\n"
+                "• Cabeçalhos estruturais: 'DIA 1', 'DIA 2', 'ROTEIRO 3 DIAS'\n"
+                "• Instruções com nomes: 'siga para X', 'vá até Y', 'almoce em Z'\n\n"
+                "REGRAS:\n"
+                "1. Transcreva LITERAL. Se está escrito 'Casa Rosada', "
+                "escreva 'Casa Rosada'. Não resuma, não reescreva.\n"
+                "2. Itere TODOS os {n} frames — não pule nenhum.\n"
+                "3. Mesmo que o texto seja pequeno ou borrado, tente ler.\n"
+                "4. Inclua até nomes genéricos que o criador tenha escrito "
+                "(ex: 'Praça Domingo Perón' mesmo soando genérico).\n"
+                "5. Um item por linha. Dedupe ao final.\n\n"
+                "Formato de saída (apenas texto, sem comentários):\n"
                 "1. Campanópolis\n"
                 "2. Barrio Chino\n"
                 "DIA 1\n"
                 "Casa Rosada\n"
                 "Avenida 9 de Julho\n"
                 "Praça Domingo Perón\n"
+                "Catedral Metropolitana\n"
                 "Galerías Pacífico\n"
-                "Catedral Metropolitana\n\n"
-                "Se não houver nenhum texto legível em nenhum frame, "
-                "responda apenas 'NENHUM TEXTO'."
+                "...\n\n"
+                "Se nenhum frame tiver texto legível: responda 'NENHUM TEXTO'."
             ).format(n=len(frames)),
         }
     ]
