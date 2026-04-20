@@ -136,16 +136,23 @@ async def _analyze_urls_impl(urls: list[str], deep: bool) -> dict:
     # 1. Extract content from all URLs. Depth depends on caller.
     combined_content = ""
     extraction_errors: list[str] = []
+    debug_stats: dict[str, dict] = {}
     for url in urls[:5]:  # Max 5 URLs
         try:
             content = await _extract_content(url, deep=deep)
             if content:
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
                 logger.info(
-                    "[analyze-urls] Extracted %d chars from %s",
+                    "[analyze-urls] Extracted %d chars from %s (has [ON-SCREEN]: %s)",
                     len(content),
                     url,
+                    "[ON-SCREEN TEXT]" in content,
                 )
+                debug_stats[url] = {
+                    "chars": len(content),
+                    "has_on_screen": "[ON-SCREEN TEXT]" in content,
+                    "has_transcript": "[TRANSCRIPT]" in content,
+                }
             else:
                 logger.warning(
                     "[analyze-urls] Empty content from %s (extractor returned nothing)",
@@ -301,6 +308,7 @@ about."""
         "places": enriched_places,
         "destination": destination,
         "summary": summary,
+        "debug": debug_stats,
     }
 
 
