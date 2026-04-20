@@ -613,15 +613,28 @@ def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]
                 item["source"] = "ai"
         return place_list
 
-    # Build normalized name variants from places_mentioned
-    link_variants: list[tuple[str, str]] = []  # (normalized, original)
+    # Build normalized name variants + their origin URL
+    # Each entry: (normalized_name, original_name, source_url)
+    link_variants: list[tuple[str, str, str | None]] = []
     for p in places_mentioned:
         name = (p.get("name") or "").strip()
         if name:
-            link_variants.append((_normalize_place_name(name), name))
+            link_variants.append((
+                _normalize_place_name(name),
+                name,
+                p.get("source_url"),
+            ))
 
     if not link_variants:
         return place_list
+
+    def _mark_link(item: dict, source_url: str | None) -> None:
+        item["source"] = "link"
+        # Only set source_url if we know which link this place came from.
+        # This ensures the frontend badge shows 'Do TikTok', 'Do Instagram',
+        # etc. based on the actual origin URL, not a random concat.
+        if source_url and not item.get("source_url"):
+            item["source_url"] = source_url
 
     tagged_link = 0
     for item in place_list:
@@ -633,17 +646,18 @@ def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]
             continue
 
         matched = False
+        matched_url = None
+
         # 1. Exact normalized match
-        for link_norm, orig in link_variants:
+        for link_norm, _orig, url in link_variants:
             if item_norm == link_norm:
-                item["source"] = "link"
-                tagged_link += 1
                 matched = True
+                matched_url = url
                 break
 
         # 2. Containment (handles "Cristo Redentor Statue" ⊇ "Cristo Redentor")
         if not matched:
-            for link_norm, _ in link_variants:
+            for link_norm, _orig, url in link_variants:
                 if not link_norm:
                     continue
                 if (
@@ -651,23 +665,25 @@ def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]
                     or item_norm in link_norm
                     or _token_overlap(link_norm, item_norm) >= 0.7
                 ):
-                    item["source"] = "link"
-                    tagged_link += 1
                     matched = True
+                    matched_url = url
                     break
 
-        # 3. Sequence similarity fallback (lowered threshold 0.75→0.68)
+        # 3. Sequence similarity fallback
         if not matched:
-            for link_norm, _ in link_variants:
+            for link_norm, _orig, url in link_variants:
                 ratio = SequenceMatcher(None, item_norm, link_norm).ratio()
                 if ratio >= 0.68:
-                    item["source"] = "link"
-                    tagged_link += 1
                     matched = True
+                    matched_url = url
                     break
 
-        if not matched and item.get("source") != "link":
+        if matched:
+            _mark_link(item, matched_url)
+            tagged_link += 1
+        elif item.get("source") != "link":
             item["source"] = "ai"
+            item.pop("source_url", None)
 
     logger.info(
         "[source-tag] Tagged %d/%d items as 'link' (from %d places_mentioned)",
@@ -1194,6 +1210,19 @@ async def _validate_and_create_items(
         raw_cat = place.get("category", "attraction")
         category = CATEGORY_MAP.get(raw_cat, raw_cat) if raw_cat not in VALID_CATEGORIES else raw_cat
 
+        # source_url: ONLY link-sourced items keep a source URL. AI-added
+        # places must not carry a URL (otherwise the frontend badge thinks
+        # they came from the video).
+        place_source = place.get("source", "ai")
+        if place_source == "link":
+            # Prefer the item-specific source_url if Claude / ensure_link
+            # recorded one; fall back to the single-source URL of the trip.
+            item_source_url = place.get("source_url") or (
+                source_urls[0] if source_urls and len(source_urls) == 1 else None
+            )
+        else:
+            item_source_url = None
+
         item_data = {
             "name": place.get("name", "Unknown"),
             "category": category,
@@ -1216,8 +1245,8 @@ async def _validate_and_create_items(
             "alerts": place.get("alerts"),
             "alternative_group": place.get("alternative_group"),
             "position": pos,
-            "source": place.get("source", "ai"),
-            "source_url": source_url,
+            "source": place_source,
+            "source_url": item_source_url,
         }
         item_data = {k: v for k, v in item_data.items() if v is not None}
         create_tasks.append((trip_id, day_plan_id, item_data, place.get("name")))
