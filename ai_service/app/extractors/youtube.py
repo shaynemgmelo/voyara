@@ -32,23 +32,22 @@ class YouTubeExtractor(BaseExtractor):
 
         captions = self._get_captions(info)
 
-        # If we got no captions (common on Shorts / non-English videos),
-        # transcribe the audio — but with a short deadline so a slow Whisper
-        # never costs us the rest of the extraction.
+        # If we got no captions AND we're in deep mode, transcribe the audio.
+        # Shallow mode (analyze-url) skips this to stay under 30s.
         if not captions:
-            try:
-                transcript = await asyncio.wait_for(
-                    transcribe_video_url(url, timeout=45.0),
-                    timeout=50.0,
-                )
-                if transcript:
-                    captions = [f"[TRANSCRIPT] {transcript}"]
-            except asyncio.TimeoutError:
-                logger.info(
-                    "[youtube] Transcription budget exceeded for %s", url
-                )
-            except Exception as e:
-                logger.warning("[youtube] Transcription error for %s: %s", url, e)
+            from app.services.orchestrator import is_shallow_extraction
+            if not is_shallow_extraction():
+                try:
+                    transcript = await asyncio.wait_for(
+                        transcribe_video_url(url, timeout=45.0),
+                        timeout=50.0,
+                    )
+                    if transcript:
+                        captions = [f"[TRANSCRIPT] {transcript}"]
+                except asyncio.TimeoutError:
+                    logger.info("[youtube] Transcription budget exceeded for %s", url)
+                except Exception as e:
+                    logger.warning("[youtube] Transcription error for %s: %s", url, e)
 
         content = ExtractedContent(
             platform="youtube",

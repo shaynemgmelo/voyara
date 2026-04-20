@@ -59,17 +59,25 @@ async def process_link(
 # ──────────────────────────────────────────────
 
 
-async def _extract_content(url: str) -> str:
-    """Extract text content from URL. Timeout after 30s to avoid hanging."""
+async def _extract_content(url: str, deep: bool = True) -> str:
+    """Extract text content from URL.
+
+    Args:
+        deep: when True, extractors run transcription + vision OCR in
+              addition to caption/oEmbed (slow, used in background trip
+              build). When False, only caption/oEmbed is used (fast,
+              ≤15s — suitable for synchronous preview endpoints on
+              free-tier hosting with 30s HTTP limits).
+    """
     content_text = ""
     for ext in _extractors:
         if ext.can_handle(url):
+            # Tell the extractor to run in shallow mode by setting a
+            # thread-local flag; extractors check it and skip heavy work.
+            _SHALLOW_EXTRACTION.value = not deep
             try:
-                # 120s covers: oEmbed/caption (fast) + parallel transcription
-                # (~40s) + Vision OCR on frames (~40s). Since those two run
-                # in parallel inside the extractor they share ~45s clock
-                # time; the extra headroom absorbs cold starts.
-                content = await asyncio.wait_for(ext.extract(url), timeout=120)
+                timeout = 120 if deep else 15
+                content = await asyncio.wait_for(ext.extract(url), timeout=timeout)
                 parts = [content.title or "", content.description or ""]
                 if content.captions:
                     parts.append(" ".join(content.captions[:50]))
@@ -80,9 +88,25 @@ async def _extract_content(url: str) -> str:
                 logger.warning("[extract] Extraction timed out for %s", url)
             except Exception as e:
                 logger.warning("[extract] Extraction failed: %s", e)
+            finally:
+                _SHALLOW_EXTRACTION.value = False
             break
 
     return content_text
+
+
+class _ShallowFlag:
+    """Simple context holder — extractors check this to skip heavy work."""
+    def __init__(self) -> None:
+        self.value: bool = False
+
+
+_SHALLOW_EXTRACTION = _ShallowFlag()
+
+
+def is_shallow_extraction() -> bool:
+    """Extractors call this to decide whether to skip transcript/vision."""
+    return _SHALLOW_EXTRACTION.value
 
 
 async def analyze_urls(urls: list[str]) -> dict:
@@ -96,12 +120,13 @@ async def analyze_urls(urls: list[str]) -> dict:
     """
     import anthropic
 
-    # 1. Extract content from all URLs
+    # 1. Extract content from all URLs (shallow mode: fast caption/oEmbed
+    # only, no audio/vision — this endpoint must respond under 30s).
     combined_content = ""
     extraction_errors: list[str] = []
     for url in urls[:5]:  # Max 5 URLs
         try:
-            content = await _extract_content(url)
+            content = await _extract_content(url, deep=False)
             if content:
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
                 logger.info(

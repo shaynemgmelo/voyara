@@ -29,7 +29,9 @@ class InstagramExtractor(BaseExtractor):
         has_video = info.get("is_video", False) or "/reel/" in url or "/tv/" in url
         transcript = ""
         on_screen_text = ""
-        if has_video:
+
+        from app.services.orchestrator import is_shallow_extraction
+        if has_video and not is_shallow_extraction():
             async def _safe(coro, label):
                 try:
                     return await coro or ""
