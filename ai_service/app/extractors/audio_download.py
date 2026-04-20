@@ -110,7 +110,7 @@ def _sync_download_and_transcribe(url: str) -> str:
                 {
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
-                    "preferredquality": "96",
+                    "preferredquality": "48",  # 48kbps is plenty for speech recognition
                 }
             ],
             "socket_timeout": 30,

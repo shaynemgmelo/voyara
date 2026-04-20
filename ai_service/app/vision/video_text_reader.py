@@ -31,11 +31,11 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, str]] = {}
 _CACHE_TTL_SECONDS = 60 * 60 * 6
 
-# Tuning — 20 frames across the video catches Day 1/2/3 card reveals
-# even in long itinerary videos. Each frame ~60KB after downscale.
-MAX_FRAMES = 20
-FRAME_QUALITY = 3  # ffmpeg -q:v (1=best, 31=worst). 3 is plenty for OCR.
-MAX_FRAME_SIDE_PX = 1280  # downscale giant frames
+# Tuning — balance coverage vs memory. 14 frames at 960px still catches
+# Day 1/2/3 reveals, uses ~half the RAM of 20 frames at 1280px.
+MAX_FRAMES = 14
+FRAME_QUALITY = 4  # ffmpeg -q:v (1=best, 31=worst). 4 = smaller, OCR still fine.
+MAX_FRAME_SIDE_PX = 960
 
 
 def _cache_get(url: str) -> Optional[str]:
@@ -81,14 +81,26 @@ async def read_video_text(url: str, timeout: float = 45.0) -> str:
 
 def _sync_pipeline(url: str) -> str:
     """Download → extract frames → Vision OCR. Runs in a worker thread."""
+    import gc
+
     with tempfile.TemporaryDirectory(prefix="mapass-frames-") as tmpdir:
         video_path = _download_video(url, tmpdir)
         if not video_path:
             return ""
+        # Delete the source video as soon as frames are extracted — we
+        # don't need both sitting in memory/disk.
         frames = _extract_frames(video_path, tmpdir, MAX_FRAMES)
+        try:
+            os.unlink(video_path)
+        except OSError:
+            pass
         if not frames:
             return ""
-        return _vision_ocr(frames)
+        result = _vision_ocr(frames)
+        # Free the list of frame bytes before returning
+        frames.clear()
+        gc.collect()
+        return result
 
 
 def _download_video(url: str, tmpdir: str) -> Optional[str]:

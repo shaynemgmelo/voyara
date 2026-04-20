@@ -41,9 +41,12 @@ class InstagramExtractor(BaseExtractor):
                     logger.warning("[%s] Error for %s: %s", label, url, e)
                 return ""
 
-            transcript, on_screen_text = await asyncio.gather(
-                _safe(transcribe_video_url(url, timeout=90.0), "ig-transcript"),
-                _safe(read_video_text(url, timeout=75.0), "ig-vision-ocr"),
+            # Sequential to cap memory on Render free tier.
+            transcript = await _safe(
+                transcribe_video_url(url, timeout=90.0), "ig-transcript"
+            )
+            on_screen_text = await _safe(
+                read_video_text(url, timeout=90.0), "ig-vision-ocr"
             )
 
         captions: list[str] = []

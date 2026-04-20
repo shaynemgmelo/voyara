@@ -44,20 +44,19 @@ class TikTokExtractor(BaseExtractor):
         # costs us the oEmbed result.
         oembed = await self._oembed_extract(url)
 
-        # Deep mode runs transcription (faster-whisper 'tiny' — 75MB, fits
-        # Render free tier) AND Vision OCR, in parallel. Both best-effort.
+        # Deep mode: transcript first, then vision. Sequential (NOT parallel)
+        # to halve peak memory — Render free tier workers are 512MB and
+        # running both concurrently was triggering OOM restarts.
         from app.services.orchestrator import is_shallow_extraction
 
         transcript = ""
         on_screen_text = ""
         if not is_shallow_extraction():
-            transcript, on_screen_text = await asyncio.gather(
-                _safe_call(
-                    transcribe_video_url(url, timeout=90.0), "transcript", url
-                ),
-                _safe_call(
-                    read_video_text(url, timeout=75.0), "vision-ocr", url
-                ),
+            transcript = await _safe_call(
+                transcribe_video_url(url, timeout=90.0), "transcript", url
+            )
+            on_screen_text = await _safe_call(
+                read_video_text(url, timeout=90.0), "vision-ocr", url
             )
 
         title = oembed.get("title") if oembed else ""
