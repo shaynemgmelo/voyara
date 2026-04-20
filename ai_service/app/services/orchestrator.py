@@ -199,26 +199,29 @@ Return ONLY a JSON object (no markdown, no explanation text, no code fences):
 {{"destination": "City, Country", "places": ["Place Name 1", "Place Name 2"], "summary": "One sentence about what the content is about"}}
 
 CRITICAL RULES:
-1. LIST EVERYTHING — do NOT filter down to just "the main" place.
-   Every specific named place the creator mentions, shows, visits, recommends,
-   or even briefly references (restaurants, attractions, parks, bars, cafés,
+1. EXHAUSTIVE — list EVERY SINGLE named place. Do NOT summarize, do NOT
+   consolidate. If the [ON-SCREEN TEXT] block lists 25 items, the output
+   must have 25 items. Err on the side of INCLUDING rather than excluding.
+2. Every specific named place the creator mentions, shows, visits, recommends,
+   or briefly references (restaurants, attractions, parks, bars, cafés,
    markets, bridges, streets, neighborhoods, viewpoints, shopping malls,
    museums, theaters, cultural centers, plazas, statues, churches, hotels,
    and activities like "boat tour on X river", "tango show", "day trip to Y")
-   MUST appear in the list.
-2. If the creator says "day 1 do X Y Z, day 2 do A B C", list ALL of X Y Z A B C.
-3. Activities count too — "passeio de barco Rio da Prata", "show de tango",
-   "tour guiado do cemitério" are places. Use the specific activity name if
-   provided, or "Passeio de barco Rio da Prata" if generic.
-4. Comparison references ("like X in Vegas") → do NOT include them.
-5. Generic mentions ("a nice café", "the beach") → do NOT include unless the
-   creator names them.
-6. Include neighborhoods when the creator explicitly recommends them (e.g.
-   "jantar em Palermo" → include "Palermo (jantar)").
-7. Up to 30 places. If more, prioritize the explicitly visited / recommended.
-8. Summary: one sentence.
-9. ALSO examine [TRANSCRIPT] sections carefully — the creator speaks place
-   names aloud that are NOT in the caption. Those are the most valuable.
+   MUST appear.
+3. If the creator says "day 1: X Y Z, day 2: A B C", list ALL of X Y Z A B C
+   — never collapse a day into just its headline.
+4. Activities and experiences count as places — "passeio de barco Rio da
+   Prata", "show de tango", "tour guiado do cemitério" belong in the list.
+5. Numbered lists on screen ("1. Campanópolis\n2. Barrio Chino\n...") are
+   the MOST IMPORTANT signal — transcribe them all verbatim.
+6. Neighborhoods explicitly recommended for a specific purpose count
+   ("jantar em Palermo" → include "Palermo" as a place).
+7. Only SKIP: comparison references ("like X in Vegas"), generic mentions
+   without a proper name ("a nice café"), and duplicates.
+8. Up to 50 places (was 30 — raise the ceiling for long itinerary videos).
+9. [ON-SCREEN TEXT] and [TRANSCRIPT] sections must be mined BEFORE the
+   description/caption — those are where the real place names live.
+10. Summary: one sentence.
 
 IMPORTANT: If you cannot find any place names, still return valid JSON with
 empty "places" array and a summary explaining what the content seems to be
@@ -309,6 +312,8 @@ about."""
         "destination": destination,
         "summary": summary,
         "debug": debug_stats,
+        "debug_raw": combined_content[:8000] if deep else None,
+        "debug_haiku_response": raw[:3000] if deep else None,
     }
 
 
