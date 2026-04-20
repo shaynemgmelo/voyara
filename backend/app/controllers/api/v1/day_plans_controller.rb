@@ -207,7 +207,15 @@ class Api::V1::DayPlansController < Api::V1::BaseController
   end
 
   def day_plan_params
-    params.require(:day_plan).permit(:day_number, :date, :notes, :city)
+    params.require(:day_plan).permit(
+      :day_number, :date, :notes, :city,
+      :origin, :rigidity, :day_type, :primary_region,
+      :source_video_url, :source_creator_handle, :estimated_pace,
+      pattern_signature: {},
+      # conflict_alerts is an array of objects with these keys. Strong-params
+      # syntax `key: [[...]]` permits an array of hashes.
+      conflict_alerts: [[:type, :day, :message, :item_id, :severity, :created_at]]
+    )
   end
 
   def fetch_travel_segment(from, to)

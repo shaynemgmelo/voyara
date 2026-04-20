@@ -194,6 +194,9 @@ class Api::V1::ItineraryItemsController < Api::V1::BaseController
       :latitude, :longitude, :address, :google_place_id, :google_rating,
       :google_reviews_count, :pricing_info, :phone, :website, :notes, :source_url,
       :personal_notes, :alternative_group, :source,
+      # New provenance + editability fields (Phase 1 of the reform).
+      :origin, :source_video_url, :source_video_creator, :extraction_method,
+      :priority, :item_status, :best_turn, :region,
       operating_hours: {}, photos: [], vibe_tags: [], alerts: []
     )
   end

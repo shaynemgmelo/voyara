@@ -25,8 +25,20 @@ class ItineraryItemSerializer
       website: @item.website,
       photos: @item.photos,
       notes: @item.notes,
+      # Legacy binary source kept for backward compatibility. Frontend should
+      # prefer `origin` going forward — the legacy field will be removed in a
+      # later migration once all readers are updated.
       source: @item.source,
       source_url: @item.source_url,
+      # Phase 1 reform fields — richer provenance + editability metadata.
+      origin: @item.origin,
+      source_video_url: @item.source_video_url,
+      source_video_creator: @item.source_video_creator,
+      extraction_method: @item.extraction_method,
+      priority: @item.priority,
+      item_status: @item.item_status,
+      best_turn: @item.best_turn,
+      region: @item.region,
       personal_notes: @item.personal_notes,
       vibe_tags: @item.vibe_tags,
       alerts: @item.alerts,
