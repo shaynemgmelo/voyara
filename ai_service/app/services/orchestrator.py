@@ -251,18 +251,28 @@ about."""
     parsed = await _analyze_urls_with_retries(client, base_prompt)
 
     if not isinstance(parsed, dict):
-        # Final safety net — return a useful empty response.
-        # We'll still try to inform the user what happened.
-        logger.error("[analyze-urls] All parse attempts failed; returning graceful empty")
-        return {
-            "places": [],
-            "destination": None,
-            "summary": (
-                "Conseguimos ler o link, mas a IA teve dificuldade em identificar "
-                "lugares específicos agora. Tente de novo em alguns segundos, "
-                "ou digite o destino manualmente para criar um roteiro."
-            ),
-        }
+        # Haiku failed (credits exhausted, rate-limited, etc.). Fall back to
+        # a regex extraction of numbered/keycap-emoji lists so we still give
+        # the user something actionable instead of an empty modal.
+        logger.error("[analyze-urls] All Haiku attempts failed; trying regex fallback")
+        fallback = _regex_extract_places(combined_content)
+        if fallback.get("places"):
+            logger.info(
+                "[analyze-urls] Regex fallback recovered %d places (destination=%s)",
+                len(fallback["places"]),
+                fallback.get("destination"),
+            )
+            parsed = fallback
+        else:
+            return {
+                "places": [],
+                "destination": None,
+                "summary": (
+                    "Conseguimos ler o link, mas a IA teve dificuldade em identificar "
+                    "lugares específicos agora. Tente de novo em alguns segundos, "
+                    "ou digite o destino manualmente para criar um roteiro."
+                ),
+            }
 
     destination = parsed.get("destination") or ""
     place_names = parsed.get("places") or []
@@ -351,6 +361,109 @@ about."""
         "debug_raw": combined_content[:8000],
         "debug_haiku_raw": _last_haiku_response.get("raw", ""),
     }
+
+
+# Keycap-emoji digits (1️⃣ through 🔟). These appear in almost every numbered
+# TikTok/Reels "places to visit" title.
+_KEYCAP_EMOJI = {
+    "1\uFE0F\u20E3": 1, "2\uFE0F\u20E3": 2, "3\uFE0F\u20E3": 3,
+    "4\uFE0F\u20E3": 4, "5\uFE0F\u20E3": 5, "6\uFE0F\u20E3": 6,
+    "7\uFE0F\u20E3": 7, "8\uFE0F\u20E3": 8, "9\uFE0F\u20E3": 9,
+    "\U0001F51F": 10,
+}
+_KEYCAP_RE = re.compile(
+    "(" + "|".join(re.escape(k) for k in _KEYCAP_EMOJI.keys()) + ")"
+)
+# Generic emoji range — strip so names stay clean. Covers most pictographs.
+_EMOJI_STRIP_RE = re.compile(
+    "[\U0001F000-\U0001FAFF"        # Mahjong through Symbols & Pictographs Extended-A
+    "\U00002600-\U000027BF"          # Misc symbols + dingbats
+    "\u2300-\u23FF"                  # Misc technical (watches, hourglass, etc.)
+    "\uFE00-\uFE0F\u200D\u20E3]+"   # Variation selectors + ZWJ + keycap combiner
+)
+# Numbered list patterns: "1. Name", "1) Name", "#1 Name"
+_NUMBERED_RE = re.compile(r"(?:^|\s|\n)(?:#?\d{1,2})[\.\)]\s+([^\n\r]+?)(?=(?:\s#?\d{1,2}[\.\)])|\n|$)")
+# Destinations we reliably spot in TikTok titles. Only used as a heuristic —
+# the Haiku path is always preferred when credits are available.
+_DESTINATION_HINTS = [
+    "Buenos Aires", "Paris", "Rome", "Roma", "Tokyo", "Tóquio", "New York",
+    "Nova York", "London", "Londres", "Barcelona", "Lisbon", "Lisboa",
+    "Rio de Janeiro", "São Paulo", "Istanbul", "Dubai", "Bangkok",
+    "Berlin", "Berlim", "Amsterdam", "Amsterdã", "Madrid", "Madri",
+    "Vienna", "Viena", "Prague", "Praga", "Budapest", "Budapeste",
+    "Porto", "Fortaleza", "Salvador", "Recife", "Florianópolis",
+    "Mexico City", "Cidade do México", "Cancún", "Cancun",
+    "Los Angeles", "San Francisco", "Miami", "Chicago",
+    "Santiago", "Mendoza", "Bariloche", "Cartagena", "Medellín",
+    "Cusco", "Lima", "Punta Cana", "Florença", "Florence",
+    "Milan", "Milão", "Veneza", "Venice", "Nápoles", "Naples",
+]
+
+
+def _regex_extract_places(text: str) -> dict:
+    """Extract place names from numbered/keycap-emoji lists when Haiku fails.
+
+    Handles the most common TikTok/Reels title pattern:
+        "6 PASSEIOS EM X 1️⃣ Place A 2️⃣ Place B 3️⃣ Place C ..."
+    and the numbered fallback "1. Name 2. Name". Returns at most 20 places.
+    Conservative by design — prefers false negatives over bogus matches.
+    """
+    if not text:
+        return {"places": [], "destination": None, "summary": ""}
+
+    places: list[str] = []
+
+    # Try keycap-emoji split first (TikTok's dominant format).
+    parts = _KEYCAP_RE.split(text)
+    if len(parts) >= 3:  # Means at least one keycap boundary was found
+        # parts alternates: [pre, keycap, between, keycap, between, ..., tail]
+        for i in range(2, len(parts), 2):
+            chunk = parts[i]
+            # Stop at the first hashtag, newline, or obvious sentence break.
+            chunk = re.split(r"[#\n\r]|\s{3,}", chunk, 1)[0]
+            name = _EMOJI_STRIP_RE.sub(" ", chunk)
+            name = re.sub(r"\s+", " ", name).strip(" -–—:.,;")
+            # Drop trailing connector words/short junk.
+            if 3 <= len(name) <= 80 and not name.isdigit():
+                places.append(name)
+
+    # Numbered-list fallback (e.g. descriptions without emojis)
+    if not places:
+        for m in _NUMBERED_RE.finditer(text):
+            raw = m.group(1).strip()
+            name = _EMOJI_STRIP_RE.sub(" ", raw)
+            name = re.sub(r"\s+", " ", name).strip(" -–—:.,;")
+            # Trim at obvious sentence-enders
+            name = re.split(r"[—–]{1}\s|  ", name, 1)[0].strip()
+            if 3 <= len(name) <= 80 and not name.isdigit():
+                places.append(name)
+
+    # Dedupe preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in places:
+        k = p.lower()
+        if k not in seen:
+            seen.add(k)
+            unique.append(p)
+    unique = unique[:20]
+
+    # Destination hint — first known city token found in the text.
+    destination: str | None = None
+    lowered = text.lower()
+    for hint in _DESTINATION_HINTS:
+        if hint.lower() in lowered:
+            destination = hint
+            break
+
+    summary = ""
+    if unique:
+        summary = (
+            f"Extraímos {len(unique)} lugares do texto do link (modo de "
+            "recuperação — a análise de IA não estava disponível no momento)."
+        )
+
+    return {"places": unique, "destination": destination, "summary": summary}
 
 
 def _parse_json_response(raw: str) -> list | dict | None:
