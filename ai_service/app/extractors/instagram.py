@@ -3,29 +3,58 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.extractors.audio_download import transcribe_video_url
 from app.extractors.base import BaseExtractor, ExtractedContent
 
 logger = logging.getLogger(__name__)
 
 
 class InstagramExtractor(BaseExtractor):
-    """Extract content from Instagram posts and Reels."""
+    """Extract content from Instagram posts and Reels.
+
+    Combines instaloader metadata (caption + comments) with audio transcription
+    via Whisper — for Reels, this captures spoken places that are not in the
+    caption.
+    """
 
     def can_handle(self, url: str) -> bool:
         return "instagram.com" in url.lower()
 
     async def extract(self, url: str) -> ExtractedContent:
-        """Extract post data from Instagram."""
-        info = await asyncio.to_thread(self._extract_info, url)
+        """Extract post data from Instagram (caption + comments + audio)."""
+        info_task = asyncio.create_task(asyncio.to_thread(self._extract_info, url))
 
-        has_video = info.get("is_video", False) or "/reel/" in url
+        has_video_hint = "/reel/" in url or "/tv/" in url
+        transcript_task = None
+        if has_video_hint:
+            transcript_task = asyncio.create_task(transcribe_video_url(url))
+
+        info = await info_task
+        transcript = ""
+        if transcript_task is not None:
+            try:
+                transcript = await transcript_task
+            except Exception:
+                transcript = ""
+
+        has_video = info.get("is_video", False) or has_video_hint
+
+        # If it IS a video but we didn't start transcription early, do it now
+        if has_video and not transcript and not transcript_task:
+            transcript = await transcribe_video_url(url)
+
+        captions: list[str] = []
+        if info.get("caption"):
+            captions.append(info["caption"])
+        if transcript:
+            captions.append(f"[TRANSCRIPT] {transcript}")
 
         return ExtractedContent(
             platform="instagram",
             url=url,
             title=info.get("title"),
             description=info.get("caption", ""),
-            captions=[info["caption"]] if info.get("caption") else [],
+            captions=captions,
             comments=info.get("comments", []),
             has_video=has_video,
             metadata={
@@ -33,6 +62,8 @@ class InstagramExtractor(BaseExtractor):
                 "likes": info.get("likes"),
                 "location": info.get("location"),
                 "hashtags": info.get("hashtags", []),
+                "has_transcript": bool(transcript),
+                "transcript_chars": len(transcript) if transcript else 0,
             },
         )
 

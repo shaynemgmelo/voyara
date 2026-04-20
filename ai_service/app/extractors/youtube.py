@@ -6,13 +6,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from app.extractors.audio_download import transcribe_video_url
 from app.extractors.base import BaseExtractor, ExtractedContent
 
 logger = logging.getLogger(__name__)
 
 
 class YouTubeExtractor(BaseExtractor):
-    """Extract content from YouTube videos and Shorts."""
+    """Extract content from YouTube videos and Shorts.
+
+    Prefers platform subtitles (free, fast, accurate) and falls back to
+    Whisper transcription when no subtitles are available (e.g. Shorts
+    without auto-captions).
+    """
 
     def can_handle(self, url: str) -> bool:
         return any(
@@ -24,12 +30,21 @@ class YouTubeExtractor(BaseExtractor):
         """Extract metadata, description, captions, and comments from YouTube."""
         info = await asyncio.to_thread(self._extract_info, url)
 
+        captions = self._get_captions(info)
+
+        # If we got no captions (common on Shorts / non-English videos),
+        # transcribe the audio so we don't miss spoken places.
+        if not captions:
+            transcript = await transcribe_video_url(url)
+            if transcript:
+                captions = [f"[TRANSCRIPT] {transcript}"]
+
         content = ExtractedContent(
             platform="youtube",
             url=url,
             title=info.get("title"),
             description=info.get("description", ""),
-            captions=self._get_captions(info),
+            captions=captions,
             comments=self._get_comments(info),
             has_video=True,
             metadata={
@@ -37,6 +52,8 @@ class YouTubeExtractor(BaseExtractor):
                 "duration": info.get("duration"),
                 "view_count": info.get("view_count"),
                 "tags": info.get("tags", []),
+                "used_transcription": not info.get("subtitles")
+                and not info.get("automatic_captions"),
             },
         )
 

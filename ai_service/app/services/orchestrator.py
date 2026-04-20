@@ -125,25 +125,39 @@ async def analyze_urls(urls: list[str]) -> dict:
     # 2. Use Haiku to extract place names and destination
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    base_prompt = f"""Analyze this content and identify the MAIN place(s) that are the FOCUS of the content. Also identify the destination city/region.
+    base_prompt = f"""Analyze this content and identify EVERY specific place mentioned, named, shown, or spoken about.
 
-Content:
-{combined_content[:6000]}
+Content (may include [TRANSCRIPT] sections from the video's audio):
+{combined_content[:15000]}
 
 Return ONLY a JSON object (no markdown, no explanation text, no code fences):
 {{"destination": "City, Country", "places": ["Place Name 1", "Place Name 2"], "summary": "One sentence about what the content is about"}}
 
 CRITICAL RULES:
-1. IDENTIFY THE FOCUS: What is this content ABOUT?
-   - Review of ONE place → return only that place.
-   - Top-N list/guide → return ALL featured places.
-   - Comparison references ("like X in Vegas") → do NOT include them.
-2. If no place names are visible, look at description/caption/comments/hashtags.
-3. Only real, specific place names (not generic descriptions).
-4. Maximum 10 places.
-5. Summary: one sentence.
+1. LIST EVERYTHING — do NOT filter down to just "the main" place.
+   Every specific named place the creator mentions, shows, visits, recommends,
+   or even briefly references (restaurants, attractions, parks, bars, cafés,
+   markets, bridges, streets, neighborhoods, viewpoints, shopping malls,
+   museums, theaters, cultural centers, plazas, statues, churches, hotels,
+   and activities like "boat tour on X river", "tango show", "day trip to Y")
+   MUST appear in the list.
+2. If the creator says "day 1 do X Y Z, day 2 do A B C", list ALL of X Y Z A B C.
+3. Activities count too — "passeio de barco Rio da Prata", "show de tango",
+   "tour guiado do cemitério" are places. Use the specific activity name if
+   provided, or "Passeio de barco Rio da Prata" if generic.
+4. Comparison references ("like X in Vegas") → do NOT include them.
+5. Generic mentions ("a nice café", "the beach") → do NOT include unless the
+   creator names them.
+6. Include neighborhoods when the creator explicitly recommends them (e.g.
+   "jantar em Palermo" → include "Palermo (jantar)").
+7. Up to 30 places. If more, prioritize the explicitly visited / recommended.
+8. Summary: one sentence.
+9. ALSO examine [TRANSCRIPT] sections carefully — the creator speaks place
+   names aloud that are NOT in the caption. Those are the most valuable.
 
-IMPORTANT: If you cannot find any place names, still return valid JSON with empty "places" array and a summary explaining what the content seems to be about."""
+IMPORTANT: If you cannot find any place names, still return valid JSON with
+empty "places" array and a summary explaining what the content seems to be
+about."""
 
     parsed = await _analyze_urls_with_retries(client, base_prompt)
 

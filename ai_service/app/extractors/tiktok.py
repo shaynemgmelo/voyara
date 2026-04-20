@@ -4,6 +4,7 @@ import re
 
 import httpx
 
+from app.extractors.audio_download import transcribe_video_url
 from app.extractors.base import BaseExtractor, ExtractedContent
 
 logger = logging.getLogger(__name__)
@@ -12,45 +13,70 @@ OEMBED_URL = "https://www.tiktok.com/oembed"
 
 
 class TikTokExtractor(BaseExtractor):
-    """Extract content from TikTok videos using oEmbed API + yt-dlp fallback."""
+    """Extract TikTok video content — oEmbed metadata + audio transcription.
+
+    We run oEmbed and transcription IN PARALLEL, then combine both signals:
+    the title/description from oEmbed and the full audio transcript via
+    Whisper. This surfaces places the creator MENTIONS but did not write
+    in the caption.
+    """
 
     def can_handle(self, url: str) -> bool:
         return "tiktok.com" in url.lower()
 
     async def extract(self, url: str) -> ExtractedContent:
-        # Try oEmbed first (fast, reliable, public API)
-        oembed = await self._oembed_extract(url)
-        if oembed.get("title"):
-            hashtags = re.findall(r"#(\w+)", oembed.get("title", ""))
+        # Run metadata + transcription in parallel
+        oembed_task = asyncio.create_task(self._oembed_extract(url))
+        transcript_task = asyncio.create_task(transcribe_video_url(url))
+
+        oembed, transcript = await asyncio.gather(
+            oembed_task, transcript_task, return_exceptions=False
+        )
+
+        title = oembed.get("title") if oembed else ""
+        description = title or ""
+        hashtags = re.findall(r"#(\w+)", description)
+        creator = oembed.get("author_name") if oembed else None
+
+        # Captions list: description + transcript (transcript is the gold)
+        captions: list[str] = []
+        if description:
+            captions.append(description)
+        if transcript:
+            captions.append(f"[TRANSCRIPT] {transcript}")
+
+        # If oEmbed failed AND transcript is empty, fall back to yt-dlp
+        if not title and not transcript:
+            info = await asyncio.to_thread(self._extract_info, url)
             return ExtractedContent(
                 platform="tiktok",
                 url=url,
-                title=oembed.get("title"),
-                description=oembed.get("title", ""),
-                captions=[oembed["title"]],
-                comments=[],
+                title=info.get("title"),
+                description=info.get("description", ""),
+                captions=[info["description"]] if info.get("description") else [],
+                comments=self._get_comments(info),
                 has_video=True,
                 metadata={
-                    "creator": oembed.get("author_name"),
-                    "tags": hashtags,
+                    "creator": info.get("creator") or info.get("uploader"),
+                    "like_count": info.get("like_count"),
+                    "view_count": info.get("view_count"),
+                    "tags": info.get("tags", []),
                 },
             )
 
-        # Fallback to yt-dlp
-        info = await asyncio.to_thread(self._extract_info, url)
         return ExtractedContent(
             platform="tiktok",
             url=url,
-            title=info.get("title"),
-            description=info.get("description", ""),
-            captions=[info["description"]] if info.get("description") else [],
-            comments=self._get_comments(info),
+            title=title,
+            description=description,
+            captions=captions,
+            comments=[],
             has_video=True,
             metadata={
-                "creator": info.get("creator") or info.get("uploader"),
-                "like_count": info.get("like_count"),
-                "view_count": info.get("view_count"),
-                "tags": info.get("tags", []),
+                "creator": creator,
+                "tags": hashtags,
+                "has_transcript": bool(transcript),
+                "transcript_chars": len(transcript) if transcript else 0,
             },
         )
 
