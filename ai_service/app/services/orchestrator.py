@@ -1395,6 +1395,21 @@ async def _validate_and_create_items(
     # no compatible day exists.
     validated = _tighten_day_clusters(validated, max_diameter_km=15.0)
 
+    # Regra #1 — enforce Day 1 + Day 2 stay in the main destination city.
+    # A day trip that landed on Day 1/2 (because the Sonnet output ignored
+    # the rule) gets swapped with the latest Day 3+ that sits in the main
+    # cluster. Skipped when the video explicitly placed it there.
+    profile_hint = (trip.get("traveler_profile") or {})
+    preplanned_day_places: dict[int, set[str]] = {}
+    for dp_link in profile_hint.get("day_plans_from_links") or []:
+        d = dp_link.get("day")
+        pl = dp_link.get("places") or []
+        if isinstance(d, int) and pl:
+            preplanned_day_places[d] = set(pl)
+    validated = _enforce_main_city_on_early_days(
+        validated, len(day_plans), preplanned_day_places=preplanned_day_places,
+    )
+
     # Generate deterministic alerts from Google Places data (zero AI cost)
     for place in validated:
         alerts = list(place.get("alerts") or [])
@@ -1616,16 +1631,28 @@ Adicione cerca de {total_slots - max_link_places} lugares seus (source: "ai") pa
                 plan_lines.append(f"  Day {day_num}: {places_str} (from: {src})")
         if plan_lines:
             preplanned_section = f"""
-PRE-PLANNED ITINERARY FROM USER'S LINKS (HIGHEST PRIORITY — DO NOT CHANGE):
-The user's link content contains a complete day-by-day plan. You MUST use this EXACT structure:
+╔═══════════════════════════════════════════════════════════════════╗
+║  ⚡ REGRA #0 EM AÇÃO — ESTRUTURA DE DIAS DO VÍDEO DO USUÁRIO     ║
+║  ESTA É A BASE ABSOLUTA DO ROTEIRO. NÃO REORDENE. NÃO REAGRUPE.  ║
+╚═══════════════════════════════════════════════════════════════════╝
+O conteúdo do link tem um plano dia-a-dia COMPLETO. O roteiro que você gera
+DEVE seguir exatamente esta estrutura (Dia N do vídeo = Dia N do roteiro):
+
 {chr(10).join(plan_lines)}
 
-RULES FOR PRE-PLANNED DAYS:
-1. Keep these places on the EXACT day specified. Do NOT move them to different days.
-2. Keep the SAME order within each day.
-3. Tag ALL these places as "source": "link".
-4. You may ADD your own "source": "ai" recommendations to fill gaps (meals, evening activities) but NEVER remove or replace any pre-planned place.
-5. For days NOT covered by the pre-planned structure, create complete days with your own recommendations.
+REGRAS OBRIGATÓRIAS (quebrar qualquer uma = falha do roteiro):
+1. Os lugares acima ficam EXATAMENTE no dia especificado. NUNCA movê-los.
+2. A ordem dentro de cada dia DEVE ser preservada.
+3. Todos estes lugares têm "source": "link".
+4. Você pode ADICIONAR lugares "source": "ai" para completar refeições,
+   transições, ou pôr-do-sol — mas SEMPRE no mesmo dia e no mesmo bairro.
+5. NUNCA remova nem substitua nenhum lugar pre-planejado.
+6. Se o vídeo cobre só alguns dias e a viagem tem mais, use os dias vazios
+   para complementar NA CIDADE PRINCIPAL (nunca começar com day trip — ver
+   Regra #1).
+7. Se o usuário abrir o vídeo e o roteiro lado a lado, o Dia 1 do roteiro
+   DEVE conter os lugares do Dia 1 do vídeo, o Dia 2 os do Dia 2, e assim
+   por diante. Testar mentalmente antes de responder.
 """
 
     # Multi-city awareness from day_plans
@@ -1650,6 +1677,52 @@ IMPORTANT: When generating places, search for attractions IN THE CORRECT CITY fo
 
     return f"""You are an expert travel planner building a {num_days}-day itinerary for {destination}.
 Think like someone who has visited {destination} 50 times and knows exactly what makes a trip unforgettable.
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  REGRA #0 — PRIORIDADE ABSOLUTA: SEGUIR A ESTRUTURA DO VÍDEO     ║
+║  (READ THIS BEFORE EVERYTHING ELSE — THIS OVERRIDES ALL OTHER    ║
+║  RULES WHEN IN CONFLICT)                                          ║
+╚═══════════════════════════════════════════════════════════════════╝
+Se o vídeo/link do usuário JÁ estrutura os dias (ex: "Dia 1: Avenida 9 de Julho,
+Rua Florida, Galería Güemes, Casa Rosada / Dia 2: Recoleta, Palermo / Dia 3:
+Tigre..."), o roteiro que você gera DEVE COPIAR essa estrutura exatamente.
+- Dia N do vídeo → Dia N do roteiro (mesma ordem, mesmos lugares, mesmo agrupamento).
+- Se o vídeo diz que o Dia 1 é Centro Histórico de Buenos Aires, o Dia 1 do
+  seu roteiro é Centro Histórico de Buenos Aires. NÃO INVENTE outro começo.
+- NUNCA reordene os dias do vídeo. NUNCA mova um lugar do Dia 2 do vídeo
+  para o Dia 1 do roteiro. O usuário quer SEGUIR o vídeo, não receber uma
+  versão "melhorada" dele.
+- Você só pode COMPLETAR cada dia (adicionar almoço, jantar, viewpoint ao
+  pôr-do-sol) com lugares do mesmo bairro — mas o NÚCLEO do dia é o que o
+  vídeo mandou.
+
+Verificação mental: se o usuário abrir o roteiro lado a lado com o vídeo, a
+ordem dos dias deve bater 1:1. Se não bate, você falhou.
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  REGRA #1 — ORGANIZAÇÃO POR CIDADE (NÃO NEGOCIÁVEL)              ║
+╚═══════════════════════════════════════════════════════════════════╝
+Toda viagem tem UMA cidade principal (a cidade do destino: Buenos Aires,
+Paris, Tóquio, Rio de Janeiro etc.). Day trips existem para OUTRAS cidades
+menores próximas (Tigre, Colônia do Sacramento, Mendoza, Versalhes, Nikko,
+Petrópolis etc.).
+
+Regras duras:
+1. **Dia 1 SEMPRE é na cidade principal.** Um turista que chega em Buenos Aires
+   NÃO começa a viagem em Tigre. Começa em Buenos Aires (Puerto Madero,
+   Recoleta, Microcentro, Palermo — a CIDADE que define o destino).
+2. **Dia 2 também é na cidade principal.** Dois primeiros dias são dedicados
+   a conhecer a cidade-destino antes de qualquer escapada.
+3. **Day trips para outras cidades SÓ a partir do Dia 3** (se a viagem for
+   de 3+ dias). Em uma viagem de 2 dias, NUNCA tenha day trip para fora.
+4. **Exceção única:** se a REGRA #0 (estrutura do vídeo) explicitamente
+   colocar um day trip antes do Dia 3, siga o vídeo — mas essa é a única
+   situação em que essa ordem muda.
+
+Exemplo concreto (Buenos Aires, 5 dias):
+  ✅ CORRETO: Dia 1 = Microcentro/Plaza de Mayo; Dia 2 = Recoleta/Palermo;
+     Dia 3 = Tigre (day trip); Dia 4 = San Telmo/La Boca; Dia 5 = Puerto Madero.
+  ❌ ERRADO: Dia 1 = Tigre (o turista nem conhece Buenos Aires ainda!).
 
 MINDSET — Think like a real traveler:
 1. POSTCARDS FIRST: When a traveler arrives at a destination, they want to SEE the place — the landmarks, \
@@ -1737,32 +1810,47 @@ The traveler expects a COMPLETE trip, not a copy of one video.
 ╔═══════════════════════════════════════════════════════════════╗
 ║  WORKFLOW FOR THIS ITINERARY (FOLLOW IN ORDER)               ║
 ╚═══════════════════════════════════════════════════════════════╝
-STEP 1 — ANCHOR THE LINK PLACES
+STEP 0 — RESPECT THE VIDEO'S DAY STRUCTURE (Regra #0)
+   If the content describes days ("Dia 1: X, Y, Z | Dia 2: ..."), copy that
+   structure as-is. Day N of the video → Day N of the itinerary. Never
+   reorder. Never move a Day 2 place to Day 1 to "improve" the flow.
+
+STEP 1 — ENFORCE MAIN CITY PRIORITY (Regra #1)
+   Check which places belong to the MAIN city ({destination}'s core) vs
+   day-trip cities (Tigre, Colônia, Versailles, Nikko, etc.).
+   - Day 1 + Day 2 must be main-city only. No day trips in the first 48h.
+   - Day trips are allowed from Day 3 onward.
+   - If the video explicitly puts a day trip earlier, Regra #0 wins — but
+     in the absence of an explicit video structure, NEVER start Day 1 in
+     a secondary city.
+
+STEP 2 — ANCHOR THE LINK PLACES
    Look at the PLACES FROM USER'S LINKS section. Mentally locate each on a map of {destination}.
    Group them by NEIGHBORHOOD / PROXIMITY. Places in the same area = same day.
 
-STEP 2 — ADD MANDATORY LANDMARKS
+STEP 3 — ADD MANDATORY LANDMARKS
    Check the DESTINATION LANDMARKS list above. Any iconic landmark from {destination} that is
    NOT covered by the link places MUST be added. Place it on the day whose neighborhood matches.
    Never skip a top-5 landmark of the city because the video didn't mention it.
 
-STEP 3 — FILL EACH DAY BY PROXIMITY (NOT BY THEME)
+STEP 4 — FILL EACH DAY BY PROXIMITY (NOT BY THEME)
    For each day, pick ONE neighborhood/zone. Group all morning/lunch/afternoon/evening activities
    within that zone. Maximum walking/driving between consecutive stops: 20 minutes.
    Do NOT build a "beach day" with beaches from 3 different parts of town. Do NOT build a "food day"
    with restaurants scattered across the city.
 
-STEP 4 — COMPLETE THE DAY (10:00 → 20:00)
+STEP 5 — COMPLETE THE DAY (10:00 → 20:00)
    Each day needs 4-5 places filling morning → lunch → afternoon → late afternoon → dinner/viewpoint.
    Sunset viewpoints ALWAYS near the end of the day.
 
-RULES RECAP:
+RULES RECAP (in order of priority):
+- **REGRA #0 (overrides everything):** video's day structure is law. Copy it 1:1.
+- **REGRA #1:** Day 1 + 2 = main city. Day trips to other cities only from Day 3+.
 - Every link place MUST appear in the final itinerary (unless there are >80% of slots worth of them).
 - Every link place MUST have "source": "link".
 - Every AI-added place MUST have "source": "ai".
 - Same-day places MUST be in the same neighborhood/zone.
 - Top landmarks of {destination} MUST be present even if the video didn't mention them.
-- If there is a PRE-PLANNED ITINERARY section above, that structure has ABSOLUTE PRIORITY.
 
 Return ONLY a JSON array with {total_slots} places across ALL {num_days} days (about 5 per day). Each object:
 {{"day": <1-{num_days}>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "10:00", "duration_minutes": 90, "description": "What makes this special + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert text in Portuguese"], "alternative_group": null, "source": "link|ai"}}
@@ -1810,12 +1898,17 @@ HARD RULES:
 - alerts: practical warnings in Portuguese like "Fechado nas segundas-feiras", "Reserva recomendada", "Chega cedo para evitar filas". Only add if relevant.
 - alternative_group: when 2 similar options exist for the same time slot (e.g., two brunch places), give them the SAME group ID like "day1_morning_cafe". Most items should be null.
 
-BEFORE RETURNING YOUR JSON — SELF-CHECK (MANDATORY):
-1. Count: how many of {destination}'s top 5-8 iconic landmarks did you include? If fewer than 5 iconic landmarks → ADD MORE. This is the #1 quality metric.
-2. A first-time visitor MUST see ALL the highlights. The user WILL judge the itinerary by whether the famous places are there.
-3. Does each day have 4-5 items filling 10:00 → 19:00? If any day has fewer than 4 items, add more nearby places NOW.
-4. Is there at least 1 restaurant/café per day? If not, add one.
-5. Are viewpoints/rooftops scheduled at sunset? Fix if not.
+BEFORE RETURNING YOUR JSON — SELF-CHECK (MANDATORY, IN THIS ORDER):
+1. **Regra #0 compliance:** Does Day N of the itinerary match Day N of the video?
+   If the video said "Dia 1: A, B, C", is your Day 1 built around A, B, C? If NOT — fix it NOW.
+2. **Regra #1 compliance:** Are Days 1 and 2 in the main city ({destination}'s core)?
+   If Day 1 starts in a secondary/day-trip city (Tigre, Versailles, Nikko, Colônia, etc.) AND
+   the video didn't explicitly put it there → MOVE it. Day 1 must feel like "I'm really in the main city."
+3. Count: how many of {destination}'s top 5-8 iconic landmarks did you include? If fewer than 5 iconic landmarks → ADD MORE. This is a top quality metric.
+4. A first-time visitor MUST see ALL the highlights. The user WILL judge the itinerary by whether the famous places are there.
+5. Does each day have 4-5 items filling 10:00 → 19:00? If any day has fewer than 4 items, add more nearby places NOW.
+6. Is there at least 1 restaurant/café per day? If not, add one.
+7. Are viewpoints/rooftops scheduled at sunset? Fix if not.
 
 Raw content from user's links (reference material — places are already listed above in PLACES FROM USER'S LINKS):
 {content_text[:8000]}"""
@@ -1949,6 +2042,155 @@ def _day_has_full_day_activity(items: list[dict]) -> bool:
         (item.get("duration_minutes") or 0) >= 360
         for item in items
     )
+
+
+def _enforce_main_city_on_early_days(
+    place_list: list[dict],
+    num_days: int,
+    preplanned_day_places: dict[int, set[str]] | None = None,
+) -> list[dict]:
+    """Regra #1 — Dia 1 + Dia 2 devem estar na cidade principal.
+
+    Strategy: compute the geographic centroid of all places. Any day whose
+    own centroid sits >35km from the overall centroid is flagged as a
+    day-trip day. If that day-trip landed on Day 1 or Day 2 AND the video
+    didn't explicitly place it there (preplanned_day_places), swap it with
+    the latest non-daytrip day (usually Day 3+).
+
+    Skipped when:
+    - fewer than 3 days (no swap target)
+    - video explicitly put the day trip early (Regra #0 wins)
+    - not enough geocoded places to compute centroids reliably
+    """
+    if not place_list or num_days < 3:
+        return place_list
+
+    # Group by day with coordinates
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day", 1)
+        by_day.setdefault(d, []).append(p)
+
+    def _centroid(items: list[dict]) -> tuple[float, float] | None:
+        coords = [
+            (p["latitude"], p["longitude"])
+            for p in items
+            if isinstance(p.get("latitude"), (int, float))
+            and isinstance(p.get("longitude"), (int, float))
+        ]
+        if not coords:
+            return None
+        return (
+            sum(c[0] for c in coords) / len(coords),
+            sum(c[1] for c in coords) / len(coords),
+        )
+
+    def _dist_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+        # Haversine
+        import math
+        lat1, lon1 = map(math.radians, a)
+        lat2, lon2 = map(math.radians, b)
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        return 2 * 6371 * math.asin(math.sqrt(h))
+
+    # Compute each day's centroid
+    day_centroid: dict[int, tuple[float, float]] = {}
+    for d, items in by_day.items():
+        c = _centroid(items)
+        if c:
+            day_centroid[d] = c
+    if len(day_centroid) < 3:
+        return place_list
+
+    def _main_centroid_excluding(exclude_day: int) -> tuple[float, float] | None:
+        """Main-city centroid = median across all days EXCEPT the one we
+        are evaluating. Prevents a day-trip day from pulling the centroid
+        toward itself and masking the fact that it's an outlier."""
+        others = [c for d, c in day_centroid.items() if d != exclude_day]
+        if len(others) < 2:
+            return None
+        lats = sorted(c[0] for c in others)
+        lons = sorted(c[1] for c in others)
+        mid = len(others) // 2
+        return (lats[mid], lons[mid])
+
+    # Flag early days whose distance to the other-days-median exceeds threshold
+    DAYTRIP_KM = 20.0  # >20km from the main-city centroid = day trip
+    early_daytrip_days: list[int] = []
+    day_distances: dict[int, float] = {}
+    for d in (1, 2):
+        if d not in day_centroid:
+            continue
+        mc = _main_centroid_excluding(d)
+        if not mc:
+            continue
+        dist = _dist_km(day_centroid[d], mc)
+        day_distances[d] = dist
+        if dist > DAYTRIP_KM:
+            early_daytrip_days.append(d)
+    if not early_daytrip_days:
+        return place_list
+
+    # Respect Regra #0 — if the video explicitly placed that day as-is, skip.
+    preplanned_day_places = preplanned_day_places or {}
+
+    for early_day in early_daytrip_days:
+        early_items = by_day.get(early_day, [])
+        early_names = {p.get("name", "").strip().lower() for p in early_items}
+        locked = preplanned_day_places.get(early_day, set())
+        locked_lower = {n.strip().lower() for n in locked}
+        # If majority of early_day's items are in the video's preplanned list,
+        # it means the user explicitly wanted this day trip early — honor it.
+        if locked_lower and len(early_names & locked_lower) >= len(early_names) * 0.5:
+            logger.info(
+                "[main-city] Day %d is a day trip (%.1fkm from main) but "
+                "video explicitly placed it — keeping per Regra #0.",
+                early_day, day_distances[early_day],
+            )
+            continue
+
+        # Find the latest day (3+) that IS within the main city cluster.
+        # Compute each candidate's distance using the same exclude-self rule.
+        candidate_days: list[int] = []
+        for d in sorted(by_day.keys(), reverse=True):
+            if d < 3 or d not in day_centroid:
+                continue
+            mc = _main_centroid_excluding(d)
+            if mc and _dist_km(day_centroid[d], mc) <= DAYTRIP_KM:
+                candidate_days.append(d)
+        if not candidate_days:
+            logger.warning(
+                "[main-city] Day %d looks like a day trip (%.1fkm) but no "
+                "Day 3+ available to swap with — leaving as-is.",
+                early_day, day_distances[early_day],
+            )
+            continue
+
+        swap_day = candidate_days[0]
+        logger.warning(
+            "[main-city] Day %d is a day trip (%.1fkm from main city) — "
+            "swapping with Day %d to enforce Regra #1.",
+            early_day, day_distances[early_day], swap_day,
+        )
+        # Perform the swap
+        for p in by_day[early_day]:
+            p["day"] = swap_day
+        for p in by_day[swap_day]:
+            p["day"] = early_day
+        by_day[early_day], by_day[swap_day] = by_day[swap_day], by_day[early_day]
+        # Update distances so subsequent iterations see the swap
+        day_distances[early_day], day_distances[swap_day] = (
+            day_distances.get(swap_day, 0),
+            day_distances.get(early_day, 0),
+        )
+
+    # Flatten back preserving day order
+    result: list[dict] = []
+    for d in range(1, num_days + 1):
+        result.extend(by_day.get(d, []))
+    return result
 
 
 def _rebalance_days(place_list: list[dict], num_days: int) -> list[dict]:
