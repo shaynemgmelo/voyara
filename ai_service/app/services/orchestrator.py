@@ -313,7 +313,6 @@ about."""
         "summary": summary,
         "debug": debug_stats,
         "debug_raw": combined_content[:8000] if deep else None,
-        "debug_haiku_response": raw[:3000] if deep else None,
     }
 
 
