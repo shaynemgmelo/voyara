@@ -16,7 +16,7 @@ import tempfile
 import time
 from typing import Optional
 
-from app.transcription.whisper_service import transcribe_audio
+# Whisper local removed — Groq Whisper API is called directly from _sync_download_and_transcribe.
 
 logger = logging.getLogger(__name__)
 
@@ -138,21 +138,58 @@ def _sync_download_and_transcribe(url: str) -> str:
 
         size_mb = os.path.getsize(audio_path) / (1024 * 1024)
         logger.info(
-            "[transcribe] Downloaded %.2fMB audio from %s, transcribing...",
+            "[transcribe] Downloaded %.2fMB audio from %s, transcribing via Groq...",
             size_mb,
             url,
         )
 
-        # Transcribe synchronously (we're already in a thread)
-        from app.transcription.whisper_service import _transcribe_sync
-
-        transcript = _transcribe_sync(audio_path)
+        transcript = _groq_whisper_transcribe(audio_path)
         logger.info(
             "[transcribe] Produced %d chars transcript from %s",
             len(transcript),
             url,
         )
         return transcript
+
+
+def _groq_whisper_transcribe(audio_path: str) -> str:
+    """Transcribe audio via Groq's free Whisper Large v3 turbo endpoint.
+    Zero local RAM cost. Falls back to empty string on any error."""
+    import os as _os
+
+    api_key = _os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        logger.warning("[transcribe] GROQ_API_KEY not set, skipping transcription")
+        return ""
+
+    try:
+        import requests
+
+        with open(audio_path, "rb") as f:
+            files = {"file": (os.path.basename(audio_path), f, "audio/mpeg")}
+            data = {
+                "model": "whisper-large-v3-turbo",
+                "response_format": "text",
+                # language auto-detect works great for PT/ES/EN
+            }
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files=files,
+                data=data,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "[transcribe] Groq returned %d: %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return ""
+            return resp.text.strip()
+    except Exception as e:
+        logger.warning("[transcribe] Groq call failed: %s", e)
+        return ""
 
 
 def _duration_filter(info_dict: dict, *_args, **_kwargs):

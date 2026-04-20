@@ -14,8 +14,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_places_api_key: str = ""
     rails_api_url: str = "http://localhost:3000/api/v1"
-    # 'tiny' ~75MB, 'base' ~500MB. Tiny fits Render free-tier 512MB RAM.
+    # Whisper config kept for any local use (Pro agent tool); the extractor
+    # pipeline uses Groq Whisper API instead (see GROQ_API_KEY).
     whisper_model_size: str = "tiny"
+    groq_api_key: str = ""
     port: int = 8000
     service_api_key: str = ""
     log_level: str = "INFO"

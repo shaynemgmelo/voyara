@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.42",
     "yt-dlp>=2024.12",
     "imageio-ffmpeg>=0.5.1",
+    "requests>=2.32",
     "instaloader>=4.13",
     "faster-whisper>=1.1",
     "Pillow>=10.4",
