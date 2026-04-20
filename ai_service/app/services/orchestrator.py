@@ -2132,7 +2132,7 @@ async def _extract_link(
     try:
         await rails.update_link(
             trip_id, link_id, status="extracted",
-            extracted_data={"content_text": content_text[:8000]},
+            extracted_data={"content_text": content_text[:12000]},
         )
     except Exception as e:
         logger.warning("Failed to store content for link %d: %s", link_id, e)
@@ -2280,13 +2280,55 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
 
     content_parts = []
     source_urls = []
+    stale_links: list[dict] = []  # links whose content_text was saved before
+                                    # Whisper/Vision/Groq was configured
     for link in links:
         extracted = link.get("extracted_data") or {}
         ct = extracted.get("content_text", "")
+        url = link.get("url", "")
+        # Re-extract if content is poor (no transcript AND no OCR → likely
+        # extracted before deep pipeline was active OR the user's API
+        # setup changed since).
+        needs_reextract = (
+            not ct
+            or len(ct) < 600
+            or (
+                "[TRANSCRIPT]" not in ct
+                and "[ON-SCREEN TEXT]" not in ct
+            )
+        )
+        if needs_reextract and url:
+            stale_links.append(link)
+            continue
         if ct:
-            url = link.get("url", "")
             content_parts.append(f"--- Source: {url} ---\n{ct}")
             source_urls.append(url)
+
+    # Re-extract stale links sequentially (to respect Render memory budget)
+    for link in stale_links:
+        url = link.get("url", "")
+        logger.info("[build] Re-extracting stale link: %s", url)
+        try:
+            fresh = await _extract_content(url, deep=True)
+        except Exception as e:
+            logger.warning("[build] Re-extract failed for %s: %s", url, e)
+            fresh = ""
+        if not fresh:
+            # Fall back to whatever was stored, if anything
+            fresh = (link.get("extracted_data") or {}).get("content_text", "")
+            if not fresh:
+                continue
+        content_parts.append(f"--- Source: {url} ---\n{fresh}")
+        source_urls.append(url)
+        # Persist the fresh content so the next build skips re-extraction
+        try:
+            existing_data = link.get("extracted_data") or {}
+            existing_data["content_text"] = fresh[:12000]
+            await rails.update_link(
+                trip_id, link["id"], extracted_data=existing_data
+            )
+        except Exception as e:
+            logger.warning("[build] Failed to persist fresh content for link %d: %s", link.get("id"), e)
 
     combined_content = "\n\n".join(content_parts) if content_parts else ""
 
