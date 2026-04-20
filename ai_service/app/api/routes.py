@@ -105,11 +105,34 @@ async def analyze_url_start(
     """Start a deep analyze job (audio transcription + on-screen OCR).
 
     Returns immediately with a job_id. Client polls /analyze-url/status/{id}.
+
+    If the SAME set of URLs was analyzed recently AND produced a non-empty
+    transcript, we can replay the result instantly. Otherwise we always
+    re-run to pick up newly-available API keys (Groq) or refreshed caches.
     """
     _gc_old_jobs()
 
+    # Look for a recent job with matching URLs that included a transcript
+    urls_sorted = sorted(request.urls)
+    for info in analyze_jobs.values():
+        if info.get("status") != "ready":
+            continue
+        if sorted(info.get("urls", [])) != urls_sorted:
+            continue
+        result = info.get("result") or {}
+        debug = result.get("debug") or {}
+        had_transcript = any(
+            s.get("has_transcript") for s in debug.values()
+        )
+        if had_transcript:
+            # Replay
+            return {"job_id": info.get("job_id", ""), "status": "ready"}
+        # Stale no-transcript result — re-run to pick up fresh API key
+        break
+
     job_id = str(uuid.uuid4())
     analyze_jobs[job_id] = {
+        "job_id": job_id,
         "status": "pending",
         "stage": "extracting",
         "started_at": time.time(),

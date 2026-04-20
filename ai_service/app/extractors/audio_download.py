@@ -29,19 +29,26 @@ _CACHE_TTL_SECONDS = 60 * 60 * 6  # 6 hours
 MAX_DURATION_SECONDS = 600  # 10 min hard cap
 
 
+def _cache_key(url: str) -> str:
+    """Cache key includes GROQ_API_KEY presence so empty transcripts
+    cached before the key was configured are invalidated once it is."""
+    has_key = "g1" if os.environ.get("GROQ_API_KEY") else "g0"
+    return f"{has_key}:{url}"
+
+
 def _cache_get(url: str) -> Optional[str]:
-    entry = _CACHE.get(url)
+    entry = _CACHE.get(_cache_key(url))
     if not entry:
         return None
     ts, transcript = entry
     if time.time() - ts > _CACHE_TTL_SECONDS:
-        del _CACHE[url]
+        del _CACHE[_cache_key(url)]
         return None
     return transcript
 
 
 def _cache_set(url: str, transcript: str) -> None:
-    _CACHE[url] = (time.time(), transcript)
+    _CACHE[_cache_key(url)] = (time.time(), transcript)
 
 
 async def transcribe_video_url(url: str, timeout: float = 120.0) -> str:
@@ -68,7 +75,10 @@ async def transcribe_video_url(url: str, timeout: float = 120.0) -> str:
         logger.warning("[transcribe] Failed for %s: %s", url, e)
         transcript = ""
 
-    _cache_set(url, transcript)
+    # Only cache non-empty transcripts. Empty means failure / missing
+    # API key — we want to retry once the user fixes that.
+    if transcript:
+        _cache_set(url, transcript)
     return transcript
 
 
@@ -161,6 +171,7 @@ def _groq_whisper_transcribe(audio_path: str) -> str:
     if not api_key:
         logger.warning("[transcribe] GROQ_API_KEY not set, skipping transcription")
         return ""
+    logger.info("[transcribe] Calling Groq Whisper API (key starts %s...)", api_key[:6])
 
     try:
         import requests
