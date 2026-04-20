@@ -12,6 +12,22 @@ logger = logging.getLogger(__name__)
 
 OEMBED_URL = "https://www.tiktok.com/oembed"
 
+# Rotating pool of browser UAs. TikTok appears to rate-limit per (IP, UA)
+# tuple — cycling UAs recovers access even when our Render egress IP is
+# flagged for one specific UA.
+_BROWSER_UAS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Twitterbot/1.0",
+]
+
 
 async def _safe_call(coro, label: str, url: str) -> str:
     """Await a coroutine that may fail; return empty string on error.
@@ -113,71 +129,95 @@ class TikTokExtractor(BaseExtractor):
             },
         )
 
-    async def _oembed_extract(self, url: str) -> dict:
-        """Use TikTok's public oEmbed API to get video metadata.
-        Send browser-like headers because TikTok returns empty/403 for
-        bare python-httpx user agents on some egress IPs (Render workers)."""
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.6 Safari/605.1.15"
-            ),
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8",
-            "Referer": "https://www.tiktok.com/",
-        }
+    async def _resolve_short_url(self, url: str) -> str:
+        """Short 'vt.tiktok.com/XXX' links 301-redirect to full URLs.
+        Resolving them first gives better oEmbed hit-rate on some egress IPs."""
+        if "vt.tiktok.com" not in url and "vm.tiktok.com" not in url:
+            return url
         try:
             async with httpx.AsyncClient(
-                timeout=15.0, follow_redirects=True, headers=headers
-            ) as client:
-                resp = await client.get(OEMBED_URL, params={"url": url})
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logger.warning("TikTok oEmbed failed for %s: %s", url, e)
-            return {}
-
-    async def _html_scrape_fallback(self, url: str) -> dict:
-        """Last-resort scraper: fetch the TikTok page and pull caption/title
-        out of the embedded __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON blob."""
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.6 Safari/605.1.15"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        }
-        try:
-            async with httpx.AsyncClient(
-                timeout=20.0, follow_redirects=True, headers=headers
+                timeout=10.0,
+                follow_redirects=False,
+                headers={
+                    "User-Agent": _BROWSER_UAS[0],
+                    "Accept": "*/*",
+                },
             ) as client:
                 resp = await client.get(url)
-                if resp.status_code != 200:
-                    return {}
-                html = resp.text
-            # Try meta og:description or og:title first (robust, no JSON parse)
-            import re as _re
-            import html as _html
+                loc = resp.headers.get("location")
+                if loc and "tiktok.com" in loc:
+                    # Strip query params
+                    if "?" in loc:
+                        loc = loc.split("?")[0]
+                    return loc
+        except Exception:
+            pass
+        return url
 
-            m = _re.search(
-                r'<meta\s+property="og:description"\s+content="([^"]+)"', html
-            )
-            desc = _html.unescape(m.group(1)) if m else ""
-            t = _re.search(
-                r'<meta\s+property="og:title"\s+content="([^"]+)"', html
-            )
-            title = _html.unescape(t.group(1)) if t else ""
-            if not title and desc:
-                title = desc
-            if title or desc:
-                return {"title": title or desc, "author_name": None}
-            return {}
-        except Exception as e:
-            logger.warning("TikTok HTML scrape failed for %s: %s", url, e)
-            return {}
+    async def _oembed_extract(self, url: str) -> dict:
+        """Use TikTok's public oEmbed API to get video metadata.
+        Retries across several browser UAs because Render egress IPs get
+        quota-throttled by TikTok."""
+        resolved = await self._resolve_short_url(url)
+        for ua in _BROWSER_UAS:
+            headers = {
+                "User-Agent": ua,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8",
+                "Referer": "https://www.tiktok.com/",
+            }
+            try:
+                async with httpx.AsyncClient(
+                    timeout=12.0, follow_redirects=True, headers=headers
+                ) as client:
+                    resp = await client.get(
+                        OEMBED_URL, params={"url": resolved}
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("title"):
+                            return data
+            except Exception as e:
+                logger.debug("TikTok oEmbed UA retry failed: %s", e)
+                continue
+        logger.warning("TikTok oEmbed exhausted all UAs for %s", url)
+        return {}
+
+    async def _html_scrape_fallback(self, url: str) -> dict:
+        """Fetch the TikTok page HTML and pull caption from og: meta tags.
+        Rotates UAs because TikTok varies responses per UA."""
+        import html as _html
+        import re as _re
+
+        resolved = await self._resolve_short_url(url)
+        for ua in _BROWSER_UAS:
+            headers = {
+                "User-Agent": ua,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+                "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            }
+            try:
+                async with httpx.AsyncClient(
+                    timeout=15.0, follow_redirects=True, headers=headers
+                ) as client:
+                    resp = await client.get(resolved)
+                    if resp.status_code != 200:
+                        continue
+                    html = resp.text
+                m = _re.search(
+                    r'<meta\s+property="og:description"\s+content="([^"]+)"', html
+                )
+                desc = _html.unescape(m.group(1)) if m else ""
+                t = _re.search(
+                    r'<meta\s+property="og:title"\s+content="([^"]+)"', html
+                )
+                title = _html.unescape(t.group(1)) if t else ""
+                if title or desc:
+                    return {"title": title or desc, "author_name": None}
+            except Exception:
+                continue
+        logger.warning("TikTok HTML scrape failed across all UAs for %s", url)
+        return {}
 
     def _extract_info(self, url: str) -> dict:
         import yt_dlp
