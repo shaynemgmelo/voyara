@@ -283,7 +283,22 @@ about."""
     enriched_places = []
 
     try:
-        for place_name in place_names[:10]:  # Max 10 places
+        # Respect the up-to-50 limit enforced by the Haiku prompt. Hard-cap
+        # was 10 previously — that truncated real findings from long videos.
+        # Dedupe by normalized name so Haiku duplicates ('Sunset Rio de la
+        # Plata' returned twice) don't create duplicate cards.
+        seen_norms: set[str] = set()
+        unique_names: list[str] = []
+        for pn in place_names[:50]:
+            if not isinstance(pn, str):
+                continue
+            norm = _normalize_place_name(pn)
+            if not norm or norm in seen_norms:
+                continue
+            seen_norms.add(norm)
+            unique_names.append(pn)
+
+        for place_name in unique_names:
             try:
                 # Search for the place
                 search_results = await places_client.search(place_name, destination)
