@@ -30,21 +30,15 @@ class InstagramExtractor(BaseExtractor):
         transcript = ""
         on_screen_text = ""
 
+        # Whisper removed in prod (OOM on free tier). Vision OCR runs alone.
         from app.services.orchestrator import is_shallow_extraction
         if has_video and not is_shallow_extraction():
-            async def _safe(coro, label):
-                try:
-                    return await coro or ""
-                except asyncio.TimeoutError:
-                    logger.info("[%s] Budget exceeded for %s", label, url)
-                except Exception as e:
-                    logger.warning("[%s] Error for %s: %s", label, url, e)
-                return ""
-
-            transcript, on_screen_text = await asyncio.gather(
-                _safe(transcribe_video_url(url, timeout=40.0), "ig-transcript"),
-                _safe(read_video_text(url, timeout=40.0), "ig-vision-ocr"),
-            )
+            try:
+                on_screen_text = await read_video_text(url, timeout=60.0) or ""
+            except asyncio.TimeoutError:
+                logger.info("[ig-vision-ocr] Budget exceeded for %s", url)
+            except Exception as e:
+                logger.warning("[ig-vision-ocr] Error for %s: %s", url, e)
 
         captions: list[str] = []
         if info.get("caption"):

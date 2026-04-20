@@ -32,22 +32,20 @@ class YouTubeExtractor(BaseExtractor):
 
         captions = self._get_captions(info)
 
-        # If we got no captions AND we're in deep mode, transcribe the audio.
-        # Shallow mode (analyze-url) skips this to stay under 30s.
+        # If we got no captions, fall back to Vision OCR on frames.
+        # Local Whisper was removed — too heavy for Render free tier.
         if not captions:
             from app.services.orchestrator import is_shallow_extraction
             if not is_shallow_extraction():
                 try:
-                    transcript = await asyncio.wait_for(
-                        transcribe_video_url(url, timeout=45.0),
-                        timeout=50.0,
-                    )
-                    if transcript:
-                        captions = [f"[TRANSCRIPT] {transcript}"]
+                    from app.vision.video_text_reader import read_video_text
+                    on_screen = await read_video_text(url, timeout=60.0)
+                    if on_screen:
+                        captions = [f"[ON-SCREEN TEXT] {on_screen}"]
                 except asyncio.TimeoutError:
-                    logger.info("[youtube] Transcription budget exceeded for %s", url)
+                    logger.info("[youtube] Vision OCR budget exceeded for %s", url)
                 except Exception as e:
-                    logger.warning("[youtube] Transcription error for %s: %s", url, e)
+                    logger.warning("[youtube] Vision OCR error for %s: %s", url, e)
 
         content = ExtractedContent(
             platform="youtube",
