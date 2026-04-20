@@ -783,67 +783,177 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.asin(math.sqrt(a))
 
 
-def _reject_day_outliers(place_list: list[dict], outlier_km: float = 25.0) -> list[dict]:
-    """Drop places that are far away from the rest of their day's cluster.
+def _compute_centroid(places: list[dict]) -> tuple[float, float] | None:
+    """Average lat/lng of geocoded places. None if no geocoded place."""
+    lats, lngs = [], []
+    for p in places:
+        lat, lng = p.get("latitude"), p.get("longitude")
+        if lat is None or lng is None:
+            continue
+        try:
+            lats.append(float(lat))
+            lngs.append(float(lng))
+        except (ValueError, TypeError):
+            continue
+    if not lats:
+        return None
+    return (sum(lats) / len(lats), sum(lngs) / len(lngs))
 
-    For each day, compute the median lat/lng and drop any place more than
-    `outlier_km` away from it. This catches the case where Google Places
-    picks the wrong namesake (e.g. 'Palacio X' in Mercedes when the day is
-    in Palermo).
 
-    Days with <= 2 geocoded places are left alone (no trustworthy centroid).
+def _cluster_diameter_km(places: list[dict]) -> float:
+    """Max distance between any two geocoded places in the group."""
+    coords = []
+    for p in places:
+        lat, lng = p.get("latitude"), p.get("longitude")
+        if lat is None or lng is None:
+            continue
+        try:
+            coords.append((float(lat), float(lng)))
+        except (ValueError, TypeError):
+            continue
+    if len(coords) < 2:
+        return 0.0
+    max_d = 0.0
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            d = _haversine_km(
+                coords[i][0], coords[i][1], coords[j][0], coords[j][1]
+            )
+            if d > max_d:
+                max_d = d
+    return max_d
+
+
+def _tighten_day_clusters(
+    place_list: list[dict],
+    max_diameter_km: float = 15.0,
+) -> list[dict]:
+    """Enforce that every day's places sit within max_diameter_km of each
+    other. If a day has an outlier, try to move it to another day whose
+    cluster already contains nearby places. If no such day exists, drop it.
+
+    This handles both regular urban days (~10km diameter) AND day trips
+    (all places clustered in the remote zone — Tigre, Campanópolis etc.).
+    The rule is NOT 'stay close to city center' — it is 'stay close to the
+    rest of YOUR day'.
+
+    Runs iteratively: each pass drops at most one outlier per day so that
+    removing an outlier recomputes the centroid before dropping the next.
     """
     if not place_list:
         return place_list
 
     by_day: dict[int, list[dict]] = {}
+    order: list[int] = []
     for p in place_list:
         d = p.get("day") or 1
+        if d not in by_day:
+            order.append(d)
         by_day.setdefault(d, []).append(p)
 
-    filtered: list[dict] = []
-    dropped = 0
+    dropped_total = 0
+    moved_total = 0
 
-    for day, places in by_day.items():
-        geocoded = [
-            p for p in places
-            if p.get("latitude") is not None and p.get("longitude") is not None
-        ]
-        if len(geocoded) < 3:
-            filtered.extend(places)
-            continue
-
-        lats = sorted(float(p["latitude"]) for p in geocoded)
-        lngs = sorted(float(p["longitude"]) for p in geocoded)
-        mid = len(lats) // 2
-        median_lat = lats[mid]
-        median_lng = lngs[mid]
-
-        for p in places:
-            lat = p.get("latitude")
-            lng = p.get("longitude")
-            if lat is None or lng is None:
-                filtered.append(p)
+    # Iterate until no day has a diameter violation (max 6 passes — safety)
+    for _ in range(6):
+        changes = False
+        for day in list(by_day.keys()):
+            places = by_day[day]
+            geocoded = [
+                p for p in places
+                if p.get("latitude") is not None and p.get("longitude") is not None
+            ]
+            if len(geocoded) < 3:
                 continue
-            try:
-                dist = _haversine_km(
-                    median_lat, median_lng, float(lat), float(lng)
+
+            diameter = _cluster_diameter_km(geocoded)
+            if diameter <= max_diameter_km:
+                continue
+
+            # Find the place furthest from the centroid — that's the outlier
+            centroid = _compute_centroid(geocoded)
+            if centroid is None:
+                continue
+            c_lat, c_lng = centroid
+            outlier = None
+            outlier_dist = 0.0
+            for p in geocoded:
+                try:
+                    dist = _haversine_km(
+                        c_lat, c_lng, float(p["latitude"]), float(p["longitude"])
+                    )
+                except (ValueError, TypeError):
+                    continue
+                if dist > outlier_dist:
+                    outlier_dist = dist
+                    outlier = p
+
+            if outlier is None:
+                continue
+
+            # Try to relocate the outlier to a day whose centroid is within
+            # max_diameter_km of the outlier's position
+            o_lat = float(outlier["latitude"])
+            o_lng = float(outlier["longitude"])
+            best_day = None
+            best_dist = max_diameter_km
+            for other_day, other_places in by_day.items():
+                if other_day == day:
+                    continue
+                other_geocoded = [
+                    p for p in other_places
+                    if p.get("latitude") is not None
+                    and p.get("longitude") is not None
+                ]
+                if not other_geocoded or len(other_places) >= 6:
+                    continue
+                other_centroid = _compute_centroid(other_geocoded)
+                if other_centroid is None:
+                    continue
+                d = _haversine_km(
+                    other_centroid[0], other_centroid[1], o_lat, o_lng
                 )
-            except (ValueError, TypeError):
-                filtered.append(p)
-                continue
-            if dist > outlier_km:
+                if d < best_dist:
+                    best_dist = d
+                    best_day = other_day
+
+            if best_day is not None:
+                outlier["day"] = best_day
+                by_day[day].remove(outlier)
+                by_day[best_day].append(outlier)
+                moved_total += 1
+                logger.info(
+                    "[geo] Moved '%s' from day %d to day %d (%.0fkm to new cluster)",
+                    outlier.get("name"), day, best_day, best_dist,
+                )
+            else:
+                by_day[day].remove(outlier)
+                dropped_total += 1
                 logger.warning(
-                    "[geo] DAY %d outlier dropped: '%s' is %.0fkm from day cluster",
-                    day, p.get("name"), dist,
+                    "[geo] DROPPED outlier '%s' (day %d): %.0fkm from day centroid, no compatible day found",
+                    outlier.get("name"), day, outlier_dist,
                 )
-                dropped += 1
-                continue
-            filtered.append(p)
 
-    if dropped:
-        logger.warning("[geo] Dropped %d day-cluster outliers total", dropped)
-    return filtered
+            changes = True
+
+        if not changes:
+            break
+
+    if moved_total or dropped_total:
+        logger.warning(
+            "[geo] Cluster tightening: moved=%d, dropped=%d (diameter threshold %dkm)",
+            moved_total, dropped_total, int(max_diameter_km),
+        )
+
+    # Flatten back preserving original day order
+    result: list[dict] = []
+    for d in order:
+        result.extend(by_day.get(d, []))
+    # Include any days that appeared only as destinations of moves
+    for d in by_day:
+        if d not in order:
+            result.extend(by_day[d])
+    return result
 
 
 async def _get_destination_coords(destination: str, places_client: GooglePlacesClient) -> tuple[float, float] | None:
@@ -877,17 +987,19 @@ async def _validate_and_create_items(
     destination = trip.get("destination", "")
     source_url = ", ".join(source_urls) if source_urls else ""
 
-    # Get destination center for geographic validation
-    # Tighter fence: 60km single-city covers actual day trips (Tigre is ~30km
-    # from BA, Campanópolis ~50km). Previously 150km allowed the wrong
-    # "Palacio X in Mercedes" to survive for a "Buenos Aires" trip.
+    # Get destination center for geographic validation.
+    # The fence here is the OUTER bound for "same trip" — day trips to
+    # remote attractions (Tigre 30km, Campanópolis 50km) must fit.
+    # The REAL logistic enforcement happens in _tighten_day_clusters:
+    # a place can be 100km from city center, but it must be within 15km
+    # of every other place ON THE SAME DAY.
     dest_coords = await _get_destination_coords(destination, places)
     cities_in_plans = set()
     for dp in day_plans:
         c = dp.get("city")
         if c:
             cities_in_plans.add(c)
-    max_distance_km = 250 if len(cities_in_plans) > 1 else 60
+    max_distance_km = 300 if len(cities_in_plans) > 1 else 120
 
     semaphore = asyncio.Semaphore(10)
 
@@ -1005,10 +1117,11 @@ async def _validate_and_create_items(
             before - len(validated), max_distance_km, destination,
         )
 
-    # Per-day cluster check — reject outliers relative to the day's
-    # center of gravity. If 4 places are within 5km and 1 is 40km away,
-    # the lone outlier is almost certainly wrong Google match.
-    validated = _reject_day_outliers(validated)
+    # Per-day cluster tightening — enforce that every day's places sit
+    # within a 15km diameter of each other. Outliers are first tried on
+    # other days (to preserve day-trip places together), then dropped if
+    # no compatible day exists.
+    validated = _tighten_day_clusters(validated, max_diameter_km=15.0)
 
     # Generate deterministic alerts from Google Places data (zero AI cost)
     for place in validated:
