@@ -783,6 +783,69 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.asin(math.sqrt(a))
 
 
+def _reject_day_outliers(place_list: list[dict], outlier_km: float = 25.0) -> list[dict]:
+    """Drop places that are far away from the rest of their day's cluster.
+
+    For each day, compute the median lat/lng and drop any place more than
+    `outlier_km` away from it. This catches the case where Google Places
+    picks the wrong namesake (e.g. 'Palacio X' in Mercedes when the day is
+    in Palermo).
+
+    Days with <= 2 geocoded places are left alone (no trustworthy centroid).
+    """
+    if not place_list:
+        return place_list
+
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day") or 1
+        by_day.setdefault(d, []).append(p)
+
+    filtered: list[dict] = []
+    dropped = 0
+
+    for day, places in by_day.items():
+        geocoded = [
+            p for p in places
+            if p.get("latitude") is not None and p.get("longitude") is not None
+        ]
+        if len(geocoded) < 3:
+            filtered.extend(places)
+            continue
+
+        lats = sorted(float(p["latitude"]) for p in geocoded)
+        lngs = sorted(float(p["longitude"]) for p in geocoded)
+        mid = len(lats) // 2
+        median_lat = lats[mid]
+        median_lng = lngs[mid]
+
+        for p in places:
+            lat = p.get("latitude")
+            lng = p.get("longitude")
+            if lat is None or lng is None:
+                filtered.append(p)
+                continue
+            try:
+                dist = _haversine_km(
+                    median_lat, median_lng, float(lat), float(lng)
+                )
+            except (ValueError, TypeError):
+                filtered.append(p)
+                continue
+            if dist > outlier_km:
+                logger.warning(
+                    "[geo] DAY %d outlier dropped: '%s' is %.0fkm from day cluster",
+                    day, p.get("name"), dist,
+                )
+                dropped += 1
+                continue
+            filtered.append(p)
+
+    if dropped:
+        logger.warning("[geo] Dropped %d day-cluster outliers total", dropped)
+    return filtered
+
+
 async def _get_destination_coords(destination: str, places_client: GooglePlacesClient) -> tuple[float, float] | None:
     """Get lat/lng for the trip destination using Google Places."""
     if not destination:
@@ -815,82 +878,137 @@ async def _validate_and_create_items(
     source_url = ", ".join(source_urls) if source_urls else ""
 
     # Get destination center for geographic validation
-    # Max distance: 150km for normal cities, 300km for multi-city trips
+    # Tighter fence: 60km single-city covers actual day trips (Tigre is ~30km
+    # from BA, Campanópolis ~50km). Previously 150km allowed the wrong
+    # "Palacio X in Mercedes" to survive for a "Buenos Aires" trip.
     dest_coords = await _get_destination_coords(destination, places)
     cities_in_plans = set()
     for dp in day_plans:
         c = dp.get("city")
         if c:
             cities_in_plans.add(c)
-    max_distance_km = 300 if len(cities_in_plans) > 1 else 150
+    max_distance_km = 250 if len(cities_in_plans) > 1 else 60
 
     semaphore = asyncio.Semaphore(10)
+
+    async def _enrich_from_result(place: dict, best: dict) -> dict:
+        """Copy Google Places search result fields onto the place dict."""
+        place_id = best.get("place_id")
+        place["latitude"] = best.get("latitude")
+        place["longitude"] = best.get("longitude")
+        place["address"] = best.get("address")
+        place["google_place_id"] = place_id
+        place["google_rating"] = best.get("rating")
+        place["google_reviews_count"] = best.get("user_ratings_total")
+
+        if place_id:
+            details = await places.get_details(place_id)
+            if details:
+                place["phone"] = details.get("phone")
+                place["website"] = details.get("website")
+                place["pricing_info"] = details.get("pricing")
+                place["operating_hours"] = details.get("operating_hours")
+                place["google_reviews_count"] = details.get("reviews_count")
+                photos = details.get("photos", [])
+                if photos:
+                    place["photos"] = photos[:2]
+        return place
+
+    async def _search_with_geo_check(
+        place: dict, query: str, search_city: str
+    ) -> dict | None:
+        """Run Google Places search and return best result that is within
+        max_distance_km of the trip destination. If Google's top result is
+        an out-of-city namesake, try the next candidates."""
+        try:
+            results = await places.search(query, search_city)
+        except Exception as e:
+            logger.warning("[eco] search failed for %s: %s", query, e)
+            return None
+        if not results:
+            return None
+
+        if not dest_coords:
+            return await _enrich_from_result(place, results[0])
+
+        dest_lat, dest_lng = dest_coords
+        for candidate in results[:5]:
+            lat = candidate.get("latitude")
+            lng = candidate.get("longitude")
+            if lat is None or lng is None:
+                continue
+            try:
+                dist = _haversine_km(dest_lat, dest_lng, float(lat), float(lng))
+            except (ValueError, TypeError):
+                continue
+            if dist <= max_distance_km:
+                if dist > 30:
+                    logger.info(
+                        "[geo] '%s' matched at %.0fkm — far but within fence",
+                        place.get("name"),
+                        dist,
+                    )
+                return await _enrich_from_result(place, candidate)
+
+        # No candidate within fence
+        return None
 
     async def validate_one(place: dict) -> dict | None:
         name = place.get("name", "")
         if not name:
             return None
-        # Use city-specific search if available
-        search_city = place.get("city", destination)
+        search_city = place.get("city") or destination
         async with semaphore:
-            try:
-                results = await places.search(f"{name} {search_city}", search_city)
-                if not results:
-                    return place
-                best = results[0]
-                place_id = best.get("place_id")
+            # Primary search — name + city
+            enriched = await _search_with_geo_check(
+                place, f"{name} {search_city}", search_city
+            )
+            if enriched:
+                return enriched
+            # Retry with explicit destination — catches ambiguous names
+            # (e.g. "Palacio X" could exist in multiple Argentine towns;
+            # adding "Buenos Aires, Argentina" pulls the BA match).
+            if destination and search_city != destination:
+                enriched = await _search_with_geo_check(
+                    place, f"{name} {destination}", destination
+                )
+                if enriched:
+                    return enriched
+            # Last try — broader query
+            enriched = await _search_with_geo_check(
+                place, name, search_city or destination
+            )
+            if enriched:
+                return enriched
 
-                place["latitude"] = best.get("latitude")
-                place["longitude"] = best.get("longitude")
-                place["address"] = best.get("address")
-                place["google_place_id"] = place_id
-                place["google_rating"] = best.get("rating")
-                place["google_reviews_count"] = best.get("user_ratings_total")
-
-                if place_id:
-                    details = await places.get_details(place_id)
-                    if details:
-                        place["phone"] = details.get("phone")
-                        place["website"] = details.get("website")
-                        place["pricing_info"] = details.get("pricing")
-                        place["operating_hours"] = details.get("operating_hours")
-                        place["google_reviews_count"] = details.get("reviews_count")
-                        photos = details.get("photos", [])
-                        if photos:
-                            place["photos"] = photos[:2]
-
-                return place
-            except Exception as e:
-                logger.warning("[eco] Validation failed for %s: %s", name, e)
-                return place
+            # Nothing within fence — keep the place but flag it so we don't
+            # silently put a 100km-away pin on the day. Caller will drop it
+            # if it has no coords.
+            logger.warning(
+                "[geo] Could not find '%s' within %dkm of %s — keeping without coords",
+                name, max_distance_km, destination,
+            )
+            place.pop("latitude", None)
+            place.pop("longitude", None)
+            place["_out_of_fence"] = True
+            return place
 
     validated = await asyncio.gather(*[validate_one(p) for p in place_list])
     validated = [p for p in validated if p is not None]
 
-    # GEOGRAPHIC VALIDATION — reject places too far from destination
-    if dest_coords:
-        dest_lat, dest_lng = dest_coords
-        geo_valid = []
-        rejected = []
-        for place in validated:
-            lat = place.get("latitude")
-            lng = place.get("longitude")
-            if lat and lng:
-                try:
-                    dist = _haversine_km(dest_lat, dest_lng, float(lat), float(lng))
-                    if dist > max_distance_km:
-                        rejected.append((place.get("name"), dist))
-                        continue
-                except (ValueError, TypeError):
-                    pass
-            geo_valid.append(place)
-        if rejected:
-            logger.warning(
-                "[geo] REJECTED %d places too far from %s (max %dkm): %s",
-                len(rejected), destination, max_distance_km,
-                ", ".join(f"{name} ({dist:.0f}km)" for name, dist in rejected),
-            )
-        validated = geo_valid
+    # Drop places that could not be located inside the fence.
+    before = len(validated)
+    validated = [p for p in validated if not p.get("_out_of_fence")]
+    if before != len(validated):
+        logger.warning(
+            "[geo] Dropped %d out-of-fence places (>%dkm from %s)",
+            before - len(validated), max_distance_km, destination,
+        )
+
+    # Per-day cluster check — reject outliers relative to the day's
+    # center of gravity. If 4 places are within 5km and 1 is 40km away,
+    # the lone outlier is almost certainly wrong Google match.
+    validated = _reject_day_outliers(validated)
 
     # Generate deterministic alerts from Google Places data (zero AI cost)
     for place in validated:
