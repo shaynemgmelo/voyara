@@ -200,30 +200,49 @@ Content (may include [TRANSCRIPT] sections from the video's audio):
 Return ONLY a JSON object (no markdown, no explanation text, no code fences):
 {{"destination": "City, Country", "places": ["Place Name 1", "Place Name 2"], "summary": "One sentence about what the content is about"}}
 
-CRITICAL RULES:
-1. EXHAUSTIVE — list EVERY SINGLE named place. Do NOT summarize, do NOT
-   consolidate. If the [ON-SCREEN TEXT] block lists 25 items, the output
-   must have 25 items. Err on the side of INCLUDING rather than excluding.
-2. Every specific named place the creator mentions, shows, visits, recommends,
-   or briefly references (restaurants, attractions, parks, bars, cafés,
-   markets, bridges, streets, neighborhoods, viewpoints, shopping malls,
-   museums, theaters, cultural centers, plazas, statues, churches, hotels,
-   and activities like "boat tour on X river", "tango show", "day trip to Y")
-   MUST appear.
-3. If the creator says "day 1: X Y Z, day 2: A B C", list ALL of X Y Z A B C
-   — never collapse a day into just its headline.
-4. Activities and experiences count as places — "passeio de barco Rio da
-   Prata", "show de tango", "tour guiado do cemitério" belong in the list.
-5. Numbered lists on screen ("1. Campanópolis\n2. Barrio Chino\n...") are
-   the MOST IMPORTANT signal — transcribe them all verbatim.
-6. Neighborhoods explicitly recommended for a specific purpose count
-   ("jantar em Palermo" → include "Palermo" as a place).
-7. Only SKIP: comparison references ("like X in Vegas"), generic mentions
-   without a proper name ("a nice café"), and duplicates.
-8. Up to 50 places (was 30 — raise the ceiling for long itinerary videos).
-9. [ON-SCREEN TEXT] and [TRANSCRIPT] sections must be mined BEFORE the
-   description/caption — those are where the real place names live.
-10. Summary: one sentence.
+REGRAS CRÍTICAS (siga ao pé da letra):
+
+1. EXAUSTIVO. Se o [ON-SCREEN TEXT] tem 7 linhas com nomes de lugares,
+   o array 'places' TEM que ter pelo menos 7 itens. Se o [TRANSCRIPT]
+   menciona mais 10, são 17. Não decida sozinho que um nome é "genérico demais".
+
+2. Qualquer SUBSTANTIVO PRÓPRIO que pareça nome de lugar → INCLUIR.
+   Se começa com maiúscula e é substantivo (rua, avenida, praça, ponte,
+   catedral, mercado, museu, teatro, centro, parque, praia, bairro etc.)
+   seguido de nome próprio → INCLUIR.
+
+   EXEMPLOS que DEVEM entrar (não filtre!):
+   - "Rua Florida" → INCLUIR (rua específica famosa de BA)
+   - "Catedral Metropolitana" → INCLUIR (monumento específico)
+   - "Praça Domingo Perón" → INCLUIR (nome próprio da praça)
+   - "Ponte da Mulher" → INCLUIR
+   - "Centro Cultural Kirchner" → INCLUIR
+   - "Avenida 9 de Julho" → INCLUIR
+   - "Galerías Pacífico" → INCLUIR
+   - "La Boca" → INCLUIR (bairro com nome próprio)
+   - "Caminito" → INCLUIR
+   - "Obelisco" → INCLUIR (mesmo como nome comum, é monumento único)
+
+3. Se o conteúdo falar "Day 1: X Y Z" / "Day 2: A B C" / "Day 3: P Q R",
+   liste TUDO (X Y Z A B C P Q R) — não resuma um dia no seu cabeçalho.
+
+4. Atividades viram places:
+   - "passeio de barco Rio da Prata" → "Passeio de barco Rio da Prata"
+   - "show de tango" → "Show de tango em Palermo" (ou similar)
+
+5. Ordem de prioridade para extrair:
+   a) [ON-SCREEN TEXT] — texto sobreposto do criador
+   b) [TRANSCRIPT] — fala do criador
+   c) description/caption — legenda escrita
+
+6. ÚNICOS filtros legítimos (o resto TEM que entrar):
+   - Referências de comparação ("como X em Vegas") — esse X NÃO entra
+   - Coisas genéricas sem nome ("um café legal") — NÃO entra
+   - Duplicatas exatas — apareceu 2x, lista 1x
+
+7. Limite: até 50 lugares.
+
+8. Summary: uma frase.
 
 IMPORTANT: If you cannot find any place names, still return valid JSON with
 empty "places" array and a summary explaining what the content seems to be
@@ -315,6 +334,7 @@ about."""
         "summary": summary,
         "debug": debug_stats,
         "debug_raw": combined_content[:8000] if deep else None,
+        "debug_haiku_raw": _last_haiku_response.get("raw", "") if deep else None,
     }
 
 
@@ -430,6 +450,9 @@ def _salvage_truncated_json(text: str) -> dict | list | None:
         return None
 
 
+_last_haiku_response: dict[str, str] = {"raw": ""}
+
+
 async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
     """Call Haiku up to 3 times with increasingly strict prompts.
 
@@ -483,6 +506,7 @@ async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
                 text = '{"destination"' + text
 
             parsed = _parse_json_response(text)
+            _last_haiku_response["raw"] = text[:3000]
             if isinstance(parsed, dict):
                 logger.info("[analyze-urls] Parsed on attempt: %s", label)
                 return parsed
