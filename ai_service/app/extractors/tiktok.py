@@ -25,13 +25,26 @@ class TikTokExtractor(BaseExtractor):
         return "tiktok.com" in url.lower()
 
     async def extract(self, url: str) -> ExtractedContent:
-        # Run metadata + transcription in parallel
-        oembed_task = asyncio.create_task(self._oembed_extract(url))
-        transcript_task = asyncio.create_task(transcribe_video_url(url))
+        # Always fetch oEmbed FIRST (fast, ~1s, never blocked by transcription).
+        # Transcription is best-effort with a short deadline so it never
+        # costs us the oEmbed result.
+        oembed = await self._oembed_extract(url)
 
-        oembed, transcript = await asyncio.gather(
-            oembed_task, transcript_task, return_exceptions=False
-        )
+        # Fire transcription with a tight budget — if it doesn't finish
+        # in time, we still return rich oEmbed content.
+        transcript = ""
+        try:
+            transcript = await asyncio.wait_for(
+                transcribe_video_url(url, timeout=45.0),
+                timeout=50.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "[tiktok] Transcription budget exceeded for %s; using oEmbed only",
+                url,
+            )
+        except Exception as e:
+            logger.warning("[tiktok] Transcription error for %s: %s", url, e)
 
         title = oembed.get("title") if oembed else ""
         description = title or ""

@@ -22,26 +22,24 @@ class InstagramExtractor(BaseExtractor):
 
     async def extract(self, url: str) -> ExtractedContent:
         """Extract post data from Instagram (caption + comments + audio)."""
-        info_task = asyncio.create_task(asyncio.to_thread(self._extract_info, url))
+        # Caption first — always fast, never blocked by transcription.
+        info = await asyncio.to_thread(self._extract_info, url)
 
-        has_video_hint = "/reel/" in url or "/tv/" in url
-        transcript_task = None
-        if has_video_hint:
-            transcript_task = asyncio.create_task(transcribe_video_url(url))
-
-        info = await info_task
+        has_video = info.get("is_video", False) or "/reel/" in url or "/tv/" in url
         transcript = ""
-        if transcript_task is not None:
+        if has_video:
             try:
-                transcript = await transcript_task
-            except Exception:
-                transcript = ""
-
-        has_video = info.get("is_video", False) or has_video_hint
-
-        # If it IS a video but we didn't start transcription early, do it now
-        if has_video and not transcript and not transcript_task:
-            transcript = await transcribe_video_url(url)
+                transcript = await asyncio.wait_for(
+                    transcribe_video_url(url, timeout=45.0),
+                    timeout=50.0,
+                )
+            except asyncio.TimeoutError:
+                logger.info(
+                    "[instagram] Transcription budget exceeded for %s; using caption only",
+                    url,
+                )
+            except Exception as e:
+                logger.warning("[instagram] Transcription error for %s: %s", url, e)
 
         captions: list[str] = []
         if info.get("caption"):

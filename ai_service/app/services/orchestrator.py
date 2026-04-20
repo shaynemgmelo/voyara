@@ -65,7 +65,10 @@ async def _extract_content(url: str) -> str:
     for ext in _extractors:
         if ext.can_handle(url):
             try:
-                content = await asyncio.wait_for(ext.extract(url), timeout=30)
+                # 90s covers: oEmbed/caption (fast) + up to 50s transcription
+                # budget inside the extractor. Extractors degrade gracefully
+                # if transcription is slow; we never lose caption data.
+                content = await asyncio.wait_for(ext.extract(url), timeout=90)
                 parts = [content.title or "", content.description or ""]
                 if content.captions:
                     parts.append(" ".join(content.captions[:50]))
@@ -100,10 +103,27 @@ async def analyze_urls(urls: list[str]) -> dict:
             content = await _extract_content(url)
             if content:
                 combined_content += f"\n--- Content from {url} ---\n{content}\n"
+                logger.info(
+                    "[analyze-urls] Extracted %d chars from %s",
+                    len(content),
+                    url,
+                )
             else:
+                logger.warning(
+                    "[analyze-urls] Empty content from %s (extractor returned nothing)",
+                    url,
+                )
                 extraction_errors.append(url)
+        except asyncio.TimeoutError:
+            logger.warning("[analyze-urls] Timeout extracting %s", url)
+            extraction_errors.append(url)
         except Exception as e:
-            logger.warning("[analyze-urls] Failed to extract %s: %s", url, e)
+            logger.warning(
+                "[analyze-urls] Failed to extract %s: %s (%s)",
+                url,
+                e,
+                type(e).__name__,
+            )
             extraction_errors.append(url)
 
     if not combined_content.strip():
