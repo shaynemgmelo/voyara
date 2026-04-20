@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_places_api_key: str = ""
     rails_api_url: str = "http://localhost:3000/api/v1"
-    whisper_model_size: str = "base"
+    # 'tiny' ~75MB, 'base' ~500MB. Tiny fits Render free-tier 512MB RAM.
+    whisper_model_size: str = "tiny"
     port: int = 8000
     service_api_key: str = ""
     log_level: str = "INFO"

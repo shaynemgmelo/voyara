@@ -44,19 +44,20 @@ class TikTokExtractor(BaseExtractor):
         # costs us the oEmbed result.
         oembed = await self._oembed_extract(url)
 
-        # Only the Vision OCR runs in deep mode. Whisper transcription was
-        # removed in production because the local faster-whisper model
-        # consumes ~500MB RAM, exceeding Render free-tier workers and
-        # causing OOM crashes. Vision OCR via Anthropic API is stateless
-        # (no local RAM cost) and captures the overlay text that travel
-        # creators typically use to name places.
+        # Deep mode runs transcription (faster-whisper 'tiny' — 75MB, fits
+        # Render free tier) AND Vision OCR, in parallel. Both best-effort.
         from app.services.orchestrator import is_shallow_extraction
 
         transcript = ""
         on_screen_text = ""
         if not is_shallow_extraction():
-            on_screen_text = await _safe_call(
-                read_video_text(url, timeout=60.0), "vision-ocr", url
+            transcript, on_screen_text = await asyncio.gather(
+                _safe_call(
+                    transcribe_video_url(url, timeout=60.0), "transcript", url
+                ),
+                _safe_call(
+                    read_video_text(url, timeout=60.0), "vision-ocr", url
+                ),
             )
 
         title = oembed.get("title") if oembed else ""
