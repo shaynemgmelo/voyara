@@ -5,6 +5,7 @@ import logging
 
 from app.extractors.audio_download import transcribe_video_url
 from app.extractors.base import BaseExtractor, ExtractedContent
+from app.vision.video_text_reader import read_video_text
 
 logger = logging.getLogger(__name__)
 
@@ -27,25 +28,29 @@ class InstagramExtractor(BaseExtractor):
 
         has_video = info.get("is_video", False) or "/reel/" in url or "/tv/" in url
         transcript = ""
+        on_screen_text = ""
         if has_video:
-            try:
-                transcript = await asyncio.wait_for(
-                    transcribe_video_url(url, timeout=45.0),
-                    timeout=50.0,
-                )
-            except asyncio.TimeoutError:
-                logger.info(
-                    "[instagram] Transcription budget exceeded for %s; using caption only",
-                    url,
-                )
-            except Exception as e:
-                logger.warning("[instagram] Transcription error for %s: %s", url, e)
+            async def _safe(coro, label):
+                try:
+                    return await coro or ""
+                except asyncio.TimeoutError:
+                    logger.info("[%s] Budget exceeded for %s", label, url)
+                except Exception as e:
+                    logger.warning("[%s] Error for %s: %s", label, url, e)
+                return ""
+
+            transcript, on_screen_text = await asyncio.gather(
+                _safe(transcribe_video_url(url, timeout=40.0), "ig-transcript"),
+                _safe(read_video_text(url, timeout=40.0), "ig-vision-ocr"),
+            )
 
         captions: list[str] = []
         if info.get("caption"):
             captions.append(info["caption"])
         if transcript:
             captions.append(f"[TRANSCRIPT] {transcript}")
+        if on_screen_text:
+            captions.append(f"[ON-SCREEN TEXT] {on_screen_text}")
 
         return ExtractedContent(
             platform="instagram",
@@ -62,6 +67,8 @@ class InstagramExtractor(BaseExtractor):
                 "hashtags": info.get("hashtags", []),
                 "has_transcript": bool(transcript),
                 "transcript_chars": len(transcript) if transcript else 0,
+                "has_on_screen_text": bool(on_screen_text),
+                "on_screen_chars": len(on_screen_text) if on_screen_text else 0,
             },
         )
 

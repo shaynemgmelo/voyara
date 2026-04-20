@@ -65,10 +65,11 @@ async def _extract_content(url: str) -> str:
     for ext in _extractors:
         if ext.can_handle(url):
             try:
-                # 90s covers: oEmbed/caption (fast) + up to 50s transcription
-                # budget inside the extractor. Extractors degrade gracefully
-                # if transcription is slow; we never lose caption data.
-                content = await asyncio.wait_for(ext.extract(url), timeout=90)
+                # 120s covers: oEmbed/caption (fast) + parallel transcription
+                # (~40s) + Vision OCR on frames (~40s). Since those two run
+                # in parallel inside the extractor they share ~45s clock
+                # time; the extra headroom absorbs cold starts.
+                content = await asyncio.wait_for(ext.extract(url), timeout=120)
                 parts = [content.title or "", content.description or ""]
                 if content.captions:
                     parts.append(" ".join(content.captions[:50]))

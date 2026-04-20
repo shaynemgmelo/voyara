@@ -6,10 +6,24 @@ import httpx
 
 from app.extractors.audio_download import transcribe_video_url
 from app.extractors.base import BaseExtractor, ExtractedContent
+from app.vision.video_text_reader import read_video_text
 
 logger = logging.getLogger(__name__)
 
 OEMBED_URL = "https://www.tiktok.com/oembed"
+
+
+async def _safe_call(coro, label: str, url: str) -> str:
+    """Await a coroutine that may fail; return empty string on error.
+    Used to run transcription + OCR in parallel without letting either
+    failure poison the other."""
+    try:
+        return await coro or ""
+    except asyncio.TimeoutError:
+        logger.info("[%s] Budget exceeded for %s", label, url)
+    except Exception as e:
+        logger.warning("[%s] Error for %s: %s", label, url, e)
+    return ""
 
 
 class TikTokExtractor(BaseExtractor):
@@ -30,36 +44,31 @@ class TikTokExtractor(BaseExtractor):
         # costs us the oEmbed result.
         oembed = await self._oembed_extract(url)
 
-        # Fire transcription with a tight budget — if it doesn't finish
-        # in time, we still return rich oEmbed content.
-        transcript = ""
-        try:
-            transcript = await asyncio.wait_for(
-                transcribe_video_url(url, timeout=45.0),
-                timeout=50.0,
-            )
-        except asyncio.TimeoutError:
-            logger.info(
-                "[tiktok] Transcription budget exceeded for %s; using oEmbed only",
-                url,
-            )
-        except Exception as e:
-            logger.warning("[tiktok] Transcription error for %s: %s", url, e)
+        # Run transcription + on-screen OCR in parallel, each with its own
+        # tight budget. Both are best-effort — oEmbed already gave us
+        # the caption, so these only enrich, never block.
+        transcript, on_screen_text = await asyncio.gather(
+            _safe_call(transcribe_video_url(url, timeout=40.0), "transcript", url),
+            _safe_call(read_video_text(url, timeout=40.0), "vision-ocr", url),
+        )
 
         title = oembed.get("title") if oembed else ""
         description = title or ""
         hashtags = re.findall(r"#(\w+)", description)
         creator = oembed.get("author_name") if oembed else None
 
-        # Captions list: description + transcript (transcript is the gold)
+        # Captions list: caption + transcript + on-screen text.
+        # Each marked so the Haiku prompt knows the origin.
         captions: list[str] = []
         if description:
             captions.append(description)
         if transcript:
             captions.append(f"[TRANSCRIPT] {transcript}")
+        if on_screen_text:
+            captions.append(f"[ON-SCREEN TEXT] {on_screen_text}")
 
-        # If oEmbed failed AND transcript is empty, fall back to yt-dlp
-        if not title and not transcript:
+        # If oEmbed failed AND both enrichments empty, fall back to yt-dlp
+        if not title and not transcript and not on_screen_text:
             info = await asyncio.to_thread(self._extract_info, url)
             return ExtractedContent(
                 platform="tiktok",
@@ -90,6 +99,8 @@ class TikTokExtractor(BaseExtractor):
                 "tags": hashtags,
                 "has_transcript": bool(transcript),
                 "transcript_chars": len(transcript) if transcript else 0,
+                "has_on_screen_text": bool(on_screen_text),
+                "on_screen_chars": len(on_screen_text) if on_screen_text else 0,
             },
         )
 
