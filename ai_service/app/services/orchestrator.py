@@ -773,12 +773,16 @@ async def _classify_and_extract(
 
     for build_messages, label in attempts:
         try:
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=3000,
-                    messages=build_messages(),
-                )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=3000,
+                        messages=build_messages(),
+                        timeout=30.0,
+                    )
+                ),
+                timeout=35.0,
             )
             text = response.content[0].text if response.content else ""
             if not text:
@@ -1036,12 +1040,16 @@ async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
 
     for build_messages, label in attempts:
         try:
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=2000,
-                    messages=build_messages(),
-                )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=2000,
+                        messages=build_messages(),
+                        timeout=25.0,
+                    )
+                ),
+                timeout=30.0,
             )
             text = response.content[0].text if response.content else ""
             if not text:
@@ -1116,15 +1124,25 @@ Content from multiple sources:
     # Retry up to 2 times on failure
     for attempt in range(2):
         try:
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=2048,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=2048,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=35.0,
+                    )
+                ),
+                timeout=40.0,
             )
             cost.record_usage(response.usage)
             raw = response.content[0].text if response.content else "{}"
+        except asyncio.TimeoutError:
+            logger.warning("[profile] Haiku TIMED OUT (attempt %d)", attempt + 1)
+            if attempt == 0:
+                await asyncio.sleep(2)
+                continue
+            return None
         except Exception as e:
             logger.warning("[profile] Haiku call failed (attempt %d): %s", attempt + 1, e)
             if attempt == 0:
@@ -3056,15 +3074,22 @@ RULES:
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     try:
-        response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-            )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=30.0,
+                )
+            ),
+            timeout=35.0,
         )
         cost.record_usage(response.usage)
         raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.warning("[audit] Landmark audit TIMED OUT, skipping")
+        return place_list
     except Exception as e:
         logger.warning("[audit] Landmark audit call failed, skipping: %s", e)
         return place_list
@@ -3175,17 +3200,32 @@ async def _call_claude_for_itinerary(
                 messages[0]["content"] += reminder
                 messages.append({"role": "assistant", "content": "["})
 
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=16000,
-                    messages=messages,
-                )
+            # Hard timeout so a slow Sonnet response can't keep the user
+            # stuck at 95% forever. 90s is very generous — typical calls
+            # finish in 15-40s even on 25+ item itineraries.
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=16000,
+                        messages=messages,
+                        timeout=90.0,  # httpx-level timeout inside the SDK
+                    )
+                ),
+                timeout=95.0,  # asyncio-level belt-and-suspenders
             )
             cost.record_usage(response.usage)
             raw = response.content[0].text if response.content else "[]"
             if attempt == 1:
                 raw = "[" + raw  # we prefilled
+        except asyncio.TimeoutError:
+            logger.error(
+                "[eco] Sonnet itinerary call TIMED OUT after 95s (attempt %d)",
+                attempt + 1,
+            )
+            if attempt == 0:
+                continue
+            return None
         except Exception as e:
             logger.error(
                 "[eco] Claude itinerary call failed (attempt %d): %s",
@@ -3607,15 +3647,24 @@ async def _verify_and_optimize_itinerary(
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     try:
-        response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=16000,
-                messages=[{"role": "user", "content": prompt}],
-            )
+        # Verify is a post-generation pass — if it takes > 45s something is
+        # wrong. Skipping it is safe (the pre-verify list is already good).
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=16000,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=45.0,
+                )
+            ),
+            timeout=50.0,
         )
         cost.record_usage(response.usage)
         raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.warning("[verify] Verification TIMED OUT, using pre-verify list")
+        return place_list
     except Exception as e:
         logger.warning("[verify] Verification call failed, using original: %s", e)
         return place_list

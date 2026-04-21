@@ -22,7 +22,7 @@ import { useLanguage } from "../../i18n/LanguageContext";
  * Phase detection mirrors ProcessingStatus — this component is rendered by
  * the page only when we're in a generating/analyzing/extracting phase.
  */
-export default function GenerationProgressModal({ phase, trip }) {
+export default function GenerationProgressModal({ phase, trip, onRetry }) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
   const [now, setNow] = useState(Date.now());
@@ -41,6 +41,13 @@ export default function GenerationProgressModal({ phase, trip }) {
     const t = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(t);
   }, [phase]);
+
+  // Stuck detection — if we've been on the same phase for more than 2.5 minutes,
+  // offer the user an escape hatch (reload page) instead of leaving them
+  // staring at 95% forever. Timeouts on the backend (added same commit) now
+  // cap each AI call, so hitting this window usually means a network wedge.
+  const elapsedMs = startedAt ? now - startedAt : 0;
+  const stuck = elapsedMs > 150_000; // 2.5 minutes
 
   const links = trip?.links || [];
   const extractedCount = links.filter(
@@ -174,12 +181,35 @@ export default function GenerationProgressModal({ phase, trip }) {
           ))}
         </div>
 
-        {/* Helper text */}
-        <p className="text-[11px] text-gray-400 text-center">
-          {pt
-            ? "Pode demorar até 2 minutos em vídeos longos. Não feche a página."
-            : "May take up to 2 minutes on long videos. Keep this page open."}
-        </p>
+        {/* Helper text + stuck escape hatch */}
+        {!stuck && (
+          <p className="text-[11px] text-gray-400 text-center">
+            {pt
+              ? "Pode demorar até 2 minutos em vídeos longos. Não feche a página."
+              : "May take up to 2 minutes on long videos. Keep this page open."}
+          </p>
+        )}
+        {stuck && (
+          <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 space-y-2">
+            <p className="text-xs text-amber-900 font-semibold">
+              {pt ? "Está demorando mais que o normal" : "Taking longer than usual"}
+            </p>
+            <p className="text-[11px] text-amber-800/80">
+              {pt
+                ? "Às vezes um link específico é lento de abrir. Você pode recarregar a página — os lugares já extraídos ficam salvos."
+                : "Sometimes a single link is slow to open. Reload the page — already-extracted places stay saved."}
+            </p>
+            <button
+              onClick={() => {
+                if (onRetry) onRetry();
+                else window.location.reload();
+              }}
+              className="w-full px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition"
+            >
+              {pt ? "Recarregar página" : "Reload page"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
