@@ -1895,16 +1895,25 @@ async def _experience_recommendations(
         return []
 
     prompt = (
-        f'Para "{experience_name}" em {destination}, liste 3 lugares / '
-        f"empresas específicas que oferecem essa experiência. "
-        f"Inclua nomes conhecidos ou recomendados por guias e viajantes.\n\n"
-        "Responda APENAS JSON:\n"
-        '[{"name": "Nome do local/empresa", "note": "1 linha curta sobre o diferencial (estilo, preço, vibe)"}]\n\n'
-        "Regras:\n"
-        "- 3 opções distintas quando possível (ex: clássico / luxuoso / autêntico).\n"
-        "- `name` deve ser o nome REAL do local ou empresa.\n"
-        "- `note` em português, máx 60 caracteres.\n"
-        "- Se você não conhece opções concretas, retorne []."
+        f'Para a experiência "{experience_name}" em {destination}, '
+        f"liste os TOP 3 LUGARES MAIS FAMOSOS — os nomes que TODO mundo "
+        f"reconhece, aqueles que aparecem em guias sérios e rankings.\n\n"
+        f"Pense: se um amigo argentino/local me recomendasse onde fazer isso, "
+        f"quais seriam os 3 nomes que ele CERTAMENTE mencionaria? "
+        f"Os clássicos imperdíveis — NÃO os mais fáceis de lembrar.\n\n"
+        "Exemplos do nível de fama esperado:\n"
+        '- Show de tango em Buenos Aires → "Señor Tango", "Piazzolla Tango", "El Viejo Almacén"\n'
+        '- Passeio de barco em Capri → "Laser Capri", "Motoscafisti Capri", "Gianni\'s Boat"\n'
+        '- Food tour em Roma → "Eating Europe", "Devour Tours", "The Roman Guy"\n'
+        '- Buggy em Jericoacoara → "Jeri Off Road", "Dunas Tour", "Jericoacoara Adventures"\n\n'
+        "Responda APENAS JSON (sem markdown, sem comentário):\n"
+        '[{"name": "Nome real do local/empresa", "note": "1 linha em pt-BR sobre o diferencial (estilo, preço, vibe) — máx 60 chars"}]\n\n'
+        "REGRAS:\n"
+        "- EXATAMENTE 3 opções quando existirem lugares famosos.\n"
+        "- Ordene da MAIS famosa (posição 0) para a menos famosa.\n"
+        "- `name` deve ser o nome OFICIAL conforme aparece no Google.\n"
+        "- Se houver menos de 3 lugares realmente reconhecidos, retorne só 1 ou 2.\n"
+        "- Se não conhece opções concretas em " + destination + ", retorne []."
     )
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -3175,6 +3184,7 @@ async def _suggest_destination_experiences(
     cost: CostTracker,
     day_rigidity: dict[int, str] | None = None,
     max_suggestions: int = 4,
+    video_day_mentions: dict[int, list[str]] | None = None,
 ) -> list[dict]:
     """Ask Haiku for the signature experiences every tourist does in this
     destination — things like "show de tango" in Buenos Aires, "passeio
@@ -3213,6 +3223,27 @@ async def _suggest_destination_experiences(
 
     days_str = ", ".join(str(d) for d in flexible_days)
 
+    # Hint Haiku with what the videos said about each day — so if the
+    # creator mentioned "tango" on Day 3, the show lands on Day 3 instead
+    # of a random flexible day. We include the raw day→places map and
+    # tell Haiku explicitly to match experiences to the day their theme
+    # was first mentioned.
+    video_hint = ""
+    if video_day_mentions:
+        lines = []
+        for day_num in sorted(video_day_mentions.keys()):
+            names = video_day_mentions[day_num]
+            if names:
+                lines.append(f"  Dia {day_num}: {', '.join(names)}")
+        if lines:
+            video_hint = (
+                "\n\nCONTEXTO DO VÍDEO (dias → lugares/menções):\n"
+                + "\n".join(lines)
+                + "\n\nSe a experiência se encaixa tematicamente com algum desses "
+                "dias (ex: show de tango → dia que menciona tango ou San Telmo; "
+                "passeio de barco → dia perto de Puerto Madero/Tigre), USE esse dia."
+            )
+
     prompt = f"""You are a travel expert. A traveler is going to {destination}.
 List the 3-5 SIGNATURE EXPERIENCES every visitor should do there — the
 activities locals and guidebooks agree define the place.
@@ -3228,6 +3259,8 @@ Think concretely about THIS destination. Examples from other places:
 Focus on EXPERIENCES (activities), not fixed landmarks. Think: "what
 would I regret not doing on a trip to {destination}?"
 
+{video_hint}
+
 Return ONLY a JSON array of 3-5 items (no more):
 [{{"name": "Nome da experiência", "category": "activity", "day": <number 1-{num_days}, use one of: {days_str}>, "time_slot": "HH:MM", "duration_minutes": <60-360>, "description": "2 sentences in Brazilian Portuguese explaining why this is unmissable.", "notes": "Practical tip in pt-BR.", "vibe_tags": ["experiencia", "cultural"]}}]
 
@@ -3236,8 +3269,10 @@ RULES:
 - Skip experiences already in this itinerary:
   {sorted(existing_names_lower) if existing_names_lower else '(empty)'}
 - Use days from this flexible list ONLY: {days_str}
-- Pick day + time_slot that makes sense for the activity
-  (boat tours → morning 10:00, shows → 20:00-21:00, food tours → 18:00, etc.)
+- IF the video mentioned a theme related to this experience on a specific
+  day (see CONTEXTO DO VÍDEO above), place the experience on THAT day.
+  Otherwise pick a day + time_slot that fits naturally
+  (boat tours → morning 10:00, shows → 20:00-21:00, food tours → 18:00).
 - description and notes in PERFECT Brazilian Portuguese with accents."""
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -3706,17 +3741,25 @@ async def enrich_trip_with_experiences(
     day_rigidity: dict[int, str] = {}
     dp_by_number: dict[int, int] = {}
     existing_items: list[dict] = []
+    video_day_mentions: dict[int, list[str]] = {}
     for dp in day_plans_raw:
         n = dp.get("day_number")
         if isinstance(n, int):
             dp_by_number[n] = dp["id"]
             day_rigidity[n] = dp.get("rigidity") or "flexible"
+        day_item_names: list[str] = []
         for it in dp.get("itinerary_items") or []:
             existing_items.append(it)
+            name = it.get("name")
+            if name:
+                day_item_names.append(name)
+        if isinstance(n, int) and day_item_names:
+            video_day_mentions[n] = day_item_names
 
     suggestions = await _suggest_destination_experiences(
         destination, existing_items, len(day_plans_raw), cost,
         day_rigidity=day_rigidity,
+        video_day_mentions=video_day_mentions,
     )
     if not suggestions:
         return {"added": 0, "summary": "Nenhuma experiência nova para adicionar"}
@@ -4729,10 +4772,19 @@ async def _build_itinerary_eco(
             # Inject signature destination experiences (tango in BA, buggy
             # in Jeri, Vespa tour in Rome…). These don't show up in Google
             # Places as a single pin, so only the destination_experience
-            # helper reliably adds them.
+            # helper reliably adds them. We also pass the canonical_days
+            # map so Haiku places each experience on the day the video
+            # actually talks about that theme.
+            video_day_mentions: dict[int, list[str]] = {}
+            for day_num, entry in canonical_days.items():
+                if isinstance(entry, dict):
+                    places = entry.get("places") or []
+                    if places:
+                        video_day_mentions[day_num] = list(places)
             destination_experiences = await _suggest_destination_experiences(
                 destination, place_list, len(day_plans), cost,
                 day_rigidity=day_rigidity,
+                video_day_mentions=video_day_mentions,
             )
             if destination_experiences:
                 place_list.extend(destination_experiences)
