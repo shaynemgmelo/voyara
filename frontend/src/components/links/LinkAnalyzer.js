@@ -63,16 +63,39 @@ export default function LinkAnalyzer({ onResult }) {
         // preview failing is fine, we still wait for deep
       }
 
-      // Now wait for deep to finish (it reads audio + vision)
+      // Now wait for deep to finish (it reads audio + vision). If it
+      // throws AND the shallow result is weak (fewer than 10 places),
+      // retry deep once — a transient 502 during Render spin-up
+      // shouldn't dump the user onto a 3-place list for a 3-day video.
       let deepResult = null;
       try {
         deepResult = await deepPromise;
-      } catch (e) {
-        // Deep failed — fall back to fast preview
-        if (!fastResult) throw e;
+      } catch {
+        const fastCount = fastResult?.places?.length ?? 0;
+        if (fastCount < 10) {
+          try {
+            deepResult = await analyzeUrlsDeep(detectedUrls, (stage, elapsed) => {
+              setProgress({ stage, elapsed, message: humanStage(stage, elapsed) });
+            });
+          } catch {
+            // Retry also failed — we'll fall back to fastResult if we have it.
+          }
+        }
       }
 
-      const finalResult = deepResult || fastResult;
+      // Prefer deep when it has more places than fast, otherwise whichever
+      // one is non-empty.
+      const deepCount = deepResult?.places?.length ?? 0;
+      const fastCount = fastResult?.places?.length ?? 0;
+      let finalResult;
+      if (deepResult && deepCount >= fastCount) {
+        finalResult = deepResult;
+      } else if (fastResult) {
+        finalResult = fastResult;
+      } else {
+        finalResult = deepResult;
+      }
+
       if (!finalResult) throw new Error("No result");
       if (finalResult.error) {
         setError(finalResult.error);
