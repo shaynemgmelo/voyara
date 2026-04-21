@@ -401,6 +401,9 @@ export default function TripDetail() {
               onReorder={({ dayPlanId, itemIds }) =>
                 reorderItems(dayPlanId, itemIds)
               }
+              onMoveBetweenDays={({ sourceDayId, destDayId, itemId, destIndex }) =>
+                moveItemBetweenDays(sourceDayId, destDayId, itemId, destIndex)
+              }
               onItemClick={(itemId, dayPlanId) => {
                 const dp = trip.day_plans?.find((d) => d.id === dayPlanId);
                 const item = dp?.itinerary_items?.find((i) => i.id === itemId);

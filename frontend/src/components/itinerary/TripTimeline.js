@@ -254,6 +254,7 @@ function ItemCard({
 export default function TripTimeline({
   dayPlans,
   onReorder,
+  onMoveBetweenDays,
   onItemClick,
   onDeleteItem,
   onSwapItem,
@@ -288,30 +289,52 @@ export default function TripTimeline({
       if (s && !s.destroyed) s.allowTouchMove = true;
     });
     if (!result.destination) return;
+
+    const sourceDayId = parseInt(result.source.droppableId, 10);
+    // Destination droppableId can be either "day-<id>" (a day pill) or a
+    // plain day_id (the active day's swiper). When it's the pill, we're
+    // doing a cross-day move.
+    const rawDest = String(result.destination.droppableId);
+    const isPillDrop = rawDest.startsWith("day-");
+    const destDayId = isPillDrop
+      ? parseInt(rawDest.replace("day-", ""), 10)
+      : parseInt(rawDest, 10);
+
+    // Cross-day drag (drop on a pill of a different day).
+    if (destDayId !== sourceDayId) {
+      if (!onMoveBetweenDays) return;
+      const itemId = parseInt(result.draggableId, 10);
+      const destDay = allDays.find((d) => d.id === destDayId);
+      const destIndex = destDay ? (destDay.itinerary_items || []).length : 0;
+      onMoveBetweenDays({ sourceDayId, destDayId, itemId, destIndex });
+      // Switch focus to destination day so the user sees the item land.
+      const newIdx = allDays.findIndex((d) => d.id === destDayId);
+      if (newIdx >= 0) setActiveDayIdx(newIdx);
+      return;
+    }
+
+    // Same day: reorder.
     if (result.source.index === result.destination.index) return;
     if (!onReorder) return;
-
-    // Build the full ordered itemIds array so the hook can persist + update
-    // time slots. Before this the parent was passing (dayPlanId, fromIdx,
-    // toIdx) to a function that expected (dayPlanId, itemIds[]) — drag-drop
-    // never actually persisted to the backend.
-    const dayPlanId = parseInt(result.source.droppableId, 10);
-    const day = allDays.find((d) => d.id === dayPlanId);
+    const day = allDays.find((d) => d.id === sourceDayId);
     if (!day) return;
     const originalItems = day.itinerary_items || [];
     const reordered = Array.from(originalItems);
     const [moved] = reordered.splice(result.source.index, 1);
     reordered.splice(result.destination.index, 0, moved);
     const itemIds = reordered.map((i) => i.id);
-    onReorder({ dayPlanId, itemIds });
+    onReorder({ dayPlanId: sourceDayId, itemIds });
   };
 
   const day = allDays[activeDayIdx];
   const items = day.itinerary_items || [];
 
   return (
+    <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
     <div className="w-full">
-      {/* Day tabs — all days side-by-side, scrollable on overflow */}
+      {/* Day tabs — each one is also a drop target, so dragging a card
+          over "DIA 3" moves the card to Day 3 with visual feedback
+          (the pill pulses + glows in the day's color). */}
       <div className="mb-4 -mx-2 overflow-x-auto scrollbar-thin">
         <div className="flex items-center gap-2 px-2 pb-2 min-w-max">
           {allDays.map((d, idx) => {
@@ -321,49 +344,68 @@ export default function TripTimeline({
             // instant key for "which pins on the map are mine".
             const dayColor = getDayColor(d.day_number);
             return (
-              <button
-                key={d.id}
-                onClick={() => setActiveDayIdx(idx)}
-                className={`group flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-full font-semibold text-sm transition-all ${
-                  isActive
-                    ? "text-white shadow-lg"
-                    : "bg-white border text-slate-700 hover:shadow-sm"
-                }`}
-                style={
-                  isActive
-                    ? {
-                        backgroundColor: dayColor,
-                        boxShadow: `0 10px 24px -8px ${dayColor}88`,
-                      }
-                    : {
-                        borderColor: `${dayColor}55`,
-                      }
-                }
-              >
-                {/* Color dot — matches the pin on the map for this day. */}
-                <span
-                  className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
-                  style={{
-                    backgroundColor: isActive ? "#ffffff" : dayColor,
-                    boxShadow: isActive ? "0 0 0 2px rgba(255,255,255,0.35)" : "none",
-                  }}
-                  aria-hidden="true"
-                />
-                <span className="text-xs font-bold tracking-wide">
-                  DIA {d.day_number}
-                </span>
-                {d.city ? (
-                  <span className="opacity-80 font-normal">• {d.city}</span>
-                ) : null}
-                <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
-                    isActive ? "bg-white/25 text-white" : "text-white"
-                  }`}
-                  style={isActive ? {} : { backgroundColor: dayColor }}
-                >
-                  {count}
-                </span>
-              </button>
+              <Droppable key={d.id} droppableId={`day-${d.id}`} type="ITEM">
+                {(dropProv, dropSnap) => (
+                  <button
+                    ref={dropProv.innerRef}
+                    {...dropProv.droppableProps}
+                    onClick={() => setActiveDayIdx(idx)}
+                    className={`group flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-full font-semibold text-sm transition-all ${
+                      isActive
+                        ? "text-white shadow-lg"
+                        : "bg-white border text-slate-700 hover:shadow-sm"
+                    } ${
+                      dropSnap.isDraggingOver && !isActive
+                        ? "ring-4 ring-offset-1 scale-110"
+                        : ""
+                    }`}
+                    style={
+                      isActive
+                        ? {
+                            backgroundColor: dayColor,
+                            boxShadow: `0 10px 24px -8px ${dayColor}88`,
+                          }
+                        : {
+                            borderColor: dropSnap.isDraggingOver
+                              ? dayColor
+                              : `${dayColor}55`,
+                            backgroundColor: dropSnap.isDraggingOver
+                              ? `${dayColor}1a`
+                              : undefined,
+                            borderWidth: dropSnap.isDraggingOver ? "2px" : undefined,
+                          }
+                    }
+                  >
+                    {/* Color dot — matches the pin on the map for this day. */}
+                    <span
+                      className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+                      style={{
+                        backgroundColor: isActive ? "#ffffff" : dayColor,
+                        boxShadow: isActive ? "0 0 0 2px rgba(255,255,255,0.35)" : "none",
+                      }}
+                      aria-hidden="true"
+                    />
+                    <span className="text-xs font-bold tracking-wide">
+                      DIA {d.day_number}
+                      {dropSnap.isDraggingOver && !isActive && " ←"}
+                    </span>
+                    {d.city ? (
+                      <span className="opacity-80 font-normal">• {d.city}</span>
+                    ) : null}
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                        isActive ? "bg-white/25 text-white" : "text-white"
+                      }`}
+                      style={isActive ? {} : { backgroundColor: dayColor }}
+                    >
+                      {count}
+                    </span>
+                    {/* Hidden — Droppable needs this but pills are not a
+                        real list of Draggables, they only accept drops. */}
+                    <span style={{ display: "none" }}>{dropProv.placeholder}</span>
+                  </button>
+                )}
+              </Droppable>
             );
           })}
         </div>
@@ -403,12 +445,11 @@ export default function TripTimeline({
         </div>
       ) : (
 
-      <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-        <Droppable
-          droppableId={String(day.id)}
-          direction="horizontal"
-          type="ITEM"
-        >
+      <Droppable
+        droppableId={String(day.id)}
+        direction="horizontal"
+        type="ITEM"
+      >
           {(provided) => (
             <div
               ref={provided.innerRef}
@@ -509,8 +550,7 @@ export default function TripTimeline({
               </button>
             </div>
           )}
-        </Droppable>
-      </DragDropContext>
+      </Droppable>
       )}
 
       {/* Subtle progress bar at bottom — minimal */}
@@ -529,5 +569,6 @@ export default function TripTimeline({
         </div>
       </div>
     </div>
+    </DragDropContext>
   );
 }
