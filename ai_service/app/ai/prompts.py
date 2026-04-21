@@ -329,11 +329,18 @@ def build_verification_prompt(
     destination: str,
     day_plans: list[dict],
     profile: dict,
+    day_rigidity: dict[int, str] | None = None,
 ) -> str:
-    """Build the verification/optimization prompt for post-generation review (Eco mode)."""
+    """Build the verification/optimization prompt for post-generation review (Eco mode).
+
+    Phase 3: `day_rigidity` tells the verifier which days are locked (from a
+    D-category video) and must NOT be reordered or modified. Landmark
+    injection is still allowed, but only on flexible days.
+    """
     import json as _json
 
     num_days = len(day_plans)
+    day_rigidity = day_rigidity or {}
 
     # Extract month from first day_plan date for sunset estimation
     month_hint = ""
@@ -351,6 +358,26 @@ def build_verification_prompt(
         "intense": "This traveler prefers an INTENSE pace — pack in as much as possible. 4-5 items per day is fine.",
     }.get(pace, "")
 
+    # Rigidity table — authoritative, must be respected.
+    rigidity_block = ""
+    if day_rigidity:
+        locked_days = sorted(d for d, r in day_rigidity.items() if r == "locked")
+        partial_days = sorted(d for d, r in day_rigidity.items() if r == "partially_flexible")
+        flexible_days = sorted(d for d, r in day_rigidity.items() if r == "flexible")
+        rigidity_block = f"""
+DAY RIGIDITY TABLE (authoritative — MUST be respected):
+- LOCKED days (do NOT reorder, do NOT add items, do NOT remove items): {locked_days or "none"}
+- PARTIALLY_FLEXIBLE days (keep seed items, you may add AI companions): {partial_days or "none"}
+- FLEXIBLE days (full optimization allowed): {flexible_days or "all"}
+
+LOCKED-DAY ENFORCEMENT:
+- If a day is LOCKED, leave its items untouched. Do not change order, day
+  assignment, or item count. You may tweak ONLY `time_slot` within the
+  day when the current time is clearly wrong (e.g., a sunset viewpoint
+  scheduled at 10am — shift to sunset hour).
+- Landmark injection is allowed ONLY on FLEXIBLE days.
+"""
+
     itinerary_json = _json.dumps(place_list, ensure_ascii=False, indent=2)
 
     return f"""You are a travel itinerary optimizer. Review this generated itinerary and OPTIMIZE it for timing, proximity, and real-traveler logic.
@@ -359,6 +386,7 @@ DESTINATION: {destination}
 NUMBER OF DAYS: {num_days}
 {month_hint}
 {pace_hint}
+{rigidity_block}
 
 CURRENT ITINERARY (to optimize):
 {itinerary_json}

@@ -1488,6 +1488,7 @@ def _cluster_diameter_km(places: list[dict]) -> float:
 def _tighten_day_clusters(
     place_list: list[dict],
     max_diameter_km: float = 15.0,
+    day_rigidity: dict[int, str] | None = None,
 ) -> list[dict]:
     """Enforce that every day's places sit within max_diameter_km of each
     other. If a day has an outlier, try to move it to another day whose
@@ -1500,9 +1501,15 @@ def _tighten_day_clusters(
 
     Runs iteratively: each pass drops at most one outlier per day so that
     removing an outlier recomputes the centroid before dropping the next.
+
+    Phase 3: `day_rigidity` — locked days are SKIPPED entirely (their layout
+    is the video's intent, even if it looks geographically sparse). Outliers
+    from flexible days also can't be moved INTO a locked day.
     """
     if not place_list:
         return place_list
+
+    day_rigidity = day_rigidity or {}
 
     by_day: dict[int, list[dict]] = {}
     order: list[int] = []
@@ -1519,6 +1526,9 @@ def _tighten_day_clusters(
     for _ in range(6):
         changes = False
         for day in list(by_day.keys()):
+            # Locked days are sacred — skip.
+            if day_rigidity.get(day) == "locked":
+                continue
             places = by_day[day]
             geocoded = [
                 p for p in places
@@ -1556,13 +1566,16 @@ def _tighten_day_clusters(
                 continue
 
             # Try to relocate the outlier to a day whose centroid is within
-            # max_diameter_km of the outlier's position
+            # max_diameter_km of the outlier's position. NEVER target a
+            # locked day — its composition was set by the video.
             o_lat = float(outlier["latitude"])
             o_lng = float(outlier["longitude"])
             best_day = None
             best_dist = max_diameter_km
             for other_day, other_places in by_day.items():
                 if other_day == day:
+                    continue
+                if day_rigidity.get(other_day) == "locked":
                     continue
                 other_geocoded = [
                     p for p in other_places
@@ -1674,8 +1687,15 @@ async def _validate_and_create_items(
     cost: CostTracker,
     trip_id: int,
     source_urls: list[str] | None = None,
+    day_rigidity: dict[int, str] | None = None,
 ) -> dict:
-    """Validate places via Google Places, generate alerts, create items in Rails."""
+    """Validate places via Google Places, generate alerts, create items in Rails.
+
+    Phase 3: propagates `day_rigidity` to `_tighten_day_clusters` and
+    `_optimize_day_proximity` so locked days are never reordered or
+    reshuffled by geographic heuristics.
+    """
+    day_rigidity = day_rigidity or {}
     dp_by_number = {dp["day_number"]: dp["id"] for dp in day_plans}
     destination = trip.get("destination", "")
     source_url = ", ".join(source_urls) if source_urls else ""
@@ -1814,7 +1834,9 @@ async def _validate_and_create_items(
     # within a 15km diameter of each other. Outliers are first tried on
     # other days (to preserve day-trip places together), then dropped if
     # no compatible day exists.
-    validated = _tighten_day_clusters(validated, max_diameter_km=15.0)
+    validated = _tighten_day_clusters(
+        validated, max_diameter_km=15.0, day_rigidity=day_rigidity,
+    )
 
     # Regra #1 — enforce Day 1 + Day 2 stay in the main destination city.
     # A day trip that landed on Day 1/2 (because the Sonnet output ignored
@@ -1827,6 +1849,16 @@ async def _validate_and_create_items(
         pl = dp_link.get("places") or []
         if isinstance(d, int) and pl:
             preplanned_day_places[d] = set(pl)
+    # Also seed preplanned_day_places from content_classification canonical_days
+    # (which Phase 2 produces). Used so a video-locked day can't be swapped.
+    cc = profile_hint.get("content_classification") or {}
+    for k, v in (cc.get("canonical_days") or {}).items():
+        try:
+            day_key = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, dict) and v.get("places"):
+            preplanned_day_places.setdefault(day_key, set()).update(v["places"])
     validated = _enforce_main_city_on_early_days(
         validated, len(day_plans), preplanned_day_places=preplanned_day_places,
     )
@@ -1848,8 +1880,9 @@ async def _validate_and_create_items(
                 alerts.append(alert)
         place["alerts"] = alerts
 
-    # PROXIMITY OPTIMIZATION — reorder items within each day by geographic proximity
-    validated = _optimize_day_proximity(validated)
+    # PROXIMITY OPTIMIZATION — reorder items within each day by geographic proximity.
+    # Locked days retain the video's order (preserved by _optimize_day_proximity).
+    validated = _optimize_day_proximity(validated, day_rigidity=day_rigidity)
 
     logger.info("[eco] Validated %d places, creating items", len(validated))
 
@@ -1945,11 +1978,21 @@ def _build_itinerary_prompt(
     source_urls: list[str] | None = None,
     places_mentioned: list[dict] | None = None,
     day_plans_from_links: list[dict] | None = None,
+    canonical_days: dict[int, dict] | None = None,
+    day_rigidity: dict[int, str] | None = None,
 ) -> str:
-    """Build the Claude prompt for itinerary generation (Eco mode), with full personalization."""
+    """Build the Claude prompt for itinerary generation (Eco mode), with full personalization.
+
+    Phase 3: when `canonical_days` is supplied (from the content classifier),
+    an authoritative "RIGIDITY TABLE" block is emitted at the very top of the
+    prompt listing each day's status. Locked days ship with their exact
+    place list from the video — Claude is told not to reorder them.
+    """
     num_days = len(day_plans)
     destination = trip.get("destination", "a destination")
     existing_info = f"\nAvoid duplicates: {', '.join(existing_items)}" if existing_items else ""
+    canonical_days = canonical_days or {}
+    day_rigidity = day_rigidity or {}
 
     # Personalization from traveler profile
     profile = trip.get("traveler_profile") or {}
@@ -2096,8 +2139,56 @@ IMPORTANT: When generating places, search for attractions IN THE CORRECT CITY fo
         # Override destination for multi-city
         destination = " / ".join(cities_in_plans.keys())
 
+    # Phase 3 — authoritative rigidity table. When content_classification
+    # produced canonical_days, this block tells Claude exactly which days
+    # are locked (from a D-category video) vs flexible (AI-created).
+    rigidity_section = ""
+    if canonical_days or day_rigidity:
+        rigidity_lines: list[str] = []
+        for n in range(1, num_days + 1):
+            rig = day_rigidity.get(n, "flexible")
+            entry = canonical_days.get(n)
+            if rig == "locked" and entry:
+                places_str = ", ".join(entry.get("places") or [])
+                creator = entry.get("creator") or "video"
+                day_type_hint = "DAY TRIP" if entry.get("is_day_trip") else "urban"
+                rigidity_lines.append(
+                    f"  Dia {n} → LOCKED ({day_type_hint}, from {creator}). "
+                    f"Locked places (must appear in this exact order): {places_str}"
+                )
+            elif rig == "partially_flexible" and entry:
+                places_str = ", ".join(entry.get("places") or [])
+                rigidity_lines.append(
+                    f"  Dia {n} → PARTIALLY_FLEXIBLE. Seed places (keep on this day, "
+                    f"you may add AI items around them): {places_str}"
+                )
+            else:
+                rigidity_lines.append(f"  Dia {n} → FLEXIBLE (build from your expertise)")
+        rigidity_section = f"""
+╔═══════════════════════════════════════════════════════════════════╗
+║  REGRA #0.5 — TABELA DE RIGIDEZ POR DIA (AUTHORITATIVE)          ║
+║  This is the source of truth. Day-level decisions MUST match it. ║
+╚═══════════════════════════════════════════════════════════════════╝
+{chr(10).join(rigidity_lines)}
+
+HOW TO READ THIS TABLE:
+- LOCKED: the video structured this exact day. Copy it 1:1. Do NOT add,
+  remove, reorder, or move items. You MAY insert meal / viewpoint slots
+  IN THE SAME DAY IN THE SAME NEIGHBORHOOD to complete it (breakfast,
+  lunch, sunset), but the core sequence stays untouched.
+- PARTIALLY_FLEXIBLE: seed places stay on this day, but you can add
+  complementary items around them (meals, nearby attractions).
+- FLEXIBLE: build this day freely using the destination's landmarks and
+  your expertise. Match the pace/vibe of any LOCKED days.
+
+A traveler who opens the video side-by-side with the itinerary MUST see
+Day N map to Day N of the video. Failure to match the rigidity table
+makes the itinerary unusable for this user.
+"""
+
     return f"""You are an expert travel planner building a {num_days}-day itinerary for {destination}.
 Think like someone who has visited {destination} 50 times and knows exactly what makes a trip unforgettable.
+{rigidity_section}
 
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  REGRA #0 — PRIORIDADE ABSOLUTA: SEGUIR A ESTRUTURA DO VÍDEO     ║
@@ -2335,15 +2426,23 @@ Raw content from user's links (reference material — places are already listed 
 {content_text[:8000]}"""
 
 
-def _optimize_day_proximity(place_list: list[dict]) -> list[dict]:
+def _optimize_day_proximity(
+    place_list: list[dict],
+    day_rigidity: dict[int, str] | None = None,
+) -> list[dict]:
     """Reorder items within each day by geographic proximity (nearest-neighbor),
     and swap outliers between days if a place fits better geographically in another day.
 
     This ensures each day's itinerary is walkable/drivable without zigzagging.
     Max acceptable distance between consecutive items: 15km (~20 min drive).
+
+    Phase 3: `day_rigidity` — locked days are left in the video's exact order
+    (no nearest-neighbor reorder, no outlier swap in OR out).
     """
     if not place_list:
         return place_list
+
+    day_rigidity = day_rigidity or {}
 
     # Group by day
     by_day: dict[int, list[dict]] = {}
@@ -2372,6 +2471,9 @@ def _optimize_day_proximity(place_list: list[dict]) -> list[dict]:
     for d in list(by_day.keys()):
         if d not in centroids:
             continue
+        # Locked days — skip outlier swap entirely.
+        if day_rigidity.get(d) == "locked":
+            continue
         items = by_day[d]
         i = 0
         while i < len(items):
@@ -2390,11 +2492,13 @@ def _optimize_day_proximity(place_list: list[dict]) -> list[dict]:
             dist_to_own = _haversine_km(centroids[d][0], centroids[d][1], float(lat), float(lng))
 
             if dist_to_own > MAX_SWAP_DISTANCE:
-                # Check if closer to another day
+                # Check if closer to another day — but NEVER target a locked day.
                 best_day = d
                 best_dist = dist_to_own
                 for other_d, other_c in centroids.items():
                     if other_d == d:
+                        continue
+                    if day_rigidity.get(other_d) == "locked":
                         continue
                     dist_other = _haversine_km(other_c[0], other_c[1], float(lat), float(lng))
                     if dist_other < best_dist and len(by_day.get(other_d, [])) < 6:
@@ -2416,8 +2520,11 @@ def _optimize_day_proximity(place_list: list[dict]) -> list[dict]:
     if swaps_made:
         logger.info("[proximity] Swapped %d items between days for better geographic clustering", swaps_made)
 
-    # Step 2: Reorder items within each day using nearest-neighbor algorithm
+    # Step 2: Reorder items within each day using nearest-neighbor algorithm.
+    # Locked days keep the video's order — skip the reorder.
     for d, items in by_day.items():
+        if day_rigidity.get(d) == "locked":
+            continue
         geo_items = [i for i in items if i.get("latitude") and i.get("longitude")]
         if len(geo_items) < 2:
             continue
@@ -2614,10 +2721,23 @@ def _enforce_main_city_on_early_days(
     return result
 
 
-def _rebalance_days(place_list: list[dict], num_days: int) -> list[dict]:
-    """Ensure every day has at least 4 places, unless it has a full-day activity."""
+def _rebalance_days(
+    place_list: list[dict],
+    num_days: int,
+    day_rigidity: dict[int, str] | None = None,
+) -> list[dict]:
+    """Ensure every day has at least 4 places, unless it has a full-day activity.
+
+    Phase 3: respects `day_rigidity`:
+      - locked days never donate or receive items
+      - partially_flexible days can receive but never donate (seed items are
+        the reason they're partially_flexible)
+      - flexible days behave as before
+    """
     if not place_list or num_days < 1:
         return place_list
+
+    day_rigidity = day_rigidity or {}
 
     # Count items per day
     by_day: dict[int, list[dict]] = {}
@@ -2628,31 +2748,43 @@ def _rebalance_days(place_list: list[dict], num_days: int) -> list[dict]:
             p["day"] = d
         by_day.setdefault(d, []).append(p)
 
-    # Find thin days, but SKIP days with full-day activities (theme parks, day trips, etc.)
-    empty_days = [d for d in range(1, num_days + 1) if d not in by_day or len(by_day[d]) == 0]
+    def _is_locked(d: int) -> bool:
+        return day_rigidity.get(d, "flexible") == "locked"
+
+    # Find thin days, but SKIP days with full-day activities AND skip locked
+    # days (they intentionally have the count the video dictated).
+    empty_days = [
+        d for d in range(1, num_days + 1)
+        if d not in by_day or len(by_day[d]) == 0
+        if not _is_locked(d)
+    ]
     thin_days = [
         d for d in range(1, num_days + 1)
         if d in by_day and 0 < len(by_day[d]) < 4
         and not _day_has_full_day_activity(by_day[d])
+        and not _is_locked(d)
     ]
 
     if not empty_days and not thin_days:
         return place_list  # Already balanced
 
     logger.warning(
-        "[rebalance] Unbalanced itinerary detected: empty_days=%s thin_days=%s",
+        "[rebalance] Unbalanced itinerary detected: empty_days=%s thin_days=%s (locked days skipped)",
         empty_days, thin_days,
     )
 
-    # Find days with excess items (>4) to steal from
+    # Find days with excess items (>4) to steal from. Locked + partially_flexible
+    # days are forbidden donors — their item set is the video's intent.
     for problem_day in empty_days + thin_days:
         needed = 4 - len(by_day.get(problem_day, []))
         if needed <= 0:
             continue
 
-        # Sort donor days by count (most items first)
         donors = sorted(
-            [(d, items) for d, items in by_day.items() if len(items) > 4],
+            [
+                (d, items) for d, items in by_day.items()
+                if len(items) > 4 and day_rigidity.get(d, "flexible") == "flexible"
+            ],
             key=lambda x: -len(x[1]),
         )
 
@@ -2689,18 +2821,38 @@ async def _audit_landmark_coverage(
     destination: str,
     num_days: int,
     cost: CostTracker,
+    day_rigidity: dict[int, str] | None = None,
 ) -> list[dict]:
     """Ask Haiku to identify missing top landmarks and return them as additional items.
 
     This is a lightweight safety net — a short, focused prompt that catches
     any iconic landmarks the main generation + verification steps missed.
+
+    Phase 3: respects `day_rigidity`. Landmarks may only be injected into
+    `flexible` days. If the only days available for a missing landmark are
+    `locked`, the landmark is dropped (not silently added) and logged — the
+    Rails day_plan.conflict_alerts will surface this to the UI later.
     """
     if not place_list or not destination:
+        return place_list
+
+    day_rigidity = day_rigidity or {}
+    flexible_days = [
+        d for d in range(1, num_days + 1)
+        if day_rigidity.get(d, "flexible") == "flexible"
+    ]
+    # If EVERY day is locked the audit can't help — skip entirely.
+    if not flexible_days:
+        logger.info(
+            "[audit] Skipping: all %d days are locked/partially_flexible — "
+            "no room for landmark injection.", num_days,
+        )
         return place_list
 
     place_names = [p.get("name", "") for p in place_list if p.get("name")]
     names_str = ", ".join(place_names)
 
+    allowed_days_str = ", ".join(str(d) for d in flexible_days)
     prompt = f"""You are a travel expert. Given this itinerary for {destination} with these places:
 {names_str}
 
@@ -2710,11 +2862,11 @@ These are places SO famous that a first-time visitor MUST see them — they appe
 If the itinerary already covers the main landmarks well, return an empty JSON array: []
 
 If landmarks are missing, return a JSON array with up to 5 missing landmark objects:
-[{{"day": <best_day_1_to_{num_days}>, "name": "Exact Place Name", "category": "attraction", "time_slot": "15:00", "duration_minutes": 90, "description": "Why this is unmissable (in Brazilian Portuguese with proper accents).", "notes": "Practical tip (in Brazilian Portuguese).", "vibe_tags": ["cultural", "instagramavel"], "alerts": [], "source": "ai"}}]
+[{{"day": <must be one of: {allowed_days_str}>, "name": "Exact Place Name", "category": "attraction", "time_slot": "15:00", "duration_minutes": 90, "description": "Why this is unmissable (in Brazilian Portuguese with proper accents).", "notes": "Practical tip (in Brazilian Portuguese).", "vibe_tags": ["cultural", "instagramavel"], "alerts": [], "source": "ai"}}]
 
 RULES:
 - Only include places that are genuinely iconic and unmissable for {destination}.
-- Assign each to the day (1-{num_days}) with the fewest items or best geographic fit.
+- Days {allowed_days_str} are the ONLY flexible days — DO NOT assign landmarks to other days.
 - Write description and notes in PERFECT Brazilian Portuguese with accents (á, é, ã, ç, etc.).
 - Return ONLY the JSON array, nothing else."""
 
@@ -2745,17 +2897,31 @@ RULES:
     # Cap at 5 additions
     additions = parsed[:5]
 
-    # Validate additions have required fields
+    # Validate additions have required fields + enforce day_rigidity.
     valid_additions = []
+    rejected_locked: list[tuple[str, int]] = []
     for item in additions:
-        if isinstance(item, dict) and item.get("name") and item.get("day"):
-            # Ensure day is within range
-            day = item.get("day", 1)
-            if day < 1 or day > num_days:
-                item["day"] = 1
-            # Ensure source is set
-            item["source"] = "ai"
-            valid_additions.append(item)
+        if not isinstance(item, dict) or not item.get("name") or not item.get("day"):
+            continue
+        day = item.get("day", 1)
+        if not isinstance(day, int) or day < 1 or day > num_days:
+            day = flexible_days[0] if flexible_days else 1
+            item["day"] = day
+        # Enforce rigidity — redirect or reject if the day is not flexible.
+        if day_rigidity.get(day, "flexible") != "flexible":
+            # Try to redirect to a flexible day.
+            if flexible_days:
+                item["day"] = flexible_days[0]
+                logger.info(
+                    "[audit] Redirecting landmark %r from locked day %d to flexible day %d",
+                    item.get("name"), day, flexible_days[0],
+                )
+            else:
+                rejected_locked.append((item.get("name"), day))
+                continue
+        # Ensure source is set
+        item["source"] = "ai"
+        valid_additions.append(item)
 
     if valid_additions:
         added_names = [a["name"] for a in valid_additions]
@@ -2763,6 +2929,12 @@ RULES:
         place_list.extend(valid_additions)
     else:
         logger.info("[audit] No valid landmark additions")
+
+    if rejected_locked:
+        logger.warning(
+            "[audit] Rejected %d landmarks targeting locked days (no flexible day available): %s",
+            len(rejected_locked), rejected_locked,
+        )
 
     return place_list
 
@@ -3114,6 +3286,44 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     logger.info("[build] Phase 2: Building unified itinerary (%d sources, %d chars, %d days, mode=%s)",
                 len(content_parts), len(combined_content), len(day_plans), trip.get("ai_mode", "eco"))
 
+    # Phase 3 — classify each source URL with its own content so downstream
+    # functions can tell "this came from a D-category structured video → lock
+    # its days" from "this was a loose B list → scatter freely". The result
+    # lives on trip.traveler_profile["content_classification"] for the rest
+    # of the build pipeline to read (see _build_itinerary_eco).
+    try:
+        import anthropic as _anthropic
+        cls_client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        per_url_map: dict[str, str] = {}
+        for part, url in zip(content_parts, source_urls):
+            # `part` is "--- Source: URL ---\n{content}" — strip the header so
+            # the classifier sees just the content.
+            body = part.split("\n", 1)[1] if "\n" in part else part
+            per_url_map[url] = body
+
+        classify_tasks = [
+            _classify_and_extract(cls_client, u, c) for u, c in per_url_map.items()
+        ]
+        cls_results = await asyncio.gather(*classify_tasks, return_exceptions=True)
+        classified_rows: list[dict] = []
+        for url, res in zip(per_url_map.keys(), cls_results):
+            if isinstance(res, dict):
+                row = dict(res)
+                row["source_url"] = url
+                classified_rows.append(row)
+        if classified_rows:
+            consolidated = _resolve_multi_video_conflicts(classified_rows)
+            profile["content_classification"] = consolidated
+            trip["traveler_profile"] = profile
+            logger.info(
+                "[build] Classification ready: canonical_days=%d loose=%d tips=%d",
+                len(consolidated.get("canonical_days") or {}),
+                len(consolidated.get("loose_places") or []),
+                len(consolidated.get("complementary_tips") or []),
+            )
+    except Exception as e:
+        logger.warning("[build] Classifier step failed (continuing without): %s", e)
+
     ai_mode = trip.get("ai_mode", "eco")
 
     if ai_mode == "pro":
@@ -3179,8 +3389,15 @@ async def _verify_and_optimize_itinerary(
     trip: dict,
     day_plans: list[dict],
     cost: CostTracker,
+    day_rigidity: dict[int, str] | None = None,
 ) -> list[dict]:
-    """Post-generation verification: optimize timing, grouping, and pacing via Haiku."""
+    """Post-generation verification: optimize timing, grouping, and pacing via Haiku.
+
+    Phase 3: when `day_rigidity` is supplied, locked days are listed in the
+    prompt with "do not modify — only fill empty meal slots" semantics.
+    After the call, any attempt to reorder or remove items on locked days
+    is undone programmatically (defensive safety net).
+    """
     if not place_list:
         return place_list
 
@@ -3188,8 +3405,21 @@ async def _verify_and_optimize_itinerary(
 
     destination = trip.get("destination", "")
     profile = trip.get("traveler_profile") or {}
+    day_rigidity = day_rigidity or {}
 
-    prompt = build_verification_prompt(place_list, destination, day_plans, profile)
+    # Snapshot the items on locked days so we can restore them if the
+    # verification call tried to touch them.
+    locked_days = {d for d, r in day_rigidity.items() if r == "locked"}
+    locked_snapshot: dict[int, list[dict]] = {}
+    if locked_days:
+        for p in place_list:
+            d = p.get("day")
+            if isinstance(d, int) and d in locked_days:
+                locked_snapshot.setdefault(d, []).append(p)
+
+    prompt = build_verification_prompt(
+        place_list, destination, day_plans, profile, day_rigidity=day_rigidity,
+    )
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     try:
@@ -3209,11 +3439,110 @@ async def _verify_and_optimize_itinerary(
     parsed = _parse_json_response(raw)
     if isinstance(parsed, list) and len(parsed) >= len(place_list) * 0.8 and len(parsed) <= len(place_list) + 8:
         logger.info("[verify] Verification optimized %d → %d items", len(place_list), len(parsed))
+        # Defensive: restore locked-day items verbatim if verify tried to touch them.
+        if locked_snapshot:
+            parsed = _restore_locked_days(parsed, locked_snapshot)
         return parsed
 
     logger.warning("[verify] Verification returned invalid result (%s items vs %d original), using original",
                    len(parsed) if isinstance(parsed, list) else "non-list", len(place_list))
     return place_list
+
+
+def _restore_locked_days(
+    candidate: list[dict], locked_snapshot: dict[int, list[dict]],
+) -> list[dict]:
+    """Replace any items on locked days with the pre-verify snapshot. Used
+    as a defensive safety net — the prompt already tells Claude not to
+    touch locked days, but we enforce it programmatically too."""
+    if not candidate or not locked_snapshot:
+        return candidate
+    result = [p for p in candidate if p.get("day") not in locked_snapshot]
+    for day, items in locked_snapshot.items():
+        # Append in original order.
+        result.extend(items)
+    logger.info(
+        "[verify] Restored %d locked-day items from snapshot (defensive guard)",
+        sum(len(v) for v in locked_snapshot.values()),
+    )
+    return result
+
+
+async def _assign_day_rigidity(
+    trip: dict,
+    day_plans: list[dict],
+    content_classification: dict,
+    rails: RailsClient,
+) -> dict[int, str]:
+    """Compute each day's rigidity from the classifier's canonical_days, then
+    persist the metadata on the Rails day_plan so the frontend can render
+    badges and the refine flow can respect "locked" days.
+
+    Returns a dict `{day_number: rigidity_string}` the prompt + post-processing
+    pipeline will read. Persistence uses `rails.update_day_plan` (PATCH) and
+    is best-effort: logs on failure, never raises.
+
+    Rules (from the approved plan):
+      - canonical_days[N] exists with confidence >= 0.8 → rigidity=locked,
+        origin=from_video. Persists source_video_url, source_creator_handle,
+        primary_region, day_type (day_trip if is_day_trip else urban).
+      - canonical_days[N] exists with 0.5 <= confidence < 0.8 → partially_flexible.
+      - No canonical_days[N] → flexible, origin=ai_created.
+    """
+    canonical_days = content_classification.get("canonical_days") or {}
+    creators_by_day = content_classification.get("creator_handles_by_day") or {}
+    day_rigidity: dict[int, str] = {}
+
+    # Normalize canonical_days keys — _resolve_multi_video_conflicts uses int
+    # keys, but JSON roundtrips may turn them into strings.
+    normalized_cd: dict[int, dict] = {}
+    for k, v in canonical_days.items():
+        try:
+            normalized_cd[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+
+    for dp in day_plans:
+        day_num = dp.get("day_number")
+        if not isinstance(day_num, int):
+            continue
+
+        entry = normalized_cd.get(day_num)
+        patch: dict = {}
+        if entry:
+            confidence = float(entry.get("confidence") or 0.0)
+            rigidity = "locked" if confidence >= 0.8 else "partially_flexible"
+            patch["rigidity"] = rigidity
+            patch["origin"] = "from_video"
+            patch["source_video_url"] = entry.get("source_url")
+            patch["source_creator_handle"] = creators_by_day.get(day_num) or entry.get("creator")
+            if entry.get("region_hint"):
+                patch["primary_region"] = entry["region_hint"]
+            patch["day_type"] = "day_trip" if entry.get("is_day_trip") else "urban"
+        else:
+            rigidity = "flexible"
+            patch["rigidity"] = "flexible"
+            patch["origin"] = "ai_created"
+            patch["day_type"] = "urban"
+
+        # Inherit pace signal from classifier when available.
+        pace = (content_classification.get("pace_signals") or {}).get("pace")
+        if pace:
+            patch["estimated_pace"] = pace
+
+        day_rigidity[day_num] = rigidity
+
+        try:
+            await rails.update_day_plan(trip["id"], dp["id"], patch)
+            logger.info(
+                "[rigidity] Day %d → %s (origin=%s day_type=%s creator=%s)",
+                day_num, rigidity, patch["origin"], patch["day_type"],
+                patch.get("source_creator_handle"),
+            )
+        except Exception as e:
+            logger.warning("[rigidity] Failed to persist day %d: %s", day_num, e)
+
+    return day_rigidity
 
 
 async def _build_itinerary_eco(
@@ -3228,13 +3557,39 @@ async def _build_itinerary_eco(
     cost: CostTracker,
     trip_id: int,
 ) -> dict:
-    """Eco Phase 2: ONE structured Sonnet call → JSON place list → verify → validate + create."""
+    """Eco Phase 2: ONE structured Sonnet call → JSON place list → verify → validate + create.
+
+    Phase 3: the profile may contain a `content_classification` blob (produced
+    by `_classify_and_extract` + `_resolve_multi_video_conflicts`). When present
+    we assign day rigidity FIRST, persist it on the Rails day_plans, then pass
+    the `day_rigidity` map to every post-processing guard so locked days from
+    a D-category video are left alone.
+    """
     profile = trip.get("traveler_profile") or {}
     places_mentioned = profile.get("places_mentioned", [])
     day_plans_from_links = profile.get("day_plans_from_links", [])
+    content_classification = profile.get("content_classification") or {}
+
+    # Phase 3.1 — assign rigidity + persist on Rails before the Sonnet call.
+    day_rigidity: dict[int, str] = {}
+    canonical_days: dict[int, dict] = {}
+    if content_classification:
+        day_rigidity = await _assign_day_rigidity(
+            trip, day_plans, content_classification, rails,
+        )
+        # Normalize canonical_days keys to int for downstream use.
+        raw_cd = content_classification.get("canonical_days") or {}
+        for k, v in raw_cd.items():
+            try:
+                canonical_days[int(k)] = v
+            except (TypeError, ValueError):
+                continue
+
     prompt = _build_itinerary_prompt(
         combined_content, trip, day_plans, existing_items,
         source_urls, places_mentioned, day_plans_from_links,
+        canonical_days=canonical_days,
+        day_rigidity=day_rigidity,
     )
     expected_items = len(day_plans) * 5
     place_list = await _call_claude_for_itinerary(
@@ -3259,17 +3614,22 @@ async def _build_itinerary_eco(
     # vs "Cemitério de la Recoleta" — same place)
     place_list = _deduplicate_places(place_list)
 
-    place_list = _rebalance_days(place_list, len(day_plans))
+    place_list = _rebalance_days(place_list, len(day_plans), day_rigidity=day_rigidity)
 
     # Verification step: optimize timing, proximity grouping, and landmark injection
-    place_list = await _verify_and_optimize_itinerary(place_list, trip, day_plans, cost)
+    place_list = await _verify_and_optimize_itinerary(
+        place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
+    )
 
     # Safety net: focused landmark audit catches any remaining gaps
     destination = trip.get("destination", "a destination")
-    place_list = await _audit_landmark_coverage(place_list, destination, len(day_plans), cost)
+    place_list = await _audit_landmark_coverage(
+        place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
+    )
 
     return await _validate_and_create_items(
         place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,
+        day_rigidity=day_rigidity,
     )
 
 
