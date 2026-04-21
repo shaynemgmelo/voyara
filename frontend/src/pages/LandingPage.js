@@ -1,15 +1,18 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { Link } from "react-router-dom";
 import { useLanguage } from "../i18n/LanguageContext";
 import { useAuth } from "../auth/AuthContext";
 import Logo from "../components/layout/Logo";
-import HeroDemo from "../components/landing/HeroDemo";
-import ShowcaseMap from "../components/landing/ShowcaseMap";
 import CinematicHero from "../components/landing/CinematicHero";
 import { Reveal, RevealStagger } from "../components/Reveal";
 import LinkAnalyzer from "../components/links/LinkAnalyzer";
 import AnalyzeResultModal from "../components/links/AnalyzeResultModal";
 import DestinationPreview from "../components/landing/DestinationPreview";
+import LazyMount from "../components/LazyMount";
+
+// Heavy (Google Maps + 842-line animated demo) — only fetched when scrolled
+// into view. Keeps landing page initial JS small and scrolling smooth.
+const HeroDemo = lazy(() => import("../components/landing/HeroDemo"));
 
 /* ── Scroll-aware nav (transparent on hero, solid on scroll) ── */
 function Nav({ pt, toggle, user, t }) {
@@ -177,80 +180,6 @@ function useCountUp(end, duration = 2000, startOnView = true) {
   return [count, ref];
 }
 
-/* ── Mini map for hero section — Real Google Maps + animated pins ── */
-function HeroMiniMap() {
-  const [step, setStep] = useState(0);
-
-  useEffect(() => {
-    const timings = [600, 400, 400, 400, 400, 400, 400, 400, 400, 400, 400, 400, 800, 800, 1500];
-    let timeout;
-    let current = 0;
-    const advance = () => {
-      current++;
-      if (current >= timings.length) current = 0;
-      setStep(current);
-      timeout = setTimeout(advance, timings[current]);
-    };
-    timeout = setTimeout(advance, timings[0]);
-    return () => clearTimeout(timeout);
-  }, []);
-
-  const visiblePins = Math.min(18, step);
-  const showHotel = step >= 3;
-  const showRoutes = step >= 6;
-  const activeDay = step >= 13 ? (step >= 14 ? 2 : 1) : null;
-
-  return (
-    <div className="rounded-2xl overflow-hidden shadow-2xl border border-gray-200 bg-white h-full flex flex-col">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          <svg className="w-3.5 h-3.5 text-gray-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-          </svg>
-          <span className="text-[11px] font-bold text-gray-700">5-Day Paris Trip</span>
-        </div>
-        <span className="text-[9px] text-gray-400 font-medium">18 spots</span>
-      </div>
-
-      {/* Map area — Real Google Maps */}
-      <div className="flex-1 relative overflow-hidden" style={{ minHeight: 320 }}>
-        <ShowcaseMap
-          className="w-full h-full"
-          visiblePins={visiblePins}
-          showRoutes={showRoutes}
-          showHotel={showHotel}
-          showHotelInfo={showHotel && step >= 10}
-          activeDay={activeDay}
-          zoom={13}
-        >
-          {/* Distance badges */}
-          {step >= 8 && (
-            <div className="absolute top-2 left-2 flex flex-col gap-1 z-30 pointer-events-none">
-              <span className="bg-orange-500 text-white text-[7px] font-bold px-2 py-0.5 rounded-full shadow-lg">Day 1 • 9.9 km</span>
-              {step >= 10 && <span className="bg-blue-500 text-white text-[7px] font-bold px-2 py-0.5 rounded-full shadow-lg">Day 2 • 4.9 km</span>}
-              {step >= 12 && <span className="bg-emerald-500 text-white text-[7px] font-bold px-2 py-0.5 rounded-full shadow-lg">Day 3 • 6.0 km</span>}
-            </div>
-          )}
-        </ShowcaseMap>
-      </div>
-
-      {/* Legend footer */}
-      <div className="bg-white border-t border-gray-200 px-3 py-2 flex items-center gap-3 flex-shrink-0">
-        {[
-          { color: "#F97316", label: "Day 1 • 9.9km" },
-          { color: "#3B82F6", label: "Day 2 • 4.9km" },
-          { color: "#22C55E", label: "Day 3 • 6km" },
-        ].map((d) => (
-          <div key={d.label} className="flex items-center gap-1">
-            <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: d.color }} />
-            <span className="text-[8px] text-gray-500 font-semibold">{d.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export default function LandingPage() {
   const { t, toggle, lang } = useLanguage();
@@ -322,7 +251,11 @@ export default function LandingPage() {
             </h2>
           </Reveal>
           <Reveal direction="up" duration={0.9}>
-            <HeroDemo />
+            <LazyMount minHeight={500}>
+              <Suspense fallback={<div style={{ minHeight: 500 }} />}>
+                <HeroDemo />
+              </Suspense>
+            </LazyMount>
           </Reveal>
         </div>
       </section>

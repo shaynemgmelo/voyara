@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
 import ShowcaseMap from "./ShowcaseMap";
 
@@ -30,15 +30,39 @@ export default function HeroDemo() {
 
   const [sceneIdx, setSceneIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
+  // Performance: only animate when the demo is actually visible and the tab is
+  // foregrounded. An off-screen or backgrounded animation stealing 25 render
+  // cycles per second was the main cause of the landing page scroll jank.
+  const containerRef = useRef(null);
+  const [isVisible, setIsVisible] = useState(false);
 
   const restart = useCallback(() => {
     setSceneIdx(0);
     setElapsed(0);
   }, []);
 
+  // Watch visibility — pause when scrolled out of view.
   useEffect(() => {
-    const tick = 40;
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => setIsVisible(entry.isIntersecting),
+      { threshold: 0.15 }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!isVisible) return;
+    // 120ms ≈ 8 fps of React re-renders. Still smooth enough for the sub-scene
+    // progress bars; saves ~65 % of main-thread work vs the old 40 ms tick.
+    const tick = 120;
+    let paused = document.hidden;
+    const onVis = () => { paused = document.hidden; };
+    document.addEventListener("visibilitychange", onVis);
     const interval = setInterval(() => {
+      if (paused) return;
       setElapsed((prev) => {
         const next = prev + tick;
         let acc = 0;
@@ -50,8 +74,11 @@ export default function HeroDemo() {
         return 0;
       });
     }, tick);
-    return () => clearInterval(interval);
-  }, [restart]);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [restart, isVisible]);
 
   let accBefore = 0;
   for (let i = 0; i < sceneIdx; i++) accBefore += SCENES[i].duration;
@@ -74,7 +101,7 @@ export default function HeroDemo() {
   ];
 
   return (
-    <div className="w-full max-w-5xl mx-auto">
+    <div ref={containerRef} className="w-full max-w-5xl mx-auto">
       {/* Browser-like wrapper */}
       <div className="rounded-2xl overflow-hidden shadow-2xl border border-gray-200 bg-white">
         {/* Browser bar */}
