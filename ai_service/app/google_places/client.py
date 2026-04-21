@@ -1,10 +1,29 @@
 """
 Google Places API client for direct server-side calls.
+
+In-memory cache layer (added after user feedback that Google Places was ~89%
+of generation cost):
+  - search(): keyed by (query_lower, location_lower); TTL 7 days. Place names
+    + lat/lng are effectively immutable.
+  - get_details(): keyed by place_id; TTL 24h. Ratings, hours, pricing move
+    slowly — 24h keeps data acceptably fresh.
+
+Quality guardrails:
+  - `is_open_now` is NEVER cached — always returned as None on cache hit so
+    downstream code can't accidentally serve a 23h-stale "open/closed" badge.
+  - Cache is bounded (~5000 entries each) with LRU-ish eviction so memory
+    stays predictable on long-running workers.
+  - Cache only serves successful responses; empty / error results re-fetch.
+  - Cache is in-memory per process — a Render restart rebuilds it. That's
+    intentional: if there's ever a transient bad response in prod, a deploy
+    flushes it automatically.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections import OrderedDict
 
 import httpx
 
@@ -13,6 +32,63 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://maps.googleapis.com/maps/api/place"
+
+# Cache config — tunable if we ever see memory pressure on Render free tier.
+_SEARCH_TTL_S = 7 * 24 * 3600   # 7 days
+_DETAILS_TTL_S = 24 * 3600      # 24 hours
+_MAX_ENTRIES = 5000
+
+
+class _TTLCache:
+    """Tiny LRU+TTL cache — enough to serve search/details within the same
+    worker process. Not multi-worker-aware (that would need Redis); but a
+    single Render instance typically handles the whole trip build."""
+
+    def __init__(self, ttl_seconds: int, max_entries: int = _MAX_ENTRIES):
+        self._ttl = ttl_seconds
+        self._max = max_entries
+        self._data: OrderedDict[str, tuple[float, object]] = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str):
+        entry = self._data.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        ts, value = entry
+        if time.time() - ts > self._ttl:
+            # Expired — drop it
+            self._data.pop(key, None)
+            self.misses += 1
+            return None
+        # Move to end (LRU touch)
+        self._data.move_to_end(key)
+        self.hits += 1
+        return value
+
+    def set(self, key: str, value):
+        self._data[key] = (time.time(), value)
+        self._data.move_to_end(key)
+        while len(self._data) > self._max:
+            self._data.popitem(last=False)
+
+    def log_rate(self, label: str):
+        total = self.hits + self.misses
+        if total % 20 == 0 and total > 0:
+            rate = self.hits / total * 100
+            logger.info(
+                "[places-cache:%s] %d hits / %d misses (%.0f%% saved)",
+                label, self.hits, self.misses, rate,
+            )
+
+
+_SEARCH_CACHE = _TTLCache(_SEARCH_TTL_S)
+_DETAILS_CACHE = _TTLCache(_DETAILS_TTL_S)
+
+
+def _norm(s: str | None) -> str:
+    return (s or "").strip().lower()
 
 
 class GooglePlacesClient:
@@ -36,7 +112,17 @@ class GooglePlacesClient:
         """
         Search for places using the Text Search API.
         Returns a list of place results with basic info.
+
+        Cached: (query, location) -> result list, TTL 7 days. The cache is
+        bypassed on empty / error responses so a transient failure doesn't
+        get pinned for a week.
         """
+        cache_key = f"{_norm(query)}|{_norm(location)}"
+        cached = _SEARCH_CACHE.get(cache_key)
+        if cached is not None:
+            _SEARCH_CACHE.log_rate("search")
+            return cached
+
         client = await self._get_client()
 
         params = {
@@ -73,6 +159,10 @@ class GooglePlacesClient:
                         "business_status": place.get("business_status"),
                     }
                 )
+            # Only cache non-empty results — empty may be a transient API blip.
+            if results:
+                _SEARCH_CACHE.set(cache_key, results)
+            _SEARCH_CACHE.log_rate("search")
             return results
 
         except Exception as e:
@@ -82,7 +172,19 @@ class GooglePlacesClient:
     async def get_details(self, place_id: str) -> dict | None:
         """
         Get detailed info for a specific place by place_id.
+
+        Cached by place_id with 24h TTL. `is_open_now` is stripped from the
+        cached copy and reported as None — ratings + hours tolerate 24h
+        staleness, but a stale "open now" flag would mislead the user.
         """
+        cached = _DETAILS_CACHE.get(place_id)
+        if cached is not None:
+            _DETAILS_CACHE.log_rate("details")
+            # Serve a fresh copy with the volatile flag blanked.
+            out = dict(cached)
+            out["is_open_now"] = None
+            return out
+
         client = await self._get_client()
 
         params = {
@@ -131,7 +233,7 @@ class GooglePlacesClient:
                         f"&key={settings.google_places_api_key}"
                     )
 
-            return {
+            details = {
                 "place_id": result.get("place_id"),
                 "name": result.get("name"),
                 "address": result.get("formatted_address"),
@@ -149,6 +251,11 @@ class GooglePlacesClient:
                 "photos": photos,
                 "is_open_now": hours.get("open_now"),
             }
+            # Cache the stable fields. is_open_now stays on the returned
+            # object (fresh call) but will be None on subsequent cache hits.
+            _DETAILS_CACHE.set(place_id, details)
+            _DETAILS_CACHE.log_rate("details")
+            return details
 
         except Exception as e:
             logger.error("Google Places details failed for %s: %s", place_id, e)
