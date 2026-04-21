@@ -758,17 +758,13 @@ async def _classify_and_extract(
     Returns the classification dict, or None if every retry failed. The
     caller falls back to `_regex_extract_places` (which now also fills a
     heuristic content_type) when None is returned.
+
+    Single attempt, short timeout: the fallback (regex) is instant, so it's
+    cheaper to fail fast than burn 70s on retries that might not help.
     """
     prompt = _build_classify_prompt(url, content)
     attempts = [
         (lambda: [{"role": "user", "content": prompt}], "primary"),
-        (
-            lambda: [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": '{"destination"'},
-            ],
-            "prefill",
-        ),
     ]
 
     for build_messages, label in attempts:
@@ -779,10 +775,10 @@ async def _classify_and_extract(
                         model="claude-haiku-4-5-20251001",
                         max_tokens=3000,
                         messages=build_messages(),
-                        timeout=30.0,
+                        timeout=20.0,
                     )
                 ),
-                timeout=35.0,
+                timeout=25.0,
             )
             text = response.content[0].text if response.content else ""
             if not text:
@@ -3552,12 +3548,14 @@ async def _call_claude_for_itinerary(
       - fewer than 60% of expected_items returned, OR
       - fewer than all days are covered (user asked for N days, got <N).
     """
-    # Single Sonnet attempt with a 65s hard timeout. NO retries — one call is
-    # all we can afford inside the 150s total build budget. In practice this
-    # call finishes in 15-40s. A retry-after-timeout would fire a SECOND 65s
-    # wait, which is exactly how the old "stuck at 95 %" pile-up happened.
-    # If the result is moderately thin, we still use it — shipping SOMETHING
-    # in 50s beats shipping NOTHING after 130s.
+    # Single Sonnet attempt with a 95s hard timeout. NO retries — one call is
+    # all we can afford inside the 180s total build budget. In practice:
+    #   - 3-day trip (~15 items): 18-30s
+    #   - 5-day trip (~25 items): 30-50s
+    #   - 7-day trip (~35 items): 50-80s  ← why 65s was too tight
+    #   - 10-day trip (~50 items): 70-110s
+    # We accept any non-empty result. A retry-after-timeout would fire a
+    # SECOND 95s wait, which is how the old "stuck at 95 %" pile-up happened.
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     try:
@@ -3565,17 +3563,17 @@ async def _call_claude_for_itinerary(
             asyncio.to_thread(
                 lambda: client.messages.create(
                     model="claude-sonnet-4-20250514",
-                    max_tokens=12000,
+                    max_tokens=16000,
                     messages=[{"role": "user", "content": prompt}],
-                    timeout=60.0,  # httpx-level timeout inside the SDK
+                    timeout=90.0,  # httpx-level timeout inside the SDK
                 )
             ),
-            timeout=65.0,  # asyncio-level belt-and-suspenders
+            timeout=95.0,  # asyncio-level belt-and-suspenders
         )
         cost.record_usage(response.usage)
         raw = response.content[0].text if response.content else "[]"
     except asyncio.TimeoutError:
-        logger.error("[eco] Sonnet itinerary call TIMED OUT after 65s — no retry, failing build")
+        logger.error("[eco] Sonnet itinerary call TIMED OUT after 95s — no retry, failing build")
         return None
     except Exception as e:
         logger.error("[eco] Claude itinerary call failed: %s", e)

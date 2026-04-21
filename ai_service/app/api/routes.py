@@ -418,12 +418,12 @@ async def _build_itinerary_background(trip_id: int):
         build_trip_itinerary,
         RailsClient,
     )
-    # Aggressive cap. New pipeline math:
-    #   fetch ~2s + re-extract 25s + classify 15s + sonnet 65s + validate/create 40s = ~147s
-    # If the build can't finish in 150s it's not going to, and the user
-    # would rather see a clean failure modal + retry button than keep staring
-    # at 95 %.
-    TOTAL_BUDGET_S = 150.0
+    # Pipeline math at 200s:
+    #   fetch 2s + re-extract 25s + classify 25s + sonnet 95s + create 40s ≈ 187s
+    # 13s of slack for slow Rails round-trips / Google Places lookups.
+    # Previous 150s / 180s caps were too tight for 7+ day trips where
+    # Sonnet alone needs 50-80s to emit 35+ items.
+    TOTAL_BUDGET_S = 200.0
     start = _t.time()
     active_builds[trip_id] = {
         "started_at": start,

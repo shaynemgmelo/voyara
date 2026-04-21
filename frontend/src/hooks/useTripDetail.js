@@ -31,9 +31,9 @@ export default function useTripDetail(tripId) {
   const buildRetried = useRef(false);
   const RETRY_BUILD_AFTER_MS = 90_000;
   // Absolute ceiling for how long we're willing to show the 95 % modal.
-  // Backend wrapper budget is 150 s — so 180 s on the client gives a 30 s
-  // grace window for polling delays.
-  const CLIENT_FAILURE_AFTER_MS = 180_000;
+  // Backend wrapper budget is 200 s — so 240 s on the client gives a 40 s
+  // grace window for polling delays + backend error persistence.
+  const CLIENT_FAILURE_AFTER_MS = 240_000;
   // Browser-notification bookkeeping — we fire at most one "ready" push per
   // page-load so the user gets pinged even when the tab is in the background.
   const wasGeneratingRef = useRef(false);
