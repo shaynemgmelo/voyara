@@ -1245,6 +1245,114 @@ def _deduplicate_places(place_list: list[dict]) -> list[dict]:
     return result
 
 
+def _semantic_deduplicate(place_list: list[dict]) -> list[dict]:
+    """Phase 3 — stronger dedup layered on top of _deduplicate_places.
+
+    Three passes in order:
+
+    1. Canonical alias resolution: "Cristo Redentor" + "Christ the Redeemer"
+       map to the same canonical via LANDMARK_ALIASES. The item that survives
+       is renamed to the canonical English form IF every variant seen came
+       from AI (we don't rewrite link items — the user's video name wins).
+
+    2. Geographic clustering: two items with different normalized names but
+       coordinates within ~150m AND similar names (SequenceMatcher ratio ≥ 0.7)
+       are treated as duplicates.
+
+    3. The classic normalized-name pass (already handled by the caller —
+       this function just adds the two layers above on top).
+
+    Link-sourced items ALWAYS win over AI when a collision is found.
+    """
+    if not place_list:
+        return place_list
+
+    from app.data.landmark_aliases import ALIAS_INDEX
+    from difflib import SequenceMatcher
+
+    def _norm_alias(s: str) -> str:
+        import unicodedata
+        s = unicodedata.normalize("NFKD", s or "").encode("ASCII", "ignore").decode("ASCII")
+        s = re.sub(r"[^a-z0-9\s]+", " ", s.lower())
+        return re.sub(r"\s+", " ", s).strip()
+
+    # Pass 1 — alias canonicalization.
+    alias_groups: dict[str, list[dict]] = {}
+    unrelated: list[dict] = []
+    for item in place_list:
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        canonical = ALIAS_INDEX.get(_norm_alias(name))
+        if canonical:
+            alias_groups.setdefault(canonical, []).append(item)
+        else:
+            unrelated.append(item)
+
+    deduped: list[dict] = []
+    alias_removed = 0
+    for canonical, items in alias_groups.items():
+        if len(items) == 1:
+            deduped.append(items[0])
+            continue
+        # Prefer link-sourced over AI. If multiple link items, keep the first.
+        link_items = [i for i in items if i.get("source") == "link"]
+        winner = link_items[0] if link_items else items[0]
+        # When every item is AI, rewrite name to the canonical English form
+        # for downstream consistency.
+        if not link_items:
+            winner["name"] = canonical
+        deduped.append(winner)
+        alias_removed += len(items) - 1
+
+    deduped.extend(unrelated)
+
+    # Pass 2 — geographic clustering within the already-once-deduped list.
+    geo_removed = 0
+    final: list[dict] = []
+    for item in deduped:
+        lat = item.get("latitude")
+        lng = item.get("longitude")
+        name = (item.get("name") or "").strip()
+        if not lat or not lng or not name:
+            final.append(item)
+            continue
+        is_dup = False
+        for kept in final:
+            klat = kept.get("latitude")
+            klng = kept.get("longitude")
+            kname = (kept.get("name") or "").strip()
+            if not klat or not klng or not kname:
+                continue
+            try:
+                dist_m = _haversine_km(float(lat), float(lng), float(klat), float(klng)) * 1000
+            except (TypeError, ValueError):
+                continue
+            if dist_m > 150:
+                continue
+            sim = SequenceMatcher(None, _normalize_place_name(name), _normalize_place_name(kname)).ratio()
+            if sim < 0.7:
+                continue
+            # Conflict. Link wins.
+            if item.get("source") == "link" and kept.get("source") != "link":
+                # Replace kept with item.
+                final[final.index(kept)] = item
+            # Otherwise keep `kept`.
+            is_dup = True
+            geo_removed += 1
+            break
+        if not is_dup:
+            final.append(item)
+
+    total_removed = alias_removed + geo_removed
+    if total_removed:
+        logger.info(
+            "[dedup-semantic] alias_removed=%d geo_removed=%d total=%d",
+            alias_removed, geo_removed, total_removed,
+        )
+    return final
+
+
 def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]) -> list[dict]:
     """Programmatically tag source='link' for items matching places_mentioned.
 
@@ -3468,6 +3576,153 @@ def _restore_locked_days(
     return result
 
 
+async def _build_day_trip(
+    base_city: str,
+    destination_city: str,
+    target_day: int,
+    mentioned_duration_hours: int | None,
+    pattern_signature: dict | None,
+    cost: CostTracker,
+) -> list[dict]:
+    """Phase 3.6 — build a FULL day in a secondary (day-trip) city.
+
+    When the classifier flagged a day as `is_day_trip` (e.g. "Tigre from BA"),
+    this helper asks Haiku for 3-4 coherent stops WITHIN the secondary city
+    so the traveler has a complete day there, not just "go to Tigre" as a
+    one-liner.
+
+    Returns a list of item dicts ready to be validated + created. Each item
+    has day=target_day, source="ai". If the call fails, returns an empty
+    list and the caller keeps whatever was there before.
+    """
+    if not destination_city:
+        return []
+
+    dur_hint = ""
+    if isinstance(mentioned_duration_hours, (int, float)) and mentioned_duration_hours > 0:
+        dur_hint = f"The creator mentioned ~{int(mentioned_duration_hours)}h for this trip."
+
+    sig_hint = ""
+    if pattern_signature:
+        sig_hint = (
+            f"Match the traveler's rhythm (from their locked days): "
+            f"density={pattern_signature.get('density')}, "
+            f"item_count~={pattern_signature.get('item_count')}, "
+            f"categories={pattern_signature.get('category_mix')}."
+        )
+
+    prompt = f"""You are planning Day {target_day} of a trip whose base city is
+{base_city}. Day {target_day} is a DAY TRIP to {destination_city}.
+
+Build a COMPLETE day inside {destination_city} — not just a single stop
+called "{destination_city}". A traveler spends 6-9 hours there including
+transport. Include:
+- 1 arrival / opening activity (iconic landmark of {destination_city})
+- 1 lunch place in {destination_city}
+- 1-2 secondary attractions (neighborhoods, markets, viewpoints)
+- 1 evening touch (sunset, a farewell drink) if time permits
+- Round-trip transport back to {base_city} at day's end is implicit
+
+{dur_hint}
+{sig_hint}
+
+Return ONLY a JSON array of 3-4 items:
+[{{"day": {target_day}, "name": "Exact Place Name", "category": "attraction|restaurant|cafe|activity|other", "time_slot": "10:30", "duration_minutes": 120, "description": "Why this is part of the {destination_city} day (in Brazilian Portuguese, with accents).", "notes": "Practical tip (pt-BR).", "vibe_tags": ["cultural", "ao_ar_livre"], "alerts": [], "source": "ai"}}]
+
+RULES:
+- All items MUST be in {destination_city}, not in {base_city} or other cities.
+- Write description + notes in PERFECT pt-BR with accents.
+- Return ONLY the JSON array."""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    try:
+        response = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=3000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except Exception as e:
+        logger.warning("[day-trip] Build failed for %s: %s", destination_city, e)
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.warning("[day-trip] Non-list response for %s, skipping", destination_city)
+        return []
+
+    valid: list[dict] = []
+    for item in parsed[:4]:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        item["day"] = target_day
+        item["source"] = "ai"
+        valid.append(item)
+    logger.info(
+        "[day-trip] Built %d items for Day %d (%s → %s)",
+        len(valid), target_day, base_city, destination_city,
+    )
+    return valid
+
+
+def _compute_day_signature(day_items: list[dict]) -> dict:
+    """Phase 3.5 — distill a day's "flavor" so flexible days can replicate it.
+
+    Given the items of a locked/partially_flexible day (from the video),
+    produce a compact descriptor the Sonnet prompt can use as a template:
+
+      {
+        "item_count": 4,
+        "category_mix": {"attraction": 2, "cafe": 1, "restaurant": 1},
+        "avg_duration_min": 105,
+        "density": "leve" | "moderado" | "acelerado",
+        "tipo_experiencia": ["urbano", "bairro_local"]  # from vibe_tags union
+      }
+
+    The prompt shows this to Claude so generated FLEXIBLE days match the
+    rhythm the traveler actually wants (not a generic 4.5-item template).
+    """
+    if not day_items:
+        return {}
+
+    from collections import Counter
+    cat_counter: Counter[str] = Counter()
+    durations: list[int] = []
+    vibes: set[str] = set()
+    for it in day_items:
+        cat = it.get("category")
+        if cat:
+            cat_counter[cat] += 1
+        dur = it.get("duration_minutes")
+        if isinstance(dur, (int, float)) and dur > 0:
+            durations.append(int(dur))
+        for v in (it.get("vibe_tags") or []):
+            if isinstance(v, str):
+                vibes.add(v)
+
+    item_count = len(day_items)
+    avg_duration = int(sum(durations) / len(durations)) if durations else 0
+
+    # Density heuristic: the more items + the longer each, the denser.
+    if item_count <= 2:
+        density = "leve"
+    elif item_count >= 5 or (item_count >= 4 and avg_duration >= 120):
+        density = "acelerado"
+    else:
+        density = "moderado"
+
+    return {
+        "item_count": item_count,
+        "category_mix": dict(cat_counter),
+        "avg_duration_min": avg_duration,
+        "density": density,
+        "tipo_experiencia": sorted(vibes),
+    }
+
+
 async def _assign_day_rigidity(
     trip: dict,
     day_plans: list[dict],
@@ -3614,7 +3869,46 @@ async def _build_itinerary_eco(
     # vs "Cemitério de la Recoleta" — same place)
     place_list = _deduplicate_places(place_list)
 
+    # Phase 3.4 — semantic dedup catches things the name-based pass can't
+    # (e.g. "Cristo Redentor" == "Christ the Redeemer", or two items with
+    # different names but coordinates within 150m).
+    place_list = _semantic_deduplicate(place_list)
+
     place_list = _rebalance_days(place_list, len(day_plans), day_rigidity=day_rigidity)
+
+    # Phase 3.6 — any day that the classifier marked as is_day_trip but ended
+    # up too thin (<3 items) gets a dedicated fill-in from Haiku so the
+    # traveler has a real day in the secondary city (Tigre, Versailles, etc.)
+    # instead of a lone "Tigre" line item.
+    if canonical_days:
+        by_day: dict[int, list[dict]] = {}
+        for p in place_list:
+            d = p.get("day")
+            if isinstance(d, int):
+                by_day.setdefault(d, []).append(p)
+        for day_num, entry in canonical_days.items():
+            if not isinstance(entry, dict) or not entry.get("is_day_trip"):
+                continue
+            current = by_day.get(day_num, [])
+            if len(current) >= 3:
+                continue
+            dest_city = entry.get("region_hint") or (entry.get("places") or [None])[0]
+            if not dest_city:
+                continue
+            built = await _build_day_trip(
+                base_city=trip.get("destination", "").split(",")[0].strip(),
+                destination_city=dest_city,
+                target_day=day_num,
+                mentioned_duration_hours=None,
+                pattern_signature=None,
+                cost=cost,
+            )
+            if built:
+                place_list.extend(built)
+                logger.info(
+                    "[day-trip] Added %d items to Day %d (%s)",
+                    len(built), day_num, dest_city,
+                )
 
     # Verification step: optimize timing, proximity grouping, and landmark injection
     place_list = await _verify_and_optimize_itinerary(
@@ -3627,10 +3921,47 @@ async def _build_itinerary_eco(
         place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
     )
 
-    return await _validate_and_create_items(
+    result = await _validate_and_create_items(
         place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,
         day_rigidity=day_rigidity,
     )
+
+    # Phase 3.5 — persist pattern signatures for locked/partially_flexible days.
+    # This records the "flavor" of video-sourced days (density, category mix,
+    # vibes) so the refine flow and future multi-video merges can replicate
+    # the traveler's rhythm on flexible days.
+    try:
+        items_by_day: dict[int, list[dict]] = {}
+        for p in place_list:
+            d = p.get("day")
+            if isinstance(d, int):
+                items_by_day.setdefault(d, []).append(p)
+
+        for dp in day_plans:
+            day_num = dp.get("day_number")
+            if not isinstance(day_num, int):
+                continue
+            if day_rigidity.get(day_num, "flexible") == "flexible":
+                continue
+            signature = _compute_day_signature(items_by_day.get(day_num, []))
+            if signature:
+                try:
+                    await rails.update_day_plan(
+                        trip["id"], dp["id"], {"pattern_signature": signature},
+                    )
+                    logger.info(
+                        "[pattern-sig] Day %d → %s",
+                        day_num, signature,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[pattern-sig] Failed to persist day %d: %s",
+                        day_num, e,
+                    )
+    except Exception as e:
+        logger.warning("[pattern-sig] Non-fatal error in signature step: %s", e)
+
+    return result
 
 
 # ──────────────────────────────────────────────
