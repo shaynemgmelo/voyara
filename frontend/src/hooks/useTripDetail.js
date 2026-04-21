@@ -22,6 +22,10 @@ export default function useTripDetail(tripId) {
   const buildStuckSinceRef = useRef(null);
   const buildRetried = useRef(false);
   const RETRY_BUILD_AFTER_MS = 90_000;
+  // Browser-notification bookkeeping — we fire at most one "ready" push per
+  // page-load so the user gets pinged even when the tab is in the background.
+  const wasGeneratingRef = useRef(false);
+  const readyNotifiedRef = useRef(false);
 
   const fetchTrip = useCallback(async () => {
     setLoading(true);
@@ -61,6 +65,74 @@ export default function useTripDetail(tripId) {
 
     return false;
   }, [trip, refining]);
+
+  // Background-tab friendly:
+  //   - Browsers throttle setInterval in background tabs (typically ~1/s
+  //     minimum, sometimes 1/min), so polling keeps going but may feel slow.
+  //   - The server build is a FastAPI BackgroundTask, fully independent of
+  //     whether the tab is focused — closing the tab does NOT kill the build.
+  //   - When the user returns to the tab we do an immediate fetch so the
+  //     modal doesn't wait the full 5s poll to catch up.
+  //   - When the build completes while the tab is backgrounded we fire a
+  //     browser notification (with user permission) so they get pinged.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && tripId) {
+        fetchTrip();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [tripId, fetchTrip]);
+
+  // Ask for notification permission the first time we see the build phase.
+  // Quiet failure — declined permission just means no background ping.
+  useEffect(() => {
+    if (!trip || typeof Notification === "undefined") return;
+    if (Notification.permission !== "default") return;
+    const generating =
+      trip.profile_status === "confirmed"
+      && trip.links?.some((l) => l.status === "extracted")
+      && !trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
+    if (generating) {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, [trip]);
+
+  // Fire a "trip ready" notification when items appear. Only once per load,
+  // and only if the user had been waiting (so a simple visit to a completed
+  // trip doesn't ping them).
+  useEffect(() => {
+    if (!trip || typeof Notification === "undefined") return;
+    const generating =
+      trip.profile_status === "confirmed"
+      && trip.links?.some((l) => l.status === "extracted")
+      && !trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
+    const hasItems = trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
+
+    if (generating) wasGeneratingRef.current = true;
+    if (
+      wasGeneratingRef.current
+      && hasItems
+      && !readyNotifiedRef.current
+      && Notification.permission === "granted"
+      && document.visibilityState !== "visible"
+    ) {
+      readyNotifiedRef.current = true;
+      try {
+        const notif = new Notification("Roteiro pronto ✈️", {
+          body: `Seu roteiro para ${trip.destination || "sua viagem"} está pronto!`,
+          tag: `trip-${trip.id}`,
+        });
+        notif.onclick = () => {
+          window.focus();
+          notif.close();
+        };
+      } catch {
+        // Notification constructor can throw on some browsers — no-op fallback.
+      }
+    }
+  }, [trip]);
 
   // Poll for updates when links are being processed or itinerary is being built
   useEffect(() => {
