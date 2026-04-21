@@ -3800,6 +3800,46 @@ async def _assign_day_rigidity(
     return day_rigidity
 
 
+def _build_place_list_from_canonical_days(
+    canonical_days: dict[int, dict], day_plans: list[dict],
+) -> list[dict]:
+    """Fast path — skip Sonnet entirely when every scheduled day is locked.
+
+    When the classifier returned canonical_days with the exact place list for
+    each trip day, we already know what the user wants. Building the place_list
+    from this data directly cuts 15-30 seconds of Sonnet latency plus verify
+    and audit that would both be no-ops (all days locked = nothing to edit).
+
+    Time slots are assigned heuristically by position within the day (10:00,
+    12:30, 14:30, 16:30, 19:00) — mirrors the prompt's default rhythm.
+    """
+    default_slots = ["10:00", "12:30", "14:30", "16:30", "19:00"]
+    default_durations = [90, 60, 90, 90, 90]
+    place_list: list[dict] = []
+
+    for dp in day_plans:
+        day_num = dp.get("day_number")
+        entry = canonical_days.get(day_num)
+        if not entry:
+            continue
+        places_on_day = entry.get("places") or []
+        for i, name in enumerate(places_on_day[:5]):
+            place_list.append({
+                "day": day_num,
+                "name": name,
+                "category": "attraction",  # generic; Google Places will refine via types
+                "time_slot": default_slots[min(i, 4)],
+                "duration_minutes": default_durations[min(i, 4)],
+                "description": "",
+                "notes": "",
+                "vibe_tags": [],
+                "alerts": [],
+                "source": "link",
+                "source_url": entry.get("source_url"),
+            })
+    return place_list
+
+
 async def _build_itinerary_eco(
     trip: dict,
     day_plans: list[dict],
@@ -3819,6 +3859,12 @@ async def _build_itinerary_eco(
     we assign day rigidity FIRST, persist it on the Rails day_plans, then pass
     the `day_rigidity` map to every post-processing guard so locked days from
     a D-category video are left alone.
+
+    UX perf (user report: 10 minutes unacceptable): when every scheduled day
+    is covered by locked canonical_days, we skip Sonnet + verify + audit and
+    build items directly from the classifier output. That cuts the build
+    from minutes to under a minute — the user already has the content they
+    wanted, the AI was only rephrasing it.
     """
     profile = trip.get("traveler_profile") or {}
     places_mentioned = profile.get("places_mentioned", [])
@@ -3840,86 +3886,127 @@ async def _build_itinerary_eco(
             except (TypeError, ValueError):
                 continue
 
-    prompt = _build_itinerary_prompt(
-        combined_content, trip, day_plans, existing_items,
-        source_urls, places_mentioned, day_plans_from_links,
-        canonical_days=canonical_days,
-        day_rigidity=day_rigidity,
+    # Fast path: skip the 30-60s Sonnet call when the classifier already has
+    # every scheduled day covered with locked data. Kicks in when a D-category
+    # video (or multi-video consolidation) fills every day_plan.
+    num_scheduled_days = len(day_plans)
+    fast_path = (
+        num_scheduled_days > 0
+        and len(canonical_days) >= num_scheduled_days
+        and all(
+            day_rigidity.get(dp["day_number"]) == "locked" for dp in day_plans
+        )
     )
-    expected_items = len(day_plans) * 5
-    place_list = await _call_claude_for_itinerary(
-        prompt,
-        cost,
-        expected_items=expected_items,
-        num_days=len(day_plans),
-    )
+
+    place_list: list[dict] | None
+    if fast_path:
+        logger.info(
+            "[eco] FAST PATH — %d/%d days locked, skipping Sonnet/verify/audit",
+            len(canonical_days), num_scheduled_days,
+        )
+        place_list = _build_place_list_from_canonical_days(canonical_days, day_plans)
+        if not place_list:
+            # Safety: classifier said locked but emitted zero places. Fall
+            # through to the normal path instead of creating an empty trip.
+            logger.warning("[eco] Fast path yielded 0 places, falling back to Sonnet")
+            fast_path = False
+
+    if not fast_path:
+        prompt = _build_itinerary_prompt(
+            combined_content, trip, day_plans, existing_items,
+            source_urls, places_mentioned, day_plans_from_links,
+            canonical_days=canonical_days,
+            day_rigidity=day_rigidity,
+        )
+        expected_items = len(day_plans) * 5
+        place_list = await _call_claude_for_itinerary(
+            prompt,
+            cost,
+            expected_items=expected_items,
+            num_days=len(day_plans),
+        )
 
     if not place_list:
         return {"error": "Itinerary generation failed", "places_created": 0}
 
-    logger.info("[eco] Claude generated %d places (expected %d)", len(place_list), expected_items)
+    logger.info("[eco] Generated %d places (fast_path=%s)", len(place_list), fast_path)
 
-    # Force-tag sources programmatically (Claude often ignores the instruction)
-    place_list = _tag_sources_from_links(place_list, places_mentioned)
+    # In fast path every item already has source="link" with source_url set,
+    # and there's no Sonnet output to reconcile — skip the tag + ensure +
+    # dedup + rebalance + verify + audit steps that cost 20-60 seconds of
+    # Haiku calls. Go straight to Google Places validation + item creation.
+    if not fast_path:
+        # Force-tag sources programmatically (Claude often ignores the instruction)
+        place_list = _tag_sources_from_links(place_list, places_mentioned)
 
-    # Safety net: inject any link places Claude dropped
-    place_list = _ensure_link_places_present(place_list, places_mentioned, day_plans)
+        # Safety net: inject any link places Claude dropped
+        place_list = _ensure_link_places_present(place_list, places_mentioned, day_plans)
 
-    # Remove duplicates (handles language variants like "Cemitério da Recoleta"
-    # vs "Cemitério de la Recoleta" — same place)
-    place_list = _deduplicate_places(place_list)
+        # Remove duplicates (handles language variants like "Cemitério da Recoleta"
+        # vs "Cemitério de la Recoleta" — same place)
+        place_list = _deduplicate_places(place_list)
 
-    # Phase 3.4 — semantic dedup catches things the name-based pass can't
-    # (e.g. "Cristo Redentor" == "Christ the Redeemer", or two items with
-    # different names but coordinates within 150m).
-    place_list = _semantic_deduplicate(place_list)
+        # Phase 3.4 — semantic dedup catches things the name-based pass can't
+        # (e.g. "Cristo Redentor" == "Christ the Redeemer", or two items with
+        # different names but coordinates within 150m).
+        place_list = _semantic_deduplicate(place_list)
 
-    place_list = _rebalance_days(place_list, len(day_plans), day_rigidity=day_rigidity)
+        place_list = _rebalance_days(place_list, len(day_plans), day_rigidity=day_rigidity)
 
-    # Phase 3.6 — any day that the classifier marked as is_day_trip but ended
-    # up too thin (<3 items) gets a dedicated fill-in from Haiku so the
-    # traveler has a real day in the secondary city (Tigre, Versailles, etc.)
-    # instead of a lone "Tigre" line item.
-    if canonical_days:
-        by_day: dict[int, list[dict]] = {}
-        for p in place_list:
-            d = p.get("day")
-            if isinstance(d, int):
-                by_day.setdefault(d, []).append(p)
-        for day_num, entry in canonical_days.items():
-            if not isinstance(entry, dict) or not entry.get("is_day_trip"):
-                continue
-            current = by_day.get(day_num, [])
-            if len(current) >= 3:
-                continue
-            dest_city = entry.get("region_hint") or (entry.get("places") or [None])[0]
-            if not dest_city:
-                continue
-            built = await _build_day_trip(
-                base_city=trip.get("destination", "").split(",")[0].strip(),
-                destination_city=dest_city,
-                target_day=day_num,
-                mentioned_duration_hours=None,
-                pattern_signature=None,
-                cost=cost,
-            )
-            if built:
-                place_list.extend(built)
-                logger.info(
-                    "[day-trip] Added %d items to Day %d (%s)",
-                    len(built), day_num, dest_city,
+        # Phase 3.6 — any day that the classifier marked as is_day_trip but ended
+        # up too thin (<3 items) gets a dedicated fill-in from Haiku so the
+        # traveler has a real day in the secondary city (Tigre, Versailles, etc.)
+        # instead of a lone "Tigre" line item.
+        if canonical_days:
+            by_day: dict[int, list[dict]] = {}
+            for p in place_list:
+                d = p.get("day")
+                if isinstance(d, int):
+                    by_day.setdefault(d, []).append(p)
+            for day_num, entry in canonical_days.items():
+                if not isinstance(entry, dict) or not entry.get("is_day_trip"):
+                    continue
+                current = by_day.get(day_num, [])
+                if len(current) >= 3:
+                    continue
+                dest_city = entry.get("region_hint") or (entry.get("places") or [None])[0]
+                if not dest_city:
+                    continue
+                built = await _build_day_trip(
+                    base_city=trip.get("destination", "").split(",")[0].strip(),
+                    destination_city=dest_city,
+                    target_day=day_num,
+                    mentioned_duration_hours=None,
+                    pattern_signature=None,
+                    cost=cost,
                 )
+                if built:
+                    place_list.extend(built)
+                    logger.info(
+                        "[day-trip] Added %d items to Day %d (%s)",
+                        len(built), day_num, dest_city,
+                    )
 
-    # Verification step: optimize timing, proximity grouping, and landmark injection
-    place_list = await _verify_and_optimize_itinerary(
-        place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
-    )
-
-    # Safety net: focused landmark audit catches any remaining gaps
-    destination = trip.get("destination", "a destination")
-    place_list = await _audit_landmark_coverage(
-        place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
-    )
+        # Verification step — only useful when there's AI output to review.
+        # Skipped if every day is locked (nothing to verify) OR if the audit
+        # has no flexible day to inject into.
+        any_flexible = any(
+            day_rigidity.get(dp["day_number"], "flexible") == "flexible"
+            for dp in day_plans
+        )
+        if any_flexible:
+            place_list = await _verify_and_optimize_itinerary(
+                place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
+            )
+            destination = trip.get("destination", "a destination")
+            place_list = await _audit_landmark_coverage(
+                place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
+            )
+        else:
+            logger.info(
+                "[eco] Skipping verify+audit — all %d days are locked/partial",
+                len(day_plans),
+            )
 
     result = await _validate_and_create_items(
         place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,
