@@ -2746,11 +2746,16 @@ def _optimize_day_proximity(
     """Reorder items within each day by geographic proximity (nearest-neighbor),
     and swap outliers between days if a place fits better geographically in another day.
 
-    This ensures each day's itinerary is walkable/drivable without zigzagging.
-    Max acceptable distance between consecutive items: 15km (~20 min drive).
-
-    Phase 3: `day_rigidity` — locked days are left in the video's exact order
-    (no nearest-neighbor reorder, no outlier swap in OR out).
+    Key behaviors:
+      - Within a day, we ALWAYS reorder for best walking/driving path —
+        including locked days. Reordering items inside the same day does NOT
+        violate Regra #0 (the items stay on the day the video assigned);
+        only the sequence changes. Time slots are reassigned by position
+        so the morning anchor stays at 10:00 etc.
+      - Between days we never move a link-sourced / video-anchored item OUT
+        of a locked day, and never INTO a locked day. For flexible-vs-
+        flexible, we swap when the item is meaningfully closer to the
+        other day's centroid (ratio 0.6×) or absolute distance > 15km.
     """
     if not place_list:
         return place_list
@@ -2763,9 +2768,13 @@ def _optimize_day_proximity(
         d = p.get("day", 1)
         by_day.setdefault(d, []).append(p)
 
-    # Step 1: Swap outliers between days
-    # For each item, check if it's far from its day's centroid but close to another day's centroid
-    MAX_SWAP_DISTANCE = 15  # km — if an item is >15km from its day centroid, consider swapping
+    # Step 1: Swap outliers between days.
+    # New heuristic: swap if (a) >15km absolute from own centroid, OR
+    # (b) another day's centroid is at least 40% closer than own.
+    # Case (b) catches the "purple day's pin 1 is right next to red day's
+    # cluster but my own centroid is also nearby" scenario the user saw.
+    MAX_SWAP_DISTANCE = 15
+    SIGNIFICANT_RATIO = 0.6
 
     def _centroid(items):
         lats = [float(i["latitude"]) for i in items if i.get("latitude")]
@@ -2784,7 +2793,6 @@ def _optimize_day_proximity(
     for d in list(by_day.keys()):
         if d not in centroids:
             continue
-        # Locked days — skip outlier swap entirely.
         if day_rigidity.get(d) == "locked":
             continue
         items = by_day[d]
@@ -2796,62 +2804,84 @@ def _optimize_day_proximity(
             if not lat or not lng:
                 i += 1
                 continue
-
-            # NEVER move link-sourced items — they come from the user's planned itinerary
-            if item.get("source") == "link":
+            # NEVER move link-sourced items even between flexible days —
+            # their day came from the video.
+            if item.get("source") == "link" or item.get("origin") == "extracted_from_video":
                 i += 1
                 continue
 
             dist_to_own = _haversine_km(centroids[d][0], centroids[d][1], float(lat), float(lng))
 
-            if dist_to_own > MAX_SWAP_DISTANCE:
-                # Check if closer to another day — but NEVER target a locked day.
-                best_day = d
-                best_dist = dist_to_own
-                for other_d, other_c in centroids.items():
-                    if other_d == d:
-                        continue
-                    if day_rigidity.get(other_d) == "locked":
-                        continue
-                    dist_other = _haversine_km(other_c[0], other_c[1], float(lat), float(lng))
-                    if dist_other < best_dist and len(by_day.get(other_d, [])) < 6:
-                        best_day = other_d
-                        best_dist = dist_other
+            # Find best alternative day (not locked, has room).
+            best_day = d
+            best_dist = dist_to_own
+            for other_d, other_c in centroids.items():
+                if other_d == d:
+                    continue
+                if day_rigidity.get(other_d) == "locked":
+                    continue
+                if len(by_day.get(other_d, [])) >= 6:
+                    continue
+                dist_other = _haversine_km(
+                    other_c[0], other_c[1], float(lat), float(lng),
+                )
+                if dist_other < best_dist:
+                    best_dist = dist_other
+                    best_day = other_d
 
-                if best_day != d:
-                    moved = items.pop(i)
-                    moved["day"] = best_day
-                    by_day.setdefault(best_day, []).append(moved)
-                    swaps_made += 1
-                    logger.info(
-                        "[proximity] Moved '%s' from day %d to day %d (%.1fkm → %.1fkm from centroid)",
-                        moved.get("name"), d, best_day, dist_to_own, best_dist,
-                    )
-                    continue  # don't increment i — list shifted
+            # Swap if: absolute outlier (>15km) OR significantly closer
+            # elsewhere (>40% reduction in distance).
+            should_swap = best_day != d and (
+                dist_to_own > MAX_SWAP_DISTANCE
+                or best_dist < dist_to_own * SIGNIFICANT_RATIO
+            )
+            if should_swap:
+                moved = items.pop(i)
+                moved["day"] = best_day
+                by_day.setdefault(best_day, []).append(moved)
+                swaps_made += 1
+                logger.info(
+                    "[proximity] Moved '%s' from day %d to day %d (%.1fkm → %.1fkm)",
+                    moved.get("name"), d, best_day, dist_to_own, best_dist,
+                )
+                continue  # list shifted, don't increment i
             i += 1
 
     if swaps_made:
-        logger.info("[proximity] Swapped %d items between days for better geographic clustering", swaps_made)
+        logger.info(
+            "[proximity] Swapped %d items between days for better routing",
+            swaps_made,
+        )
 
-    # Step 2: Reorder items within each day using nearest-neighbor algorithm.
-    # Locked days keep the video's order — skip the reorder.
+    # Step 2: Reorder items within each day by nearest-neighbor walking
+    # path — INCLUDING locked days (reordering sequence doesn't violate
+    # Regra #0; it just makes the walking path efficient). Time slots are
+    # reassigned by position afterwards so morning stays morning even if
+    # a different item now sits in position 0.
+    default_time_slots = ["10:00", "12:30", "14:30", "16:30", "19:00"]
     for d, items in by_day.items():
-        if day_rigidity.get(d) == "locked":
-            continue
         geo_items = [i for i in items if i.get("latitude") and i.get("longitude")]
         if len(geo_items) < 2:
             continue
 
-        # Start with the first item (usually the morning attraction)
-        ordered = [geo_items[0]]
-        remaining = geo_items[1:]
+        # Save the original time_slot sequence BEFORE shuffling so we can
+        # reassign them to the new positions.
+        original_time_slots = [i.get("time_slot") for i in items]
+
+        # Start with the item that had the earliest time_slot (morning
+        # anchor). This mimics "start the day at Casa Rosada" even if a
+        # nearby café was technically the closest to the centroid.
+        def _slot_key(item: dict) -> str:
+            ts = item.get("time_slot") or "99:99"
+            return ts
+        start_item = min(geo_items, key=_slot_key)
+        ordered = [start_item]
+        remaining = [i for i in geo_items if i is not start_item]
 
         while remaining:
             last = ordered[-1]
             last_lat = float(last["latitude"])
             last_lng = float(last["longitude"])
-
-            # Find nearest unvisited
             nearest_idx = 0
             nearest_dist = float("inf")
             for idx, candidate in enumerate(remaining):
@@ -2862,12 +2892,21 @@ def _optimize_day_proximity(
                 if dist < nearest_dist:
                     nearest_dist = dist
                     nearest_idx = idx
-
             ordered.append(remaining.pop(nearest_idx))
 
-        # Add back items without coordinates at the end
         non_geo = [i for i in items if not i.get("latitude") or not i.get("longitude")]
-        by_day[d] = ordered + non_geo
+        new_sequence = ordered + non_geo
+
+        # Reassign time_slots by position so the rhythm stays 10:00/12:30/
+        # 14:30/16:30/19:00 regardless of which item is in which slot.
+        # Preserves original time_slots for positions beyond the defaults.
+        for idx, item in enumerate(new_sequence):
+            if idx < len(default_time_slots):
+                item["time_slot"] = default_time_slots[idx]
+            elif idx < len(original_time_slots) and original_time_slots[idx]:
+                item["time_slot"] = original_time_slots[idx]
+
+        by_day[d] = new_sequence
 
     # Rebuild flat list
     result = []
