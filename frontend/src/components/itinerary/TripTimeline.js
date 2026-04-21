@@ -1,10 +1,5 @@
-import React, { useMemo, useRef, useState } from "react";
-import { Swiper, SwiperSlide } from "swiper/react";
-import { Navigation, Mousewheel, FreeMode, Keyboard } from "swiper/modules";
+import React, { useMemo, useState } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
-import "swiper/css";
-import "swiper/css/navigation";
-import "swiper/css/free-mode";
 // Shared with TripMap so the pill color == pin color on the map.
 import { getDayColor } from "../../utils/colors";
 
@@ -260,8 +255,7 @@ export default function TripTimeline({
   onSwapItem,
 }) {
   const [activeDayIdx, setActiveDayIdx] = useState(0);
-  const [isDraggingCard, setIsDraggingCard] = useState(false);
-  const swiperRefs = useRef({});
+  const [, setIsDraggingCard] = useState(false);
 
   // Show ALL days (including empty ones). User asked for N days — show N.
   const allDays = useMemo(() => dayPlans || [], [dayPlans]);
@@ -275,19 +269,10 @@ export default function TripTimeline({
     );
   }
 
-  const handleDragStart = () => {
-    setIsDraggingCard(true);
-    // Disable Swiper grab during card drag
-    Object.values(swiperRefs.current).forEach((s) => {
-      if (s && !s.destroyed) s.allowTouchMove = false;
-    });
-  };
+  const handleDragStart = () => setIsDraggingCard(true);
 
   const handleDragEnd = (result) => {
     setIsDraggingCard(false);
-    Object.values(swiperRefs.current).forEach((s) => {
-      if (s && !s.destroyed) s.allowTouchMove = true;
-    });
     if (!result.destination) return;
 
     const sourceDayId = parseInt(result.source.droppableId, 10);
@@ -454,100 +439,64 @@ export default function TripTimeline({
             <div
               ref={provided.innerRef}
               {...provided.droppableProps}
-              className="relative"
+              className="relative flex gap-4 overflow-x-auto overflow-y-hidden scrollbar-thin pb-4 snap-x snap-mandatory"
+              /* Native horizontal scroll replaces Swiper — the old carousel
+                 library was consuming pointer events before @hello-pangea/dnd
+                 could register a drag start, which meant "grab a card and
+                 move it" literally never worked. Native overflow-x-auto +
+                 CSS scroll-snap gives the same UX (momentum, mousewheel,
+                 keyboard arrows via focus) without fighting dnd. */
             >
-              <Swiper
-                modules={[Navigation, Mousewheel, FreeMode, Keyboard]}
-                slidesPerView="auto"
-                spaceBetween={16}
-                allowTouchMove={!isDraggingCard}
-                simulateTouch={!isDraggingCard}
-                freeMode={{
-                  enabled: true,
-                  momentum: true,
-                  momentumRatio: 0.8,
-                  momentumBounce: true,
-                  sticky: false,
-                }}
-                mousewheel={{
-                  enabled: true,
-                  forceToAxis: true,
-                  sensitivity: 1.2,
-                  releaseOnEdges: true,
-                }}
-                keyboard={{ enabled: true, onlyInViewport: true }}
-                grabCursor={!isDraggingCard}
-                navigation={{
-                  prevEl: `.timeline-prev-${day.id}`,
-                  nextEl: `.timeline-next-${day.id}`,
-                }}
-                onSwiper={(s) => (swiperRefs.current[day.id] = s)}
-                className="!pb-2"
-              >
-                {items.map((item, idx) => (
-                  <SwiperSlide
-                    key={item.id}
-                    style={{ width: 320, height: "auto" }}
-                  >
-                    <Draggable draggableId={String(item.id)} index={idx}>
-                      {(dragProvided, snapshot) => (
-                        <div
-                          ref={dragProvided.innerRef}
-                          {...dragProvided.draggableProps}
-                          style={{
-                            ...dragProvided.draggableProps.style,
-                            height: "100%",
-                          }}
-                        >
-                          <ItemCard
-                            item={item}
-                            dragHandleProps={dragProvided.dragHandleProps}
-                            isDragging={snapshot.isDragging}
-                            onClick={
-                              onItemClick
-                                ? () => onItemClick(item.id, day.id)
-                                : undefined
-                            }
-                            onSwap={
-                              onSwapItem
-                                ? () => onSwapItem(item.id, day.id)
-                                : undefined
-                            }
-                            onDelete={
-                              onDeleteItem
-                                ? () => {
-                                    if (
-                                      window.confirm(
-                                        `Remover "${item.name}" do roteiro?`
-                                      )
-                                    ) {
-                                      onDeleteItem(item.id, day.id);
-                                    }
-                                  }
-                                : undefined
-                            }
-                          />
-                        </div>
-                      )}
-                    </Draggable>
-                  </SwiperSlide>
-                ))}
-                {provided.placeholder}
-              </Swiper>
-
-              {/* Nav arrows */}
-              <button
-                className={`timeline-prev-${day.id} absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 w-10 h-10 rounded-full bg-white shadow-lg border border-gray-200 flex items-center justify-center z-10 hover:bg-gray-50 disabled:opacity-40`}
-                aria-label="Anterior"
-              >
-                <span className="text-gray-700">‹</span>
-              </button>
-              <button
-                className={`timeline-next-${day.id} absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 w-10 h-10 rounded-full bg-white shadow-lg border border-gray-200 flex items-center justify-center z-10 hover:bg-gray-50 disabled:opacity-40`}
-                aria-label="Próximo"
-              >
-                <span className="text-gray-700">›</span>
-              </button>
+              {items.map((item, idx) => (
+                <Draggable
+                  key={item.id}
+                  draggableId={String(item.id)}
+                  index={idx}
+                >
+                  {(dragProvided, snapshot) => (
+                    <div
+                      ref={dragProvided.innerRef}
+                      {...dragProvided.draggableProps}
+                      {...dragProvided.dragHandleProps}
+                      style={{
+                        ...dragProvided.draggableProps.style,
+                        width: 320,
+                        flexShrink: 0,
+                      }}
+                      className="snap-start cursor-grab active:cursor-grabbing"
+                    >
+                      <ItemCard
+                        item={item}
+                        isDragging={snapshot.isDragging}
+                        onClick={
+                          onItemClick
+                            ? () => onItemClick(item.id, day.id)
+                            : undefined
+                        }
+                        onSwap={
+                          onSwapItem
+                            ? () => onSwapItem(item.id, day.id)
+                            : undefined
+                        }
+                        onDelete={
+                          onDeleteItem
+                            ? () => {
+                                if (
+                                  window.confirm(
+                                    `Remover "${item.name}" do roteiro?`
+                                  )
+                                ) {
+                                  onDeleteItem(item.id, day.id);
+                                }
+                              }
+                            : undefined
+                        }
+                      />
+                    </div>
+                  )}
+                </Draggable>
+              ))}
+              {provided.placeholder}
             </div>
           )}
       </Droppable>
