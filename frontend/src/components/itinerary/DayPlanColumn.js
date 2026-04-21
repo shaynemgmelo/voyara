@@ -161,6 +161,43 @@ export default function DayPlanColumn({
             </span>
           )}
 
+          {/* Phase 5.1 — origin + rigidity chip. Locked days carry the video
+              creator handle; day-trip days get a distinct car emoji chip. */}
+          {dayPlan.rigidity === "locked" && (
+            <span
+              className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 flex-shrink-0"
+              title={pt
+                ? "Dia travado pela estrutura do vídeo. Itens protegidos contra edição automática."
+                : "Day locked by video structure. Items protected from auto-edits."}
+            >
+              <span>🔒</span>
+              {pt ? "Do vídeo" : "From video"}
+              {dayPlan.source_creator_handle && (
+                <span className="opacity-70">• {dayPlan.source_creator_handle}</span>
+              )}
+            </span>
+          )}
+          {dayPlan.rigidity === "partially_flexible" && (
+            <span
+              className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 flex-shrink-0"
+              title={pt
+                ? "Dia parcialmente baseado no vídeo — alguns itens fixos."
+                : "Day partially from video — some fixed items."}
+            >
+              <span>📎</span>
+              {pt ? "Parcial do vídeo" : "Partly from video"}
+            </span>
+          )}
+          {dayPlan.day_type === "day_trip" && (
+            <span
+              className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex-shrink-0"
+              title={pt ? "Bate-volta para outra cidade." : "Day trip out of town."}
+            >
+              <span>🚗</span>
+              {pt ? "Bate-volta" : "Day trip"}
+            </span>
+          )}
+
           {/* Compact stats — always visible */}
           <div className="flex items-center gap-2 ml-auto text-[11px] text-gray-400 flex-shrink-0">
             {items.length > 0 && (

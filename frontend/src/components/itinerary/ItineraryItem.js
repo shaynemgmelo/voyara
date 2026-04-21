@@ -94,7 +94,13 @@ export default function ItineraryItem({
             : isHovered
             ? "ring-1 ring-gray-300 shadow-sm"
             : "hover:shadow-sm"
-        } ${item.source === "link" ? "bg-blue-50/50" : "bg-white"}`}
+        } ${
+          item.origin === "extracted_from_video" || item.source === "link"
+            ? "bg-blue-50/50"
+            : item.origin === "user_added"
+            ? "bg-amber-50/40"
+            : "bg-white"
+        }`}
         style={{ borderLeft: `3px solid ${dayColor}` }}
       >
         <div className="flex items-stretch">
@@ -154,9 +160,30 @@ export default function ItineraryItem({
                   <span className="font-medium">{item.google_rating}</span>
                 </span>
               )}
-              {item.source === "link" && (
-                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">
+              {/* Phase 5.2 — three-state origin badge.
+                    extracted_from_video (new) or legacy source==="link"  → blue 📸
+                    user_added                                            → amber ✏️
+                    ai_suggested (or default)                             → no badge */}
+              {(item.origin === "extracted_from_video" || item.source === "link") && (
+                <span
+                  className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600"
+                  title={
+                    item.source_video_creator
+                      ? `${pt ? "Extraído do vídeo" : "Extracted from video"}: ${item.source_video_creator}`
+                      : pt
+                      ? "Extraído do vídeo"
+                      : "Extracted from video"
+                  }
+                >
                   📸 {pt ? "Do vídeo" : "From video"}
+                </span>
+              )}
+              {item.origin === "user_added" && (
+                <span
+                  className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700"
+                  title={pt ? "Adicionado por você" : "Added by you"}
+                >
+                  ✏️ {pt ? "Você adicionou" : "Added by you"}
                 </span>
               )}
               {item.duration_minutes && (

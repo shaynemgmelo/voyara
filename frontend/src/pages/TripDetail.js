@@ -18,6 +18,7 @@ import CityTabs from "../components/itinerary/CityTabs";
 import ProcessingStatus from "../components/trips/ProcessingStatus";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
+import ConflictsBanner from "../components/itinerary/ConflictsBanner";
 import FlightPanel from "../components/logistics/FlightPanel";
 import NotePanel from "../components/logistics/NotePanel";
 import TripPDFExport from "../components/trip/TripPDFExport";
@@ -320,6 +321,12 @@ export default function TripDetail() {
               </button>
             </div>
           </div>
+
+          {/* Phase 5.4 — surface any pending conflict_alerts (from refine
+              steps) so the user can confirm keep/replace/remove for items
+              that came from their videos. Re-polled whenever `refining`
+              transitions false→true→false. */}
+          <ConflictsBanner tripId={id} refreshKey={refining ? 1 : 0} />
 
           {/* Trip-level AI feedback */}
           {trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0) && (
