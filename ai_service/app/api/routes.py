@@ -29,6 +29,7 @@ from app.services.orchestrator import (
     build_trip_itinerary,
     refine_itinerary,
     optimize_trip_routing,
+    enrich_trip_with_experiences,
 )
 
 logger = logging.getLogger(__name__)
@@ -404,6 +405,19 @@ async def _build_itinerary_background(trip_id: int):
     except Exception:
         active_builds.pop(trip_id, None)
         logger.exception("Failed to build itinerary for trip %d", trip_id)
+
+
+@router.post("/enrich-experiences/{trip_id}")
+async def handle_enrich_experiences(trip_id: int):
+    """Add signature destination experiences (tango show, Vespa tour, buggy,
+    boat trip, food tour…) to an existing trip. Synchronous — the user is
+    waiting and there are at most 4 Haiku calls, total ~10s budget."""
+    try:
+        result = await enrich_trip_with_experiences(trip_id)
+        return result
+    except Exception as e:
+        logger.exception("[enrich-experiences] Trip %d failed", trip_id)
+        return {"error": str(e), "added": 0}
 
 
 @router.post("/optimize-trip/{trip_id}")

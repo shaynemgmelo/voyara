@@ -12,3 +12,17 @@ export async function optimizeTripRouting(tripId) {
   if (!resp.ok) throw new Error(`optimize-trip failed: ${resp.status}`);
   return resp.json();
 }
+
+/**
+ * Adds signature destination experiences (tango show, Vespa tour, boat
+ * trip, buggy…) to an existing trip via Haiku. Returns {added, total_suggested, summary}.
+ */
+export async function enrichTripExperiences(tripId) {
+  const resp = await fetch(`${AI_URL}/enrich-experiences/${tripId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!resp.ok) throw new Error(`enrich-experiences failed: ${resp.status}`);
+  return resp.json();
+}

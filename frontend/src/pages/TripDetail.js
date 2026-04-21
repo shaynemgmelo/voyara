@@ -25,7 +25,7 @@ import NotePanel from "../components/logistics/NotePanel";
 import TripPDFExport from "../components/trip/TripPDFExport";
 import TripShareModal from "../components/trip/TripShareModal";
 import { getTravelTimes, recalculateSchedule } from "../api/dayPlans";
-import { optimizeTripRouting } from "../api/optimize";
+import { optimizeTripRouting, enrichTripExperiences } from "../api/optimize";
 import { useLanguage } from "../i18n/LanguageContext";
 
 export default function TripDetail() {
@@ -58,6 +58,7 @@ export default function TripDetail() {
   const [geoModalDismissed, setGeoModalDismissed] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [optimizeToast, setOptimizeToast] = useState(null);
+  const [enrichingExp, setEnrichingExp] = useState(false);
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === "undefined") return "list";
     return localStorage.getItem("mapass.viewMode") || "timeline";
@@ -344,6 +345,33 @@ export default function TripDetail() {
               title="Reorganiza os itens de cada dia pela ordem mais curta no mapa e realinha os horários."
             >
               {optimizing ? "⏳ Otimizando..." : "🧭 Otimizar rota"}
+            </button>
+            <button
+              onClick={async () => {
+                if (enrichingExp) return;
+                setEnrichingExp(true);
+                try {
+                  const result = await enrichTripExperiences(id);
+                  await fetchTrip();
+                  const msg =
+                    result?.summary ||
+                    (result?.added
+                      ? `${result.added} experiências adicionadas`
+                      : "Nenhuma experiência nova");
+                  setOptimizeToast(msg);
+                  setTimeout(() => setOptimizeToast(null), 3500);
+                } catch {
+                  setOptimizeToast("Não foi possível adicionar agora");
+                  setTimeout(() => setOptimizeToast(null), 3500);
+                } finally {
+                  setEnrichingExp(false);
+                }
+              }}
+              disabled={enrichingExp}
+              className="px-3 py-1.5 rounded-xl text-sm font-semibold bg-violet-500 hover:bg-violet-600 text-white shadow-sm disabled:opacity-50 disabled:cursor-wait transition"
+              title="Adiciona experiências clássicas do destino (show de tango em BA, passeio de Vespa em Roma, buggy em Jeri, etc.)"
+            >
+              {enrichingExp ? "⏳ Adicionando..." : "🎭 Adicionar experiências"}
             </button>
             {optimizeToast && (
               <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1">

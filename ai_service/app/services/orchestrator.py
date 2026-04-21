@@ -3168,6 +3168,134 @@ def _rebalance_days(
     return result
 
 
+async def _suggest_destination_experiences(
+    destination: str,
+    existing_items: list[dict],
+    num_days: int,
+    cost: CostTracker,
+    day_rigidity: dict[int, str] | None = None,
+    max_suggestions: int = 4,
+) -> list[dict]:
+    """Ask Haiku for the signature experiences every tourist does in this
+    destination — things like "show de tango" in Buenos Aires, "passeio
+    de Vespa pelo centro histórico" in Rome, "passeio de buggy pelas
+    dunas" in Jericoacoara, "boat tour ao redor da ilha" in Capri.
+
+    These are deliberately LOCATION-AGNOSTIC activities — they're about
+    what you DO in the city, not where exactly on the map. Google Places
+    can't easily pin them (a tango show happens in many venues); so the
+    backend emits them as `category=activity` items with `vibe_tag
+    "experiencia"` and lets the downstream experience-recommendations
+    helper attach venue suggestions.
+
+    Called automatically during build (for any flexible day) and on demand
+    via the /enrich-experiences/:trip_id endpoint (for existing trips).
+    """
+    if not destination or num_days < 1:
+        return []
+
+    # Don't suggest things the itinerary already has.
+    existing_names_lower = {
+        (p.get("name") or "").strip().lower() for p in existing_items
+    }
+
+    day_rigidity = day_rigidity or {}
+    flexible_days = [
+        d for d in range(1, num_days + 1)
+        if day_rigidity.get(d, "flexible") == "flexible"
+    ]
+    if not flexible_days:
+        logger.info(
+            "[experiences] All %d days locked — skipping experience suggestions",
+            num_days,
+        )
+        return []
+
+    days_str = ", ".join(str(d) for d in flexible_days)
+
+    prompt = f"""You are a travel expert. A traveler is going to {destination}.
+List the 3-5 SIGNATURE EXPERIENCES every visitor should do there — the
+activities locals and guidebooks agree define the place.
+
+Think concretely about THIS destination. Examples from other places:
+- Buenos Aires: show de tango, aula de tango, passeio de barco pelo Rio da Prata
+- Roma: passeio de Vespa, tour gastronômico de Trastevere, aperitivo ao pôr do sol
+- Capri: passeio de barco ao redor da ilha, blue grotto, jantar em Marina Piccola
+- Jericoacoara: passeio de buggy dia inteiro, quadriciclo nas dunas, cavalgada na praia
+- Kyoto: aula de chá, caminhada noturna em Gion, experiência de kimono
+- Marrakech: jantar em riad tradicional, passeio de camelo no deserto, hammam
+
+Focus on EXPERIENCES (activities), not fixed landmarks. Think: "what
+would I regret not doing on a trip to {destination}?"
+
+Return ONLY a JSON array of 3-5 items (no more):
+[{{"name": "Nome da experiência", "category": "activity", "day": <number 1-{num_days}, use one of: {days_str}>, "time_slot": "HH:MM", "duration_minutes": <60-360>, "description": "2 sentences in Brazilian Portuguese explaining why this is unmissable.", "notes": "Practical tip in pt-BR.", "vibe_tags": ["experiencia", "cultural"]}}]
+
+RULES:
+- Names concrete: "passeio de barco ao redor de Capri" not just "boat tour".
+- Skip experiences already in this itinerary:
+  {sorted(existing_names_lower) if existing_names_lower else '(empty)'}
+- Use days from this flexible list ONLY: {days_str}
+- Pick day + time_slot that makes sense for the activity
+  (boat tours → morning 10:00, shows → 20:00-21:00, food tours → 18:00, etc.)
+- description and notes in PERFECT Brazilian Portuguese with accents."""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=2500,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=25.0,
+                )
+            ),
+            timeout=30.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.warning("[experiences] TIMED OUT for %s, skipping", destination)
+        return []
+    except Exception as e:
+        logger.warning("[experiences] Call failed for %s: %s", destination, e)
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        return []
+
+    suggestions: list[dict] = []
+    for item in parsed[:max_suggestions]:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        name = str(item["name"]).strip()
+        if name.lower() in existing_names_lower:
+            continue
+        day = item.get("day", flexible_days[0])
+        if not isinstance(day, int) or day not in flexible_days:
+            day = flexible_days[0]
+        suggestions.append({
+            "day": day,
+            "name": name,
+            "category": "activity",
+            "time_slot": item.get("time_slot") or "15:00",
+            "duration_minutes": int(item.get("duration_minutes") or 120),
+            "description": str(item.get("description") or ""),
+            "notes": str(item.get("notes") or ""),
+            "vibe_tags": list(item.get("vibe_tags") or ["experiencia"]),
+            "alerts": [],
+            "source": "ai",
+            "_is_experience": True,  # triggers venue recs in validate_one
+        })
+    logger.info(
+        "[experiences] Added %d destination experiences for %s",
+        len(suggestions), destination,
+    )
+    return suggestions
+
+
 async def _audit_landmark_coverage(
     place_list: list[dict],
     destination: str,
@@ -3543,6 +3671,91 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
         except Exception as e:
             logger.error("[analyze] Auto-build failed for trip %d: %s", trip_id, e)
             return {"status": "confirmed", "profile": None, "cost": cost.summary()}
+
+
+async def enrich_trip_with_experiences(
+    trip_id: int, http_client=None,
+) -> dict:
+    """Add signature destination experiences to an EXISTING trip.
+
+    Used by the "Adicionar experiências" button for trips that were
+    built before _suggest_destination_experiences existed, or trips
+    that simply didn't capture tango/boat/buggy/Vespa-type activities
+    from the source videos.
+
+    Injects up to 4 experiences onto flexible days, then runs the same
+    venue-recommendation pass the build pipeline uses so each new card
+    lands with "💡 Onde fazer: Rojo Tango · Café Tortoni · …".
+
+    Safe to call repeatedly — already-present experiences are skipped
+    via existing_names_lower.
+    """
+    rails = RailsClient(client=http_client)
+    cost = CostTracker(link_id=0)
+
+    try:
+        trip = await rails.get_trip(trip_id)
+        day_plans_raw = await rails.get_day_plans(trip_id)
+    except Exception as e:
+        return {"error": f"Failed to load trip: {e}", "added": 0}
+
+    destination = trip.get("destination") or ""
+    if not destination:
+        return {"error": "Trip has no destination", "added": 0}
+
+    day_rigidity: dict[int, str] = {}
+    dp_by_number: dict[int, int] = {}
+    existing_items: list[dict] = []
+    for dp in day_plans_raw:
+        n = dp.get("day_number")
+        if isinstance(n, int):
+            dp_by_number[n] = dp["id"]
+            day_rigidity[n] = dp.get("rigidity") or "flexible"
+        for it in dp.get("itinerary_items") or []:
+            existing_items.append(it)
+
+    suggestions = await _suggest_destination_experiences(
+        destination, existing_items, len(day_plans_raw), cost,
+        day_rigidity=day_rigidity,
+    )
+    if not suggestions:
+        return {"added": 0, "summary": "Nenhuma experiência nova para adicionar"}
+
+    # Attach venue recommendations + persist each as a real item.
+    created = 0
+    for item in suggestions:
+        # Reuse the experience-recommendations helper the main pipeline
+        # uses so each card lands with "💡 Onde fazer: …" in notes.
+        recs = await _experience_recommendations(item["name"], destination, cost)
+        if recs:
+            item["notes"] = (item.get("notes") or "").strip()
+            item["notes"] += (
+                ("\n\n" if item["notes"] else "")
+                + "💡 Onde fazer: "
+                + " · ".join(r["name"] for r in recs[:3])
+            )
+
+        dp_id = dp_by_number.get(item["day"])
+        if not dp_id:
+            continue
+
+        payload = {k: v for k, v in item.items() if not k.startswith("_") and k != "day"}
+        payload.setdefault("origin", "ai_suggested")
+
+        try:
+            await rails.create_itinerary_item(trip_id, dp_id, payload)
+            created += 1
+        except Exception as e:
+            logger.warning(
+                "[experiences] Failed to create %r in day %d: %s",
+                item["name"], item["day"], e,
+            )
+
+    return {
+        "added": created,
+        "total_suggested": len(suggestions),
+        "summary": f"{created} experiências adicionadas",
+    }
 
 
 async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
@@ -4513,6 +4726,16 @@ async def _build_itinerary_eco(
             place_list = await _audit_landmark_coverage(
                 place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
             )
+            # Inject signature destination experiences (tango in BA, buggy
+            # in Jeri, Vespa tour in Rome…). These don't show up in Google
+            # Places as a single pin, so only the destination_experience
+            # helper reliably adds them.
+            destination_experiences = await _suggest_destination_experiences(
+                destination, place_list, len(day_plans), cost,
+                day_rigidity=day_rigidity,
+            )
+            if destination_experiences:
+                place_list.extend(destination_experiences)
         else:
             logger.info(
                 "[eco] Skipping verify+audit — all %d days are locked/partial",
