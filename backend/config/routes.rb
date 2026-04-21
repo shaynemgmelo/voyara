@@ -20,6 +20,11 @@ Rails.application.routes.draw do
           post :share
           delete :unshare
         end
+        # Phase 4 — conflict alerts accumulated on day_plans during refine
+        # or landmark-audit steps. The frontend lists pending ones and posts
+        # a resolution ("keep" | "replace" | "remove") to clear them.
+        get "conflicts", to: "conflicts#index"
+        post "conflicts/resolve", to: "conflicts#resolve"
         resources :flights, except: [:new, :edit]
         resources :lodgings, except: [:new, :edit]
         resources :transports, except: [:new, :edit]

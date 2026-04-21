@@ -81,6 +81,17 @@ class RailsClient:
             f"/trips/{trip_id}/day_plans/{day_plan_id}/itinerary_items/{item_id}",
         )
 
+    async def update_itinerary_item(
+        self, trip_id: int, day_plan_id: int, item_id: int, item_data: dict
+    ) -> dict:
+        """PATCH an existing itinerary item in-place. Used by the refine
+        pipeline to preserve IDs + personal_notes instead of delete+create."""
+        return await self._request(
+            "PATCH",
+            f"/trips/{trip_id}/day_plans/{day_plan_id}/itinerary_items/{item_id}",
+            json={"itinerary_item": item_data},
+        )
+
     async def _request(
         self,
         method: str,

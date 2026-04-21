@@ -4121,13 +4121,37 @@ async def refine_itinerary(
             keep_lines.append(f"Day {dp['day_number']} (KEEP — do not change):\n" + "\n".join(item_names))
         keep_context = "\n".join(keep_lines)
 
-    # Build context of current items in target days
+    # Build context of current items in target days. Every item is listed
+    # WITH ITS DATABASE ID so the Sonnet output can reuse the same id for
+    # untouched items — the upsert pass matches by id and PATCHes in place,
+    # preserving personal_notes and position. Items marked 🔒 carry
+    # origin=extracted_from_video and MUST NOT be removed.
     current_items_text = ""
     current_lines = []
+    locked_ids: set[int] = set()
+    existing_ids_by_day: dict[int, list[int]] = {}
     for dp in target_days:
         items = dp.get("itinerary_items", [])
-        item_names = [f"  - {it.get('name', '?')} ({it.get('category', '?')}, {it.get('time_slot', '?')}, source: {it.get('source', 'ai')})" for it in items]
-        current_lines.append(f"Day {dp['day_number']} (REFINE based on feedback):\n" + "\n".join(item_names))
+        item_lines: list[str] = []
+        for it in items:
+            item_id = it.get("id")
+            origin = it.get("origin") or (
+                "extracted_from_video" if it.get("source") == "link" else "ai_suggested"
+            )
+            is_locked = origin == "extracted_from_video"
+            icon = "🔒" if is_locked else " "
+            item_lines.append(
+                f"  {icon} id={item_id} | {it.get('name', '?')} "
+                f"({it.get('category', '?')}, {it.get('time_slot', '?')}, origin: {origin})"
+            )
+            if item_id:
+                existing_ids_by_day.setdefault(dp["day_number"], []).append(item_id)
+                if is_locked:
+                    locked_ids.add(item_id)
+        current_lines.append(
+            f"Day {dp['day_number']} (REFINE based on feedback):\n"
+            + "\n".join(item_lines)
+        )
     current_items_text = "\n".join(current_lines)
 
     # Places from links section
@@ -4142,13 +4166,14 @@ PLACES FROM USER'S LINKS (preserve these when possible — tag as source: "link"
     num_target_days = len(target_days)
     total_items_needed = num_target_days * 5
 
-    # Build the refine prompt
+    # Build the refine prompt. Phase 4: include id + origin on every line so
+    # the output can reuse ids (upsert) instead of regenerating everything.
     prompt = f"""You are an expert travel planner. The user already has an itinerary for {destination} but wants changes based on their feedback.
 
 USER'S FEEDBACK:
 "{feedback}"
 
-CURRENT ITINERARY (items to REFINE):
+CURRENT ITINERARY (items to REFINE — ids in parens):
 {current_items_text}
 
 {"DAYS TO KEEP UNCHANGED (for context only):" + chr(10) + keep_context if keep_context else ""}
@@ -4159,16 +4184,31 @@ TRAVELER PROFILE:
 - Pace: {profile.get('pace', 'moderate')}
 {places_section}
 
-INSTRUCTIONS:
-1. Read the user's feedback carefully. They may like some items and dislike others.
-2. KEEP items the user explicitly says they like or that align with their feedback.
-3. REPLACE items that don't match their feedback with better alternatives.
-4. If the user gives general feedback (e.g., "more restaurants", "less museums"), apply it intelligently across the affected days.
-5. Maintain 4-5 items per day, geographic clustering, and time flow (morning → lunch → afternoon → evening).
-6. **LINK CONTENT HAS PRIORITY**: Places from the user's links (source: "link") must be KEPT and must STAY on their assigned day. Their day assignment comes from the user's pre-planned itinerary from video/link content. NEVER remove or move link-sourced places to a different day unless the user EXPLICITLY asks for it. Only replace AI-sourced places when making changes.
+UPSERT RULES (MUST FOLLOW — this is how we avoid losing user annotations):
+1. To KEEP an existing item untouched: return it with its SAME `id`. You may
+   edit its name/time_slot/duration if the feedback justifies; keep the id.
+2. To REPLACE an existing item: return a new object WITHOUT `id` (then the
+   system will DELETE the old one and CREATE this one). Leave id out.
+3. 🔒 LOCKED ITEMS (origin=extracted_from_video): NEVER omit them from the
+   output and NEVER change their day. If the feedback would require removing
+   one, STILL include it as-is and the system will surface a conflict modal
+   for the user to confirm — your job is to preserve them in the output.
+4. To ADD a new item: return it WITHOUT `id`.
+5. If an existing item is not in your output, the system treats it as
+   "the user wants this gone" — it will be deleted UNLESS it's 🔒 locked.
 
-Return ONLY a JSON array with replacement items for the affected days. Each object:
-{{"day": <day_number>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "09:00", "duration_minutes": 90, "description": "Why this is great + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert if relevant"], "source": "link|ai"}}
+OTHER INSTRUCTIONS:
+- Read the user's feedback carefully. They may like some items and dislike others.
+- KEEP items that align with the feedback (return with their id).
+- REPLACE items that don't match with better alternatives (new objects, no id).
+- If the user gives general feedback (e.g., "more restaurants", "less museums"),
+  apply it intelligently across the affected days.
+- Maintain 4-5 items per day, geographic clustering, and time flow.
+- LINK CONTENT HAS PRIORITY: Items with origin=extracted_from_video MUST be
+  kept on their assigned day, and their id MUST appear in your output.
+
+Return ONLY a JSON array. Each object:
+{{"id": <existing id OR omit for new items>, "day": <day_number>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "09:00", "duration_minutes": 90, "description": "Why this is great + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert if relevant"], "source": "link|ai"}}
 
 Generate approximately {total_items_needed} items across {num_target_days} day(s).
 Day numbers to use: {', '.join(str(dp['day_number']) for dp in target_days)}.
@@ -4194,24 +4234,170 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
     place_list = _tag_sources_from_links(place_list, places_mentioned)
     place_list = _ensure_link_places_present(place_list, places_mentioned, target_days)
 
-    # Delete existing items in target days
-    deleted = 0
+    # ── Phase 4.1 — upsert-based refine ────────────────────────────────────
+    # Partition the Claude output by "has id" (update) vs "no id" (create).
+    kept_ids: set[int] = set()
+    items_to_update: list[dict] = []
+    items_to_create: list[dict] = []
+    for item in place_list:
+        maybe_id = item.get("id")
+        try:
+            item_id = int(maybe_id) if maybe_id not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            item_id = None
+        if item_id and item_id in {i for ids in existing_ids_by_day.values() for i in ids}:
+            items_to_update.append({**item, "id": item_id})
+            kept_ids.add(item_id)
+        else:
+            # Strip any invalid id so downstream treats it as a new item.
+            clean = {k: v for k, v in item.items() if k != "id"}
+            items_to_create.append(clean)
+
+    # Items present in DB but missing from Claude output → candidates for
+    # deletion (UNLESS locked — those trigger a conflict_alert instead).
+    all_existing_ids: set[int] = {
+        i for ids in existing_ids_by_day.values() for i in ids
+    }
+    orphaned_ids = all_existing_ids - kept_ids
+    ids_to_delete: list[int] = []
+    locked_orphans: list[int] = []
+    for oid in orphaned_ids:
+        if oid in locked_ids:
+            locked_orphans.append(oid)
+        else:
+            ids_to_delete.append(oid)
+
+    # UPDATE pass — preserves personal_notes, position, IDs.
+    updated = 0
+    item_by_id: dict[int, dict] = {}
     for dp in target_days:
-        for item in dp.get("itinerary_items", []):
+        for it in dp.get("itinerary_items", []):
+            if it.get("id"):
+                item_by_id[it["id"]] = {**it, "day_plan_id": dp["id"]}
+
+    for spec in items_to_update:
+        item_id = spec["id"]
+        original = item_by_id.get(item_id)
+        if not original:
+            continue
+        patch: dict = {}
+        for field in (
+            "name", "description", "category", "time_slot", "duration_minutes",
+            "vibe_tags", "alerts", "alternative_group", "notes",
+        ):
+            if field in spec and spec[field] is not None:
+                patch[field] = spec[field]
+        if "day" in spec and isinstance(spec["day"], int):
+            target_dp = next(
+                (dp for dp in target_days if dp["day_number"] == spec["day"]),
+                None,
+            )
+            # Locked items cannot change day via refine.
+            if target_dp and item_id not in locked_ids and target_dp["id"] != original["day_plan_id"]:
+                patch["day_plan_id"] = target_dp["id"]
+        if not patch:
+            continue
+        try:
+            await rails.update_itinerary_item(
+                trip_id, original["day_plan_id"], item_id, patch,
+            )
+            updated += 1
+        except Exception as e:
+            logger.warning(
+                "[refine] Update failed for id=%s (%s): %s",
+                item_id, original.get("name"), e,
+            )
+
+    # DELETE pass — non-locked orphans only.
+    deleted = 0
+    for oid in ids_to_delete:
+        original = item_by_id.get(oid)
+        if not original:
+            continue
+        try:
+            await rails.delete_itinerary_item(trip_id, original["day_plan_id"], oid)
+            deleted += 1
+        except Exception as e:
+            logger.warning("[refine] Delete failed for id=%s: %s", oid, e)
+
+    # CONFLICT ALERTS for locked items that Claude tried to drop. Attach to
+    # the owning day_plan so the frontend can surface a modal.
+    if locked_orphans:
+        alerts_by_day: dict[int, list[dict]] = {}
+        for oid in locked_orphans:
+            original = item_by_id.get(oid)
+            if not original:
+                continue
+            day_plan_id = original["day_plan_id"]
+            alerts_by_day.setdefault(day_plan_id, []).append({
+                "type": "locked_item_removal_attempt",
+                "item_id": oid,
+                "item_name": original.get("name"),
+                "message": (
+                    f"O refinamento tentou remover {original.get('name')!r}, "
+                    f"que veio do vídeo. Confirma remover, manter ou substituir?"
+                ),
+                "severity": "high",
+                "created_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+        # Merge into each day_plan.conflict_alerts jsonb.
+        for dp in target_days:
+            new_alerts = alerts_by_day.get(dp["id"])
+            if not new_alerts:
+                continue
+            fresh = await rails.get_day_plans(trip_id)
+            current_alerts: list[dict] = []
+            for row in fresh:
+                if row.get("id") == dp["id"]:
+                    current_alerts = row.get("conflict_alerts") or []
+                    break
+            merged = current_alerts + new_alerts
             try:
-                await rails.delete_itinerary_item(trip_id, dp["id"], item["id"])
-                deleted += 1
+                await rails.update_day_plan(
+                    trip_id, dp["id"], {"conflict_alerts": merged},
+                )
             except Exception as e:
-                logger.warning("[refine] Failed to delete item %s: %s", item.get("name"), e)
+                logger.warning(
+                    "[refine] Failed to persist conflict_alerts on day_plan %s: %s",
+                    dp["id"], e,
+                )
 
-    logger.info("[refine] Deleted %d existing items in target days", deleted)
+    # CREATE pass — new items go through the full validation + geo pipeline
+    # so they land with coordinates + alerts. Reuse the existing function
+    # but only feed it the NEW items for the target days.
+    created_count = 0
+    if items_to_create:
+        # The create path needs all day_plans (including untouched) for
+        # cluster tightening to make sense.
+        all_day_plans_minimal = [
+            {"id": dp["id"], "day_number": dp["day_number"], "date": dp.get("date"), "city": dp.get("city")}
+            for dp in day_plans
+        ]
+        create_result = await _validate_and_create_items(
+            items_to_create, trip, all_day_plans_minimal, rails, places, cost,
+            trip_id, source_urls,
+            day_rigidity={
+                dp["day_number"]: ("locked" if dp["id"] in {d["id"] for d in target_days if d["id"] in [x["id"] for x in target_days]} else "flexible")
+                for dp in all_day_plans_minimal
+            } if False else None,  # use None so this create doesn't re-lock days
+        )
+        created_count = create_result.get("places_created", 0)
 
-    # Create new items (reuse existing validation + creation logic)
-    result = await _validate_and_create_items(
-        place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,
+    logger.info(
+        "[refine] upsert done: updated=%d deleted=%d created=%d conflicts=%d",
+        updated, deleted, created_count, len(locked_orphans),
     )
 
-    return result
+    return {
+        "places_created": created_count,
+        "items_updated": updated,
+        "items_deleted": deleted,
+        "conflicts_pending": len(locked_orphans),
+        "summary": f"Refined {len(target_days)} day(s): {updated} updated, "
+                   f"{created_count} created, {deleted} removed, "
+                   f"{len(locked_orphans)} pending confirmation.",
+        "cost": cost.summary(),
+    }
 
 
 # ──────────────────────────────────────────────
