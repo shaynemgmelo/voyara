@@ -365,11 +365,31 @@ async def _analyze_trip_background(trip_id: int):
 
 
 async def _build_itinerary_background(trip_id: int):
+    import asyncio as _aio
+    import time as _t
+    # Hard ceiling on the whole build. If something new wedges, the
+    # frontend auto-retry (90s threshold) will kick in — with 240s total
+    # worst case on our side, two retries still fit inside 9 minutes
+    # of total patience. Typical fast-path builds finish in 30-60s.
+    TOTAL_BUDGET_S = 240.0
+    start = _t.time()
     try:
-        result = await build_trip_itinerary(trip_id)
-        logger.info("[build-itinerary] Trip %d: %d places created",
-                    trip_id, result.get("places_created", 0))
-    except Exception as e:
+        result = await _aio.wait_for(
+            build_trip_itinerary(trip_id), timeout=TOTAL_BUDGET_S,
+        )
+        logger.info(
+            "[build-itinerary] Trip %d: %d places created in %.1fs",
+            trip_id,
+            result.get("places_created", 0),
+            _t.time() - start,
+        )
+    except _aio.TimeoutError:
+        logger.error(
+            "[build-itinerary] Trip %d TIMED OUT after %.0fs — frontend "
+            "auto-retry will re-kick with already-extracted content",
+            trip_id, TOTAL_BUDGET_S,
+        )
+    except Exception:
         logger.exception("Failed to build itinerary for trip %d", trip_id)
 
 

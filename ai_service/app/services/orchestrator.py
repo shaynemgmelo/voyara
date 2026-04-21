@@ -3399,11 +3399,19 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     """Phase 2: Build ONE unified itinerary from all link content + confirmed profile.
 
     Called after user confirms profile (and optionally sets day distribution).
+    Emits a [build t=Xs] log line at every major phase boundary so it's
+    easy to spot which step is slow in production.
     """
+    import time as _time
+    _t0 = _time.time()
+    def _mark(stage: str) -> None:
+        logger.info("[build t=%.1fs] %s", _time.time() - _t0, stage)
+
     rails = RailsClient(client=http_client)
     places = GooglePlacesClient(http_client=http_client)
     cost = CostTracker(link_id=0)
 
+    _mark("start — fetching trip + day_plans")
     try:
         trip = await rails.get_trip(trip_id)
         day_plans_raw = await rails.get_day_plans(trip_id)
@@ -3443,6 +3451,7 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
             })
 
     # Aggregate content from ALL links
+    _mark(f"aggregating content from {len(trip.get('links', []))} link(s)")
     links = trip.get("links", [])
     if not links:
         try:
@@ -3476,12 +3485,40 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
             content_parts.append(f"--- Source: {url} ---\n{ct}")
             source_urls.append(url)
 
-    # Re-extract stale links sequentially (to respect Render memory budget)
+    # Re-extract stale links sequentially (to respect Render memory budget).
+    # Hard timeout per link so a slow Whisper/Vision download can't wedge the
+    # whole build. Beyond the budget we use whatever content_text was already
+    # on the link (caption-only is still useful for the classifier).
+    import time as _time
+    REEXTRACT_BUDGET_S = 50.0  # per link
+    TOTAL_REEXTRACT_BUDGET_S = 120.0  # across all stale links
+    reextract_start = _time.time()
     for link in stale_links:
         url = link.get("url", "")
-        logger.info("[build] Re-extracting stale link: %s", url)
+        budget_left = TOTAL_REEXTRACT_BUDGET_S - (_time.time() - reextract_start)
+        if budget_left <= 5:
+            logger.warning(
+                "[build] Re-extract budget exhausted; skipping %s (using stored content)",
+                url,
+            )
+            fresh = (link.get("extracted_data") or {}).get("content_text", "") or ""
+            if fresh:
+                content_parts.append(f"--- Source: {url} ---\n{fresh}")
+                source_urls.append(url)
+            continue
+        per_link_timeout = min(REEXTRACT_BUDGET_S, budget_left)
+        logger.info(
+            "[build] Re-extracting stale link (%.0fs budget): %s",
+            per_link_timeout, url,
+        )
         try:
-            fresh = await _extract_content(url, deep=True)
+            fresh = await asyncio.wait_for(
+                _extract_content(url, deep=True),
+                timeout=per_link_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[build] Re-extract TIMED OUT for %s (%.0fs)", url, per_link_timeout)
+            fresh = ""
         except Exception as e:
             logger.warning("[build] Re-extract failed for %s: %s", url, e)
             fresh = ""
@@ -3507,14 +3544,17 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     if not combined_content:
         return {"error": "No content available", "places_created": 0}
 
-    logger.info("[build] Phase 2: Building unified itinerary (%d sources, %d chars, %d days, mode=%s)",
-                len(content_parts), len(combined_content), len(day_plans), trip.get("ai_mode", "eco"))
+    _mark(
+        f"content ready ({len(content_parts)} sources, "
+        f"{len(combined_content)} chars, {len(day_plans)} days)"
+    )
 
     # Phase 3 — classify each source URL with its own content so downstream
     # functions can tell "this came from a D-category structured video → lock
     # its days" from "this was a loose B list → scatter freely". The result
     # lives on trip.traveler_profile["content_classification"] for the rest
     # of the build pipeline to read (see _build_itinerary_eco).
+    _mark("classifying sources (Haiku per URL, parallel)")
     try:
         import anthropic as _anthropic
         cls_client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -3550,6 +3590,7 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
 
     ai_mode = trip.get("ai_mode", "eco")
 
+    _mark(f"generating itinerary (mode={ai_mode})")
     if ai_mode == "pro":
         # Pro mode: agentic loop with tools (validate_places, create_batch_items)
         result = await _build_itinerary_pro(
@@ -3568,21 +3609,23 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
         logger.error("[build] Itinerary generation failed for trip %d: %s", trip_id, result["error"])
         return result
 
+    _mark("marking links as processed (parallel)")
     # Mark all extracted/processing links as processed (preserve content_text!)
-    for link in links:
+    async def _mark_link_processed(link: dict):
         link_status = link.get("status", "")
-        if link_status in ("extracted", "processing"):
-            try:
-                # Merge result into existing extracted_data to preserve content_text
-                existing_data = link.get("extracted_data") or {}
-                merged_data = {**existing_data, **result}
-                await rails.update_link(trip_id, link["id"], status="processed",
-                                        extracted_data=merged_data)
-            except Exception as e:
-                logger.warning("Failed to mark link %d as processed: %s", link["id"], e)
+        if link_status not in ("extracted", "processing"):
+            return
+        try:
+            existing_data = link.get("extracted_data") or {}
+            merged_data = {**existing_data, **result}
+            await rails.update_link(trip_id, link["id"], status="processed",
+                                    extracted_data=merged_data)
+        except Exception as e:
+            logger.warning("Failed to mark link %d as processed: %s", link["id"], e)
 
-    logger.info("[build] Trip %d done: %d places, ~$%.4f",
-                trip_id, result["places_created"], cost.total_cost)
+    await asyncio.gather(*[_mark_link_processed(link) for link in links])
+
+    _mark(f"DONE — {result['places_created']} places, ~${cost.total_cost:.4f}")
     return result
 
 
@@ -3882,6 +3925,10 @@ async def _assign_day_rigidity(
         except (TypeError, ValueError):
             continue
 
+    # Build every patch payload first, compute day_rigidity synchronously.
+    pending_patches: list[tuple[int, int, dict]] = []  # (day_num, dp_id, patch)
+    pace = (content_classification.get("pace_signals") or {}).get("pace")
+
     for dp in day_plans:
         day_num = dp.get("day_number")
         if not isinstance(day_num, int):
@@ -3905,23 +3952,26 @@ async def _assign_day_rigidity(
             patch["origin"] = "ai_created"
             patch["day_type"] = "urban"
 
-        # Inherit pace signal from classifier when available.
-        pace = (content_classification.get("pace_signals") or {}).get("pace")
         if pace:
             patch["estimated_pace"] = pace
 
         day_rigidity[day_num] = rigidity
+        pending_patches.append((day_num, dp["id"], patch))
 
+    # Now fire every PATCH in parallel — before this change a 10-day trip
+    # did 10 sequential round-trips to Rails, which on Render's free tier
+    # (with spin-up latency) could take 5+ seconds by itself.
+    async def _one_patch(day_num: int, dp_id: int, patch: dict):
         try:
-            await rails.update_day_plan(trip["id"], dp["id"], patch)
+            await rails.update_day_plan(trip["id"], dp_id, patch)
             logger.info(
-                "[rigidity] Day %d → %s (origin=%s day_type=%s creator=%s)",
-                day_num, rigidity, patch["origin"], patch["day_type"],
-                patch.get("source_creator_handle"),
+                "[rigidity] Day %d → %s (origin=%s day_type=%s)",
+                day_num, patch.get("rigidity"), patch.get("origin"), patch.get("day_type"),
             )
         except Exception as e:
             logger.warning("[rigidity] Failed to persist day %d: %s", day_num, e)
 
+    await asyncio.gather(*[_one_patch(d, i, p) for d, i, p in pending_patches])
     return day_rigidity
 
 
@@ -4149,6 +4199,9 @@ async def _build_itinerary_eco(
             if isinstance(d, int):
                 items_by_day.setdefault(d, []).append(p)
 
+        # Compute signatures synchronously, then persist every one of them in
+        # parallel so a locked 10-day trip doesn't take 10× Rails round-trips.
+        pending_sigs: list[tuple[int, int, dict]] = []
         for dp in day_plans:
             day_num = dp.get("day_number")
             if not isinstance(day_num, int):
@@ -4157,19 +4210,21 @@ async def _build_itinerary_eco(
                 continue
             signature = _compute_day_signature(items_by_day.get(day_num, []))
             if signature:
-                try:
-                    await rails.update_day_plan(
-                        trip["id"], dp["id"], {"pattern_signature": signature},
-                    )
-                    logger.info(
-                        "[pattern-sig] Day %d → %s",
-                        day_num, signature,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[pattern-sig] Failed to persist day %d: %s",
-                        day_num, e,
-                    )
+                pending_sigs.append((day_num, dp["id"], signature))
+
+        async def _persist_sig(day_num: int, dp_id: int, signature: dict):
+            try:
+                await rails.update_day_plan(
+                    trip["id"], dp_id, {"pattern_signature": signature},
+                )
+                logger.info("[pattern-sig] Day %d → %s", day_num, signature)
+            except Exception as e:
+                logger.warning("[pattern-sig] Failed to persist day %d: %s", day_num, e)
+
+        if pending_sigs:
+            await asyncio.gather(
+                *[_persist_sig(d, i, s) for d, i, s in pending_sigs]
+            )
     except Exception as e:
         logger.warning("[pattern-sig] Non-fatal error in signature step: %s", e)
 
