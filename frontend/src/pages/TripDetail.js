@@ -45,6 +45,7 @@ export default function TripDetail() {
     updateProfile,
     refineItinerary,
     refining,
+    retryBuild,
     addLodging,
     removeLodging,
     fetchTrip,
@@ -195,7 +196,11 @@ export default function TripDetail() {
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
       {showProgressModal && (
-        <GenerationProgressModal phase={pipelinePhase} trip={trip} />
+        <GenerationProgressModal
+          phase={pipelinePhase}
+          trip={trip}
+          onRetry={retryBuild}
+        />
       )}
       {/* Trip header */}
       <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">

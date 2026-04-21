@@ -196,18 +196,27 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
             </p>
             <p className="text-[11px] text-amber-800/80">
               {pt
-                ? "Às vezes um link específico é lento de abrir. Você pode recarregar a página — os lugares já extraídos ficam salvos."
-                : "Sometimes a single link is slow to open. Reload the page — already-extracted places stay saved."}
+                ? "Os lugares já extraídos ficam salvos. Clica abaixo e a IA recomeça a geração de onde parou — você não perde nada."
+                : "Already-extracted places stay saved. Click below and the AI resumes the build from where it stopped — nothing is lost."}
             </p>
-            <button
-              onClick={() => {
-                if (onRetry) onRetry();
-                else window.location.reload();
-              }}
-              className="w-full px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition"
-            >
-              {pt ? "Recarregar página" : "Reload page"}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  if (onRetry) onRetry();
+                  else window.location.reload();
+                }}
+                className="flex-1 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition"
+              >
+                {pt ? "Tentar gerar de novo" : "Retry generation"}
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-3 py-2 rounded-lg border border-amber-300 bg-white hover:bg-amber-50 text-amber-800 text-xs font-semibold transition"
+                title={pt ? "Recarregar a página" : "Reload the page"}
+              >
+                {pt ? "Recarregar" : "Reload"}
+              </button>
+            </div>
           </div>
         )}
       </div>

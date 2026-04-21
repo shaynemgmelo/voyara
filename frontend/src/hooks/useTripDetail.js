@@ -15,6 +15,13 @@ export default function useTripDetail(tripId) {
   const [refining, setRefining] = useState(false);
   const pollRef = useRef(null);
   const analyzeRetried = useRef(false);
+  // Auto-retry for Phase 2 (itinerary build). We stamp the time we first saw
+  // `profile_status === "confirmed" && hasItems === false` and if that state
+  // persists for more than RETRY_BUILD_AFTER_MS, we call resumeProcessing
+  // again. One retry per trip per page-load.
+  const buildStuckSinceRef = useRef(null);
+  const buildRetried = useRef(false);
+  const RETRY_BUILD_AFTER_MS = 90_000;
 
   const fetchTrip = useCallback(async () => {
     setLoading(true);
@@ -78,6 +85,34 @@ export default function useTripDetail(tripId) {
               // Will retry on next poll cycle
               analyzeRetried.current = false;
             }
+          }
+
+          // Auto-retry itinerary build if stuck at "generating" for 90s.
+          // The server build may have died silently (timeout, crash on
+          // Render free tier, etc.). Resubmitting is idempotent — the
+          // backend reuses already-extracted content_text and won't
+          // re-download videos.
+          const generating =
+            data.profile_status === "confirmed" && hasExtracted && !hasItems;
+          if (generating) {
+            if (!buildStuckSinceRef.current) {
+              buildStuckSinceRef.current = Date.now();
+            } else if (
+              !buildRetried.current &&
+              Date.now() - buildStuckSinceRef.current > RETRY_BUILD_AFTER_MS
+            ) {
+              buildRetried.current = true;
+              const anyLink = data.links?.[0];
+              if (anyLink) {
+                try {
+                  await resumeProcessing(anyLink.id, tripId);
+                } catch {
+                  // Will retry only if user reloads (one auto-retry per load).
+                }
+              }
+            }
+          } else {
+            buildStuckSinceRef.current = null;
           }
 
           const keepPolling = hasActive
@@ -300,6 +335,26 @@ export default function useTripDetail(tripId) {
     }));
   };
 
+  // Manual retry of the itinerary build — wired to the stuck-state button
+  // inside GenerationProgressModal. Resets the stuck timer so the user
+  // doesn't hit the escape card again immediately.
+  const retryBuild = useCallback(async () => {
+    const anyLink = trip?.links?.[0];
+    if (!anyLink) {
+      window.location.reload();
+      return;
+    }
+    buildStuckSinceRef.current = null;
+    buildRetried.current = false;
+    try {
+      await resumeProcessing(anyLink.id, tripId);
+    } catch {
+      // If the server is genuinely down, a reload is the next-best escape.
+      window.location.reload();
+    }
+    await fetchTrip();
+  }, [trip, tripId, fetchTrip]);
+
   return {
     trip,
     loading,
@@ -316,6 +371,7 @@ export default function useTripDetail(tripId) {
     updateAiMode,
     updateProfile,
     refineItinerary,
+    retryBuild,
     addLodging,
     removeLodging,
   };
