@@ -202,8 +202,11 @@ export default function useTripDetail(tripId) {
             }
             const stuckFor = Date.now() - buildStuckSinceRef.current;
 
-            // Fast retry path: after 30s, ask the AI service. If it's not
-            // actually building, kick immediately instead of waiting 90s.
+            // Fast retry path: after 30s, ask the AI service. Retry ONLY
+            // if the server says there's no active build AND (was_stale
+            // OR the poll-side heuristic agrees nothing's alive). This
+            // avoids the race where auto-retry kicks while a build is
+            // genuinely mid-flight.
             if (stuckFor > 30_000 && !buildRetried.current) {
               try {
                 const status = await fetchBuildStatus(tripId);
@@ -212,9 +215,16 @@ export default function useTripDetail(tripId) {
                   const anyLink = data.links?.[0];
                   if (anyLink) {
                     try {
-                      await resumeProcessing(anyLink.id, tripId);
+                      const resp = await resumeProcessing(anyLink.id, tripId);
+                      // If the server actually already has a build running
+                      // (status=already_running), reset our retry flag so
+                      // the safety-net timer can try again later.
+                      if (resp?.status === "already_running") {
+                        buildRetried.current = false;
+                        buildStuckSinceRef.current = Date.now();
+                      }
                     } catch {
-                      buildRetried.current = false; // try again next tick
+                      buildRetried.current = false;
                     }
                   }
                 }

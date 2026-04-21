@@ -314,16 +314,44 @@ async def handle_analyze_trip(
 async def handle_resume_processing(
     link_id: int, request: ResumeLinkRequest, background_tasks: BackgroundTasks
 ):
-    """Phase 2: Build unified itinerary after profile confirmation."""
-    logger.info("Resuming processing for trip_id=%d (via link_id=%d)", request.trip_id, link_id)
+    """Phase 2: Build unified itinerary after profile confirmation.
 
-    background_tasks.add_task(
-        _build_itinerary_background, request.trip_id
-    )
+    Deduplicates: if there's already a FRESH active build for this trip
+    (< 4 minutes old, which is our TOTAL_BUDGET_S ceiling), we don't
+    schedule a second one — the auto-retry on the frontend was racing
+    with the original build, letting two workers fight over the same
+    items and leaving profile_status inconsistent. A stale entry (>4
+    min) is treated as dead (worker probably OOM-killed) and cleared so
+    a fresh build can start.
+    """
+    trip_id = request.trip_id
+    existing = active_builds.get(trip_id)
+    if existing:
+        age = time.time() - existing.get("started_at", 0)
+        if age < 240:
+            logger.info(
+                "[resume] trip=%d already building (stage=%s, %ds old) — "
+                "no-op to avoid race",
+                trip_id, existing.get("stage", "?"), int(age),
+            )
+            return ProcessLinkResponse(
+                status="already_running",
+                message=f"Build already running for trip {trip_id} ({int(age)}s)",
+            )
+        # Stale entry — worker probably died. Clear so we can restart.
+        logger.warning(
+            "[resume] trip=%d has STALE active_builds entry (%ds old, "
+            "stage=%s). Clearing + restarting.",
+            trip_id, int(age), existing.get("stage", "?"),
+        )
+        active_builds.pop(trip_id, None)
+
+    logger.info("[resume] trip=%d (via link=%d) — scheduling build", trip_id, link_id)
+    background_tasks.add_task(_build_itinerary_background, trip_id)
 
     return ProcessLinkResponse(
         status="accepted",
-        message=f"Building itinerary for trip {request.trip_id}",
+        message=f"Building itinerary for trip {trip_id}",
     )
 
 
@@ -384,13 +412,14 @@ async def _build_itinerary_background(trip_id: int):
         "stage": "starting",
         "last_log_at": start,
     }
+    logger.info("[build trip=%d] SCHEDULED, budget=%ds", trip_id, int(TOTAL_BUDGET_S))
     try:
         result = await _aio.wait_for(
             build_trip_itinerary(trip_id), timeout=TOTAL_BUDGET_S,
         )
         active_builds.pop(trip_id, None)
         logger.info(
-            "[build-itinerary] Trip %d: %d places created in %.1fs",
+            "[build trip=%d] DONE: %d places in %.1fs",
             trip_id,
             result.get("places_created", 0),
             _t.time() - start,
@@ -398,13 +427,13 @@ async def _build_itinerary_background(trip_id: int):
     except _aio.TimeoutError:
         active_builds.pop(trip_id, None)
         logger.error(
-            "[build-itinerary] Trip %d TIMED OUT after %.0fs — frontend "
-            "auto-retry will re-kick with already-extracted content",
+            "[build trip=%d] TIMED OUT after %.0fs — frontend auto-retry "
+            "will re-kick with already-extracted content",
             trip_id, TOTAL_BUDGET_S,
         )
     except Exception:
         active_builds.pop(trip_id, None)
-        logger.exception("Failed to build itinerary for trip %d", trip_id)
+        logger.exception("[build trip=%d] FAILED", trip_id)
 
 
 @router.post("/enrich-experiences/{trip_id}")
@@ -444,15 +473,28 @@ async def handle_build_status(trip_id: int):
       (a) a build is still running (stage + elapsed reported), and
       (b) no build is active for this trip (frontend should retry if
           the trip still has no items).
+
+    Also clears stale entries automatically: anything older than our
+    TOTAL_BUDGET_S (240s) is assumed dead (worker probably OOM-killed)
+    and removed so the next /resume-processing call can start fresh.
     """
     info = active_builds.get(trip_id)
     if info is None:
         return {"trip_id": trip_id, "active": False}
+    elapsed = time.time() - info.get("started_at", time.time())
+    if elapsed > 240:
+        # Stale — worker died. Clear it so a fresh build can start.
+        active_builds.pop(trip_id, None)
+        logger.warning(
+            "[build-status] trip=%d had STALE active entry (%.0fs) — cleared",
+            trip_id, elapsed,
+        )
+        return {"trip_id": trip_id, "active": False, "was_stale": True}
     return {
         "trip_id": trip_id,
         "active": True,
         "stage": info.get("stage", "running"),
-        "elapsed": round(time.time() - info.get("started_at", time.time()), 1),
+        "elapsed": round(elapsed, 1),
     }
 
 
