@@ -3556,7 +3556,13 @@ async def _call_claude_for_itinerary(
     #   - 10-day trip (~50 items): 70-110s
     # We accept any non-empty result. A retry-after-timeout would fire a
     # SECOND 95s wait, which is how the old "stuck at 95 %" pile-up happened.
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    # max_retries=0 disables the SDK's built-in exponential-backoff retries
+    # on 429/5xx/network blips. Those retries compound silently and can eat
+    # our entire outer budget — we saw them fire twice in production logs
+    # right before a 65s timeout, meaning the SDK spent ~15s of our budget
+    # on its own reattempts. We'd rather fail fast and let the USER retry
+    # (which clears caches anyway) than have hidden retries pile up.
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
 
     try:
         response = await asyncio.wait_for(
