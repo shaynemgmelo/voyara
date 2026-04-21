@@ -5,7 +5,7 @@ import * as linksApi from "../api/links";
 import * as logisticsApi from "../api/logistics";
 import { resumeProcessing, analyzeTrip } from "../api/links";
 import { refineItinerary as refineApi } from "../api/trips";
-import { fetchBuildStatus } from "../api/buildStatus";
+import { fetchBuildStatus, clearStuckBuild } from "../api/buildStatus";
 
 const POLL_INTERVAL = 5000; // 5 seconds
 
@@ -521,8 +521,10 @@ export default function useTripDetail(tripId) {
   };
 
   // Manual retry of the itinerary build — wired to the stuck-state button
-  // inside GenerationProgressModal. Resets the stuck timer so the user
-  // doesn't hit the escape card again immediately.
+  // inside GenerationProgressModal. FORCE-CLEARS any existing active_builds
+  // entry on the server first so the dedup guard in resume-processing
+  // doesn't refuse to restart. Resets the stuck timer so the user doesn't
+  // hit the escape card again immediately.
   const retryBuild = useCallback(async () => {
     const anyLink = trip?.links?.[0];
     if (!anyLink) {
@@ -531,6 +533,14 @@ export default function useTripDetail(tripId) {
     }
     buildStuckSinceRef.current = null;
     buildRetried.current = false;
+    // Step 1: punch through the dedup guard by clearing any stale/fresh
+    // active entry. Safe — if there's no entry, the endpoint is a no-op.
+    try {
+      await clearStuckBuild(tripId);
+    } catch {
+      // ignore — worst case we get already_running from resume-processing
+    }
+    // Step 2: trigger a new build.
     try {
       await resumeProcessing(anyLink.id, tripId);
     } catch {

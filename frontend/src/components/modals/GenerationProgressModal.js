@@ -42,12 +42,12 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
     return () => clearInterval(t);
   }, [phase]);
 
-  // Stuck detection — if we've been on the same phase for more than 2.5 minutes,
-  // offer the user an escape hatch (reload page) instead of leaving them
-  // staring at 95% forever. Timeouts on the backend (added same commit) now
-  // cap each AI call, so hitting this window usually means a network wedge.
+  // Stuck detection — after 90s show the escape card. Backend has a 240s
+  // ceiling per build, but the user shouldn't have to stare at 95% for
+  // 2½ minutes before getting an "try again" button. Also 90s is the
+  // same threshold the hook auto-retry uses, so UI + backend align.
   const elapsedMs = startedAt ? now - startedAt : 0;
-  const stuck = elapsedMs > 150_000; // 2.5 minutes
+  const stuck = elapsedMs > 90_000; // 1.5 minutes
 
   const links = trip?.links || [];
   const extractedCount = links.filter(
@@ -202,33 +202,28 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
           </p>
         )}
         {stuck && (
-          <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 space-y-2">
-            <p className="text-xs text-amber-900 font-semibold">
-              {pt ? "Está demorando mais que o normal" : "Taking longer than usual"}
+          <div className="rounded-xl bg-amber-50 border-2 border-amber-300 p-3 space-y-2">
+            <p className="text-sm text-amber-900 font-bold flex items-center gap-2">
+              <span>⚠️</span>
+              {pt ? "Geração travada?" : "Stuck?"}
             </p>
-            <p className="text-[11px] text-amber-800/80">
+            <p className="text-[11px] text-amber-800/90 leading-relaxed">
               {pt
-                ? "Os lugares já extraídos ficam salvos. Clica abaixo e a IA recomeça a geração de onde parou — você não perde nada."
-                : "Already-extracted places stay saved. Click below and the AI resumes the build from where it stopped — nothing is lost."}
+                ? "O botão abaixo força o servidor a começar de novo, limpando qualquer tentativa anterior presa. Os lugares que já foram extraídos dos seus links ficam salvos — nada é perdido."
+                : "The button below forces the server to start fresh, clearing any stuck previous attempt. Already-extracted places stay saved — nothing is lost."}
             </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  if (onRetry) onRetry();
-                  else window.location.reload();
-                }}
-                className="flex-1 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold transition"
-              >
-                {pt ? "Tentar gerar de novo" : "Retry generation"}
-              </button>
-              <button
-                onClick={() => window.location.reload()}
-                className="px-3 py-2 rounded-lg border border-amber-300 bg-white hover:bg-amber-50 text-amber-800 text-xs font-semibold transition"
-                title={pt ? "Recarregar a página" : "Reload the page"}
-              >
-                {pt ? "Recarregar" : "Reload"}
-              </button>
-            </div>
+            <button
+              onClick={() => {
+                if (onRetry) onRetry();
+                else window.location.reload();
+              }}
+              className="w-full px-4 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white text-sm font-bold transition shadow-md"
+            >
+              🔁 {pt ? "Forçar reiniciar geração" : "Force restart build"}
+            </button>
+            <p className="text-[10px] text-amber-700/70 text-center">
+              {pt ? "(ou recarregue a página)" : "(or reload the page)"}
+            </p>
           </div>
         )}
       </div>

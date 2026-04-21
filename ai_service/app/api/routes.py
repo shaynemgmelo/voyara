@@ -467,6 +467,28 @@ async def handle_optimize_trip(trip_id: int):
         return {"error": str(e), "changed": 0}
 
 
+@router.post("/clear-build/{trip_id}")
+async def handle_clear_build(trip_id: int):
+    """Force-clears any active_builds entry for this trip, no questions
+    asked. Used by the "Forçar reiniciar" button on the progress modal
+    when the user knows the build is truly wedged (dedup guard can't
+    tell for sure — it only knows the entry is younger than 240 s)."""
+    existing = active_builds.pop(trip_id, None)
+    if existing:
+        age = time.time() - existing.get("started_at", time.time())
+        logger.warning(
+            "[clear-build] trip=%d — user force-cleared active entry "
+            "(age=%.0fs, stage=%s)",
+            trip_id, age, existing.get("stage", "?"),
+        )
+        return {
+            "cleared": True,
+            "was_age_s": round(age, 1),
+            "was_stage": existing.get("stage"),
+        }
+    return {"cleared": False}
+
+
 @router.get("/build-status/{trip_id}")
 async def handle_build_status(trip_id: int):
     """Lets the frontend tell the difference between

@@ -21,3 +21,23 @@ export async function fetchBuildStatus(tripId) {
     return { active: false };
   }
 }
+
+/**
+ * Force-clears the server-side active_builds entry for this trip, no
+ * matter how old/young it is. Used by the "Forçar reiniciar" button
+ * when the user knows the build is actually stuck — the dedup guard
+ * in resume-processing only knows about the age of the entry, not its
+ * real liveness, so sometimes we need to punch through.
+ */
+export async function clearStuckBuild(tripId) {
+  try {
+    const resp = await fetch(`${AI_URL}/clear-build/${tripId}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) return { cleared: false };
+    return await resp.json();
+  } catch {
+    return { cleared: false };
+  }
+}
