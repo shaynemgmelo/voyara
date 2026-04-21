@@ -5,6 +5,8 @@ import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import "swiper/css";
 import "swiper/css/navigation";
 import "swiper/css/free-mode";
+// Shared with TripMap so the pill color == pin color on the map.
+import { getDayColor } from "../../utils/colors";
 
 // Elfsight-inspired palette: sage / mint greens with warm accents
 const BRAND = {
@@ -300,6 +302,9 @@ export default function TripTimeline({
           {allDays.map((d, idx) => {
             const isActive = idx === activeDayIdx;
             const count = (d.itinerary_items || []).length;
+            // Same color the map paints the pins with — so the pill is an
+            // instant key for "which pins on the map are mine".
+            const dayColor = getDayColor(d.day_number);
             return (
               <button
                 key={d.id}
@@ -307,17 +312,28 @@ export default function TripTimeline({
                 className={`group flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-full font-semibold text-sm transition-all ${
                   isActive
                     ? "text-white shadow-lg"
-                    : "bg-white border border-slate-200 text-slate-600 hover:border-emerald-300 hover:text-slate-900"
+                    : "bg-white border text-slate-700 hover:shadow-sm"
                 }`}
                 style={
                   isActive
                     ? {
-                        backgroundColor: BRAND.primary,
-                        boxShadow: "0 10px 24px -8px rgba(16,185,129,0.55)",
+                        backgroundColor: dayColor,
+                        boxShadow: `0 10px 24px -8px ${dayColor}88`,
                       }
-                    : {}
+                    : {
+                        borderColor: `${dayColor}55`,
+                      }
                 }
               >
+                {/* Color dot — matches the pin on the map for this day. */}
+                <span
+                  className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+                  style={{
+                    backgroundColor: isActive ? "#ffffff" : dayColor,
+                    boxShadow: isActive ? "0 0 0 2px rgba(255,255,255,0.35)" : "none",
+                  }}
+                  aria-hidden="true"
+                />
                 <span className="text-xs font-bold tracking-wide">
                   DIA {d.day_number}
                 </span>
@@ -326,10 +342,9 @@ export default function TripTimeline({
                 ) : null}
                 <span
                   className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
-                    isActive
-                      ? "bg-white/25 text-white"
-                      : "bg-slate-100 text-slate-500"
+                    isActive ? "bg-white/25 text-white" : "text-white"
                   }`}
+                  style={isActive ? {} : { backgroundColor: dayColor }}
                 >
                   {count}
                 </span>
