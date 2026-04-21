@@ -30,19 +30,37 @@ export async function analyzeUrlsDeep(urls, onProgress) {
   const { job_id } = await startResp.json();
   if (!job_id) throw new Error("No job_id returned");
 
-  // Poll every 2s, up to 3 minutes
+  // Poll every 2s, up to 3 minutes. Stop IMMEDIATELY on any terminal signal
+  // — ready / error / expired / repeated-404 / network error — so a stale
+  // job_id (e.g. from a worker restart) can never spam the server in a tight
+  // loop. Consecutive failures are also capped so we give up gracefully.
   const maxWaitMs = 180_000;
   const pollMs = 2000;
+  const maxConsecutiveFailures = 3;
   const started = Date.now();
+  let consecutiveFailures = 0;
 
   while (Date.now() - started < maxWaitMs) {
     await new Promise((r) => setTimeout(r, pollMs));
 
-    const statusResp = await fetch(`${AI_URL}/analyze-url/status/${job_id}`);
-    if (!statusResp.ok) {
-      if (statusResp.status === 404) throw new Error("Job expired");
+    let statusResp;
+    try {
+      statusResp = await fetch(`${AI_URL}/analyze-url/status/${job_id}`);
+    } catch (e) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw new Error("Network unavailable during deep analysis");
+      }
       continue;
     }
+
+    // Any non-2xx treated as terminal — avoids tight 404 loops when the
+    // worker restarted and the in-memory job store was wiped.
+    if (!statusResp.ok) {
+      throw new Error(`Job unavailable (${statusResp.status})`);
+    }
+    consecutiveFailures = 0;
+
     const info = await statusResp.json();
 
     if (onProgress && info.stage) {
@@ -52,6 +70,10 @@ export async function analyzeUrlsDeep(urls, onProgress) {
     if (info.status === "ready") return info.result;
     if (info.status === "error") {
       throw new Error(info.error || "Deep analysis failed");
+    }
+    // New terminal state from backend: worker restart wiped the job store.
+    if (info.status === "expired") {
+      throw new Error(info.error || "Job expired — please retry");
     }
   }
 

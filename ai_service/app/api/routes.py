@@ -149,10 +149,26 @@ async def analyze_url_start(
 @router.get("/analyze-url/status/{job_id}")
 async def analyze_url_status(job_id: str):
     """Poll-friendly status endpoint. Returns
-    {status: 'pending'|'ready'|'error', stage, result, error}."""
+    {status: 'pending'|'ready'|'error'|'expired', stage, result, error}.
+
+    Returns 200 with status="expired" (not 404) for missing jobs so that:
+      (a) polling clients have a terminal state to stop on, and
+      (b) a worker restart that wipes the in-memory job store doesn't leave
+          old browser tabs hammering the endpoint in a tight 404 loop.
+    """
     info = analyze_jobs.get(job_id)
     if info is None:
-        raise HTTPException(status_code=404, detail="job not found")
+        return {
+            "job_id": job_id,
+            "status": "expired",
+            "stage": "unknown",
+            "result": None,
+            "error": (
+                "Job não encontrado — provavelmente o servidor reiniciou. "
+                "Reenvie o link para começar uma nova análise."
+            ),
+            "elapsed": 0,
+        }
     return {
         "job_id": job_id,
         "status": info.get("status"),
