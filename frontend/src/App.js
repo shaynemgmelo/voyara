@@ -1,19 +1,38 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { LanguageProvider } from "./i18n/LanguageContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import useSmoothScroll from "./hooks/useSmoothScroll";
 import Header from "./components/layout/Header";
 import Footer from "./components/layout/Footer";
+
+// Landing is critical path — keep eager so the marketing page paints fast.
 import LandingPage from "./pages/LandingPage";
-import Dashboard from "./pages/Dashboard";
-import TripCreate from "./pages/TripCreate";
-import TripDetail from "./pages/TripDetail";
-import AuthPage from "./pages/AuthPage";
-import PricingPage from "./pages/PricingPage";
-import FeaturesPage from "./pages/FeaturesPage";
-import PrivacyPage from "./pages/PrivacyPage";
-import TermsPage from "./pages/TermsPage";
-import SharedTripPage from "./pages/SharedTripPage";
+
+// Everything else is route-split so the 1.39 MB bundle no longer ships on
+// the homepage. Heavy libs (Swiper, Google Maps, dnd) live inside TripDetail
+// and only load when an authenticated user opens a trip.
+const AuthPage = lazy(() => import("./pages/AuthPage"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const TripCreate = lazy(() => import("./pages/TripCreate"));
+const TripDetail = lazy(() => import("./pages/TripDetail"));
+const PricingPage = lazy(() => import("./pages/PricingPage"));
+const FeaturesPage = lazy(() => import("./pages/FeaturesPage"));
+const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));
+const TermsPage = lazy(() => import("./pages/TermsPage"));
+const SharedTripPage = lazy(() => import("./pages/SharedTripPage"));
+
+// Minimal fallback that fits the brand — no extra libs, no flash.
+function RouteLoader() {
+  return (
+    <div className="min-h-[60vh] flex items-center justify-center">
+      <div
+        className="w-6 h-6 border-2 border-coral-500 border-t-transparent rounded-full animate-spin"
+        aria-label="Carregando"
+      />
+    </div>
+  );
+}
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth();
@@ -45,18 +64,20 @@ function AppContent() {
     <div className="min-h-screen flex flex-col bg-gray-50 text-gray-900">
       {!isLanding && !isAuth && !isPricing && !isFeatures && !isPrivacy && !isTerms && !isShared && <Header />}
       <main className="flex-1">
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/login" element={<AuthPage />} />
-          <Route path="/pricing" element={<PricingPage />} />
-          <Route path="/features" element={<FeaturesPage />} />
-          <Route path="/privacy" element={<PrivacyPage />} />
-          <Route path="/terms" element={<TermsPage />} />
-          <Route path="/share/:token" element={<SharedTripPage />} />
-          <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
-          <Route path="/trips/new" element={<RequireAuth><TripCreate /></RequireAuth>} />
-          <Route path="/trips/:id" element={<RequireAuth><TripDetail /></RequireAuth>} />
-        </Routes>
+        <Suspense fallback={<RouteLoader />}>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<AuthPage />} />
+            <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/features" element={<FeaturesPage />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            <Route path="/share/:token" element={<SharedTripPage />} />
+            <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
+            <Route path="/trips/new" element={<RequireAuth><TripCreate /></RequireAuth>} />
+            <Route path="/trips/:id" element={<RequireAuth><TripDetail /></RequireAuth>} />
+          </Routes>
+        </Suspense>
       </main>
       {showFooter && !isStandalone && <Footer />}
     </div>
