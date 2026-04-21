@@ -15,7 +15,8 @@ import VibeTagFilter from "../components/itinerary/VibeTagFilter";
 import SchedulePreview from "../components/itinerary/SchedulePreview";
 import TravelerProfileCard from "../components/trips/TravelerProfileCard";
 import CityTabs from "../components/itinerary/CityTabs";
-import ProcessingStatus from "../components/trips/ProcessingStatus";
+import ProcessingStatus, { detectPhase } from "../components/trips/ProcessingStatus";
+import GenerationProgressModal from "../components/modals/GenerationProgressModal";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -183,8 +184,19 @@ export default function TripDetail() {
     }
   };
 
+  // Phase 5.5 — heavy pipeline phases open a full-screen progress modal
+  // instead of a tiny inline pulse. Shared phase detection with
+  // ProcessingStatus so extracting stays inline and the modal only covers
+  // analyzing + generating.
+  const pipelinePhase = detectPhase(trip).phase;
+  const showProgressModal =
+    pipelinePhase === "analyzing" || pipelinePhase === "generating";
+
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
+      {showProgressModal && (
+        <GenerationProgressModal phase={pipelinePhase} trip={trip} />
+      )}
       {/* Trip header */}
       <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">
         <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 transition-colors">
