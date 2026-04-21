@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { DragDropContext } from "@hello-pangea/dnd";
 import useTripDetail from "../hooks/useTripDetail";
@@ -56,9 +56,9 @@ export default function TripDetail() {
   const [selectedDayNumber, setSelectedDayNumber] = useState(null);
   const [hoveredItemId, setHoveredItemId] = useState(null);
   const [geoModalDismissed, setGeoModalDismissed] = useState(false);
-  const [optimizing, setOptimizing] = useState(false);
-  const [optimizeToast, setOptimizeToast] = useState(null);
-  const [enrichingExp, setEnrichingExp] = useState(false);
+  // Tracks whether we've already run silent auto-enrichment on this trip
+  // in this browser session, so navigating away and back doesn't re-run it.
+  const autoEnrichedRef = useRef(false);
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === "undefined") return "list";
     return localStorage.getItem("mapass.viewMode") || "timeline";
@@ -123,6 +123,37 @@ export default function TripDetail() {
     );
     return [...tags].sort();
   }, [trip]);
+
+  // Compute pipeline phase here (before any early return) so the silent
+  // auto-enrich effect below can use it as a dependency without breaking
+  // Rules of Hooks.
+  const pipelinePhase = detectPhase(trip).phase;
+
+  // Silent auto-enrichment for trips built BEFORE the experience feature
+  // existed. If the trip has items but none are tagged "experiencia", we
+  // fire a background enrich + optimize once per session. Zero UI chrome —
+  // the user just sees new cards appear naturally after the next poll tick.
+  useEffect(() => {
+    if (!trip || !id) return;
+    if (autoEnrichedRef.current) return;
+    if (pipelinePhase === "generating" || pipelinePhase === "analyzing") return;
+
+    const items = (trip.day_plans || []).flatMap(
+      (dp) => dp.itinerary_items || []
+    );
+    if (items.length === 0) return;
+    const hasExperience = items.some((i) =>
+      Array.isArray(i.vibe_tags) && i.vibe_tags.includes("experiencia")
+    );
+    if (hasExperience) return;
+
+    autoEnrichedRef.current = true;
+    (async () => {
+      try { await enrichTripExperiences(id); } catch {}
+      try { await optimizeTripRouting(id); } catch {}
+      try { await fetchTrip(); } catch {}
+    })();
+  }, [trip, id, pipelinePhase, fetchTrip]);
 
   if (loading) {
     return (
@@ -193,7 +224,6 @@ export default function TripDetail() {
   // instead of a tiny inline pulse. Shared phase detection with
   // ProcessingStatus so extracting stays inline and the modal only covers
   // analyzing + generating.
-  const pipelinePhase = detectPhase(trip).phase;
   const showProgressModal =
     pipelinePhase === "analyzing" || pipelinePhase === "generating";
 
@@ -317,67 +347,12 @@ export default function TripDetail() {
             onCityChange={setActiveCity}
           />
 
-          {/* View toggle + optimize route button */}
+          {/* View toggle. Routing + experiences used to live here as
+              buttons, but the user asked for those to be automatic
+              (zero clicks). Now they run during trip creation AND, for
+              trips built before those features existed, silently on
+              first mount via the useEffect below. */}
           <div className="flex justify-end items-center gap-3 mb-4">
-            <button
-              onClick={async () => {
-                if (optimizing) return;
-                setOptimizing(true);
-                try {
-                  const result = await optimizeTripRouting(id);
-                  await fetchTrip();
-                  const msg =
-                    result?.summary ||
-                    (result?.changed
-                      ? `${result.changed} itens reorganizados`
-                      : "Rota já estava otimizada");
-                  setOptimizeToast(msg);
-                  setTimeout(() => setOptimizeToast(null), 3500);
-                } catch (e) {
-                  setOptimizeToast("Não foi possível otimizar agora");
-                  setTimeout(() => setOptimizeToast(null), 3500);
-                } finally {
-                  setOptimizing(false);
-                }
-              }}
-              disabled={optimizing}
-              className="px-3 py-1.5 rounded-xl text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white shadow-sm disabled:opacity-50 disabled:cursor-wait transition"
-              title="Reorganiza os itens de cada dia pela ordem mais curta no mapa e realinha os horários."
-            >
-              {optimizing ? "⏳ Otimizando..." : "🧭 Otimizar rota"}
-            </button>
-            <button
-              onClick={async () => {
-                if (enrichingExp) return;
-                setEnrichingExp(true);
-                try {
-                  const result = await enrichTripExperiences(id);
-                  await fetchTrip();
-                  const msg =
-                    result?.summary ||
-                    (result?.added
-                      ? `${result.added} experiências adicionadas`
-                      : "Nenhuma experiência nova");
-                  setOptimizeToast(msg);
-                  setTimeout(() => setOptimizeToast(null), 3500);
-                } catch {
-                  setOptimizeToast("Não foi possível adicionar agora");
-                  setTimeout(() => setOptimizeToast(null), 3500);
-                } finally {
-                  setEnrichingExp(false);
-                }
-              }}
-              disabled={enrichingExp}
-              className="px-3 py-1.5 rounded-xl text-sm font-semibold bg-violet-500 hover:bg-violet-600 text-white shadow-sm disabled:opacity-50 disabled:cursor-wait transition"
-              title="Adiciona experiências clássicas do destino (show de tango em BA, passeio de Vespa em Roma, buggy em Jeri, etc.)"
-            >
-              {enrichingExp ? "⏳ Adicionando..." : "🎭 Adicionar experiências"}
-            </button>
-            {optimizeToast && (
-              <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1">
-                {optimizeToast}
-              </span>
-            )}
             <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
               <button
                 onClick={() => switchView("timeline")}
