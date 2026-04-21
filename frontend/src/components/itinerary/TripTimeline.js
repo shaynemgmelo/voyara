@@ -188,14 +188,18 @@ function ItemCard({
             </button>
           )}
           {dragHandleProps && (
+            // Drag handle — emerald so it stands out from swap/delete, with
+            // a text label that slides out on hover so first-time users
+            // instantly see what it does.
             <div
               {...dragHandleProps}
               onClick={(e) => e.stopPropagation()}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onTouchStart={(e) => e.stopPropagation()}
-              className="w-8 h-8 rounded-lg bg-black/70 hover:bg-emerald-600 backdrop-blur-sm flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
-              title="Arrastar para reordenar"
+              className="group/drag h-8 px-2 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 backdrop-blur-sm flex items-center gap-1.5 cursor-grab active:cursor-grabbing transition-all"
+              title="Arraste para reordenar — os horários se ajustam sozinhos"
+              aria-label="Arrastar para reordenar"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="9" cy="5" r="1" />
@@ -205,6 +209,9 @@ function ItemCard({
                 <circle cx="15" cy="12" r="1" />
                 <circle cx="15" cy="19" r="1" />
               </svg>
+              <span className="text-white text-[10px] font-semibold max-w-0 overflow-hidden group-hover/drag:max-w-[80px] transition-all duration-200 whitespace-nowrap">
+                Arraste
+              </span>
             </div>
           )}
         </div>
@@ -282,13 +289,21 @@ export default function TripTimeline({
     });
     if (!result.destination) return;
     if (result.source.index === result.destination.index) return;
-    if (onReorder) {
-      onReorder({
-        dayPlanId: parseInt(result.source.droppableId, 10),
-        fromIndex: result.source.index,
-        toIndex: result.destination.index,
-      });
-    }
+    if (!onReorder) return;
+
+    // Build the full ordered itemIds array so the hook can persist + update
+    // time slots. Before this the parent was passing (dayPlanId, fromIdx,
+    // toIdx) to a function that expected (dayPlanId, itemIds[]) — drag-drop
+    // never actually persisted to the backend.
+    const dayPlanId = parseInt(result.source.droppableId, 10);
+    const day = allDays.find((d) => d.id === dayPlanId);
+    if (!day) return;
+    const originalItems = day.itinerary_items || [];
+    const reordered = Array.from(originalItems);
+    const [moved] = reordered.splice(result.source.index, 1);
+    reordered.splice(result.destination.index, 0, moved);
+    const itemIds = reordered.map((i) => i.id);
+    onReorder({ dayPlanId, itemIds });
   };
 
   const day = allDays[activeDayIdx];

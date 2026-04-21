@@ -363,8 +363,8 @@ export default function TripDetail() {
               dayPlans={(activeCity
                 ? trip.day_plans?.filter((dp) => dp.city === activeCity)
                 : trip.day_plans) || []}
-              onReorder={({ dayPlanId, fromIndex, toIndex }) =>
-                reorderItems(dayPlanId, fromIndex, toIndex)
+              onReorder={({ dayPlanId, itemIds }) =>
+                reorderItems(dayPlanId, itemIds)
               }
               onItemClick={(itemId, dayPlanId) => {
                 const dp = trip.day_plans?.find((d) => d.id === dayPlanId);

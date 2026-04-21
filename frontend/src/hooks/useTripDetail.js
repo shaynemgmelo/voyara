@@ -316,20 +316,40 @@ export default function useTripDetail(tripId) {
   };
 
   const reorderItems = async (dayPlanId, itemIds) => {
-    // Optimistic update
+    // Default rhythm — reassigned by POSITION so the card at position 0
+    // always shows morning (10:00) even after the user drags a different
+    // item into slot 0. Matches the backend's _optimize_day_proximity.
+    const slotByPosition = ["10:00", "12:30", "14:30", "16:30", "19:00"];
+
+    // Optimistic update: new order + fresh time_slots + fresh positions.
     setTrip((prev) => ({
       ...prev,
       day_plans: prev.day_plans.map((dp) => {
         if (dp.id !== dayPlanId) return dp;
-        const ordered = itemIds.map((id) =>
-          dp.itinerary_items.find((i) => i.id === id)
-        );
+        const ordered = itemIds.map((id, idx) => {
+          const item = dp.itinerary_items.find((i) => i.id === id);
+          if (!item) return null;
+          const next = { ...item, position: idx };
+          if (idx < slotByPosition.length) next.time_slot = slotByPosition[idx];
+          return next;
+        }).filter(Boolean);
         return { ...dp, itinerary_items: ordered };
       }),
     }));
 
     try {
+      // Persist the new order (updates `position` on each item).
       await itemsApi.reorderItems(tripId, dayPlanId, itemIds);
+      // Persist the fresh time_slots in parallel so the map + the list
+      // reflect the new rhythm. Each PATCH is fire-and-forget for the UI
+      // because we already did the optimistic update above.
+      await Promise.all(
+        itemIds.slice(0, slotByPosition.length).map((id, idx) =>
+          itemsApi
+            .updateItem(tripId, dayPlanId, id, { time_slot: slotByPosition[idx] })
+            .catch(() => null)
+        )
+      );
     } catch {
       fetchTrip(); // rollback
     }
@@ -341,7 +361,16 @@ export default function useTripDetail(tripId) {
     itemId,
     destIndex
   ) => {
-    // Optimistic update
+    const slotByPosition = ["10:00", "12:30", "14:30", "16:30", "19:00"];
+    const reassignSlots = (items) =>
+      items.map((it, idx) =>
+        idx < slotByPosition.length
+          ? { ...it, time_slot: slotByPosition[idx] }
+          : it
+      );
+
+    // Optimistic update — moves the item AND reassigns time_slots on both
+    // days so the rhythm 10:00/12:30/14:30/16:30/19:00 stays intact.
     setTrip((prev) => {
       const newDayPlans = prev.day_plans.map((dp) => ({
         ...dp,
@@ -357,11 +386,29 @@ export default function useTripDetail(tripId) {
       item.day_plan_id = destDayId;
       destDp.itinerary_items.splice(destIndex, 0, item);
 
+      sourceDp.itinerary_items = reassignSlots(sourceDp.itinerary_items);
+      destDp.itinerary_items = reassignSlots(destDp.itinerary_items);
+
       return { ...prev, day_plans: newDayPlans };
     });
 
     try {
       await itemsApi.moveItem(tripId, sourceDayId, itemId, destDayId, destIndex);
+      // Persist fresh time_slots on both days.
+      const after = await tripsApi.getTrip(tripId);
+      const touchedDays = [sourceDayId, destDayId];
+      for (const dayId of touchedDays) {
+        const dp = after.day_plans?.find((d) => d.id === dayId);
+        if (!dp) continue;
+        await Promise.all(
+          (dp.itinerary_items || []).slice(0, slotByPosition.length).map(
+            (it, idx) =>
+              itemsApi
+                .updateItem(tripId, dayId, it.id, { time_slot: slotByPosition[idx] })
+                .catch(() => null)
+          )
+        );
+      }
     } catch {
       fetchTrip(); // rollback
     }
