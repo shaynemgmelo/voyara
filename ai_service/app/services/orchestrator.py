@@ -3406,6 +3406,16 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     _t0 = _time.time()
     def _mark(stage: str) -> None:
         logger.info("[build t=%.1fs] %s", _time.time() - _t0, stage)
+        # Update the active_builds registry (best-effort) so
+        # /build-status/{trip_id} can report what's happening right now.
+        try:
+            from app.api.routes import active_builds as _ab
+            info = _ab.get(trip_id)
+            if info is not None:
+                info["stage"] = stage
+                info["last_log_at"] = _time.time()
+        except Exception:
+            pass
 
     rails = RailsClient(client=http_client)
     places = GooglePlacesClient(http_client=http_client)

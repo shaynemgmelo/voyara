@@ -5,6 +5,7 @@ import * as linksApi from "../api/links";
 import * as logisticsApi from "../api/logistics";
 import { resumeProcessing, analyzeTrip } from "../api/links";
 import { refineItinerary as refineApi } from "../api/trips";
+import { fetchBuildStatus } from "../api/buildStatus";
 
 const POLL_INTERVAL = 5000; // 5 seconds
 
@@ -76,14 +77,41 @@ export default function useTripDetail(tripId) {
   //   - When the build completes while the tab is backgrounded we fire a
   //     browser notification (with user permission) so they get pinged.
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible" && tripId) {
-        fetchTrip();
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible" || !tripId) return;
+      // Refetch immediately so the user sees current trip state.
+      await fetchTrip();
+      // If we're in generating phase, also probe the AI service to see if
+      // the build is really still running — if it died while the tab was
+      // backgrounded, retry IMMEDIATELY instead of waiting for the timer.
+      const t = trip;
+      if (
+        t
+        && t.profile_status === "confirmed"
+        && t.links?.some((l) => l.status === "extracted")
+        && !t.day_plans?.some((dp) => dp.itinerary_items?.length > 0)
+      ) {
+        try {
+          const status = await fetchBuildStatus(tripId);
+          if (!status.active && !buildRetried.current) {
+            buildRetried.current = true;
+            const anyLink = t.links?.[0];
+            if (anyLink) {
+              try {
+                await resumeProcessing(anyLink.id, tripId);
+              } catch {
+                buildRetried.current = false;
+              }
+            }
+          }
+        } catch {
+          // ignore probe errors
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [tripId, fetchTrip]);
+  }, [tripId, fetchTrip, trip]);
 
   // Ask for notification permission the first time we see the build phase.
   // Quiet failure — declined permission just means no background ping.
@@ -159,19 +187,47 @@ export default function useTripDetail(tripId) {
             }
           }
 
-          // Auto-retry itinerary build if stuck at "generating" for 90s.
-          // The server build may have died silently (timeout, crash on
-          // Render free tier, etc.). Resubmitting is idempotent — the
-          // backend reuses already-extracted content_text and won't
-          // re-download videos.
+          // Auto-retry itinerary build if stuck at "generating".
+          // Heuristics:
+          //   - First check: after 30s in "generating", ask the AI service
+          //     directly if a build is active. If it says active=false,
+          //     retry IMMEDIATELY (no need to wait 90s — the worker already
+          //     died silently).
+          //   - Otherwise, fall back to the 90s timer as a safety net.
           const generating =
             data.profile_status === "confirmed" && hasExtracted && !hasItems;
           if (generating) {
             if (!buildStuckSinceRef.current) {
               buildStuckSinceRef.current = Date.now();
-            } else if (
-              !buildRetried.current &&
-              Date.now() - buildStuckSinceRef.current > RETRY_BUILD_AFTER_MS
+            }
+            const stuckFor = Date.now() - buildStuckSinceRef.current;
+
+            // Fast retry path: after 30s, ask the AI service. If it's not
+            // actually building, kick immediately instead of waiting 90s.
+            if (stuckFor > 30_000 && !buildRetried.current) {
+              try {
+                const status = await fetchBuildStatus(tripId);
+                if (!status.active) {
+                  buildRetried.current = true;
+                  const anyLink = data.links?.[0];
+                  if (anyLink) {
+                    try {
+                      await resumeProcessing(anyLink.id, tripId);
+                    } catch {
+                      buildRetried.current = false; // try again next tick
+                    }
+                  }
+                }
+              } catch {
+                // Ignore probe errors; fall through to the time-based retry.
+              }
+            }
+
+            // Safety-net timer — fires even if the AI service /build-status
+            // probe failed or kept saying active=true but nothing progressed.
+            if (
+              stuckFor > RETRY_BUILD_AFTER_MS
+              && !buildRetried.current
             ) {
               buildRetried.current = true;
               const anyLink = data.links?.[0];
@@ -179,7 +235,7 @@ export default function useTripDetail(tripId) {
                 try {
                   await resumeProcessing(anyLink.id, tripId);
                 } catch {
-                  // Will retry only if user reloads (one auto-retry per load).
+                  buildRetried.current = false;
                 }
               }
             }

@@ -124,7 +124,10 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
       aria-label={pt ? "Gerando roteiro" : "Generating itinerary"}
     >
       <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 space-y-6">
-        {/* Header + big number */}
+        {/* Header + big number + elapsed timer (so the user sees
+             something moving even when the % is asymptotically holding
+             near 95). The seconds tick even while the tab was backgrounded
+             because `now` is a wall-clock delta. */}
         <div className="text-center">
           <div className="text-4xl mb-1">
             {steps.find((s) => s.state === "active")?.icon || "✨"}
@@ -137,6 +140,15 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
               ? "Estamos montando sua viagem..."
               : "We're building your trip..."}
           </p>
+          {startedAt && (
+            <p className="text-[11px] text-gray-400 mt-1 tabular-nums">
+              ⏱ {Math.floor(elapsedMs / 1000)}s
+              {" "}
+              {pt
+                ? "(continua rodando mesmo se você trocar de aba)"
+                : "(keeps running even if you switch tabs)"}
+            </p>
+          )}
         </div>
 
         {/* Progress bar */}

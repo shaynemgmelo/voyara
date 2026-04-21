@@ -39,6 +39,12 @@ processing_status: dict[int, dict] = {}
 # Async analyze jobs — key: job_id, value: {status, result, started_at, urls}
 analyze_jobs: dict[str, dict[str, Any]] = {}
 
+# Active itinerary builds — key: trip_id, value: {started_at, stage, last_log_at}
+# The frontend hits /build-status/{trip_id} to check liveness. If a trip_id
+# isn't in this dict, the build either never started, crashed, or already
+# finished. In the last case the Rails day_plans will show items.
+active_builds: dict[int, dict[str, Any]] = {}
+
 _JOB_TTL_SECONDS = 60 * 15  # 15 minutes; old jobs get GC'd lazily
 
 
@@ -367,16 +373,20 @@ async def _analyze_trip_background(trip_id: int):
 async def _build_itinerary_background(trip_id: int):
     import asyncio as _aio
     import time as _t
-    # Hard ceiling on the whole build. If something new wedges, the
-    # frontend auto-retry (90s threshold) will kick in — with 240s total
-    # worst case on our side, two retries still fit inside 9 minutes
-    # of total patience. Typical fast-path builds finish in 30-60s.
     TOTAL_BUDGET_S = 240.0
     start = _t.time()
+    # Register this build so /build-status/{trip_id} can tell the frontend
+    # whether the trip is actively being built or silently died.
+    active_builds[trip_id] = {
+        "started_at": start,
+        "stage": "starting",
+        "last_log_at": start,
+    }
     try:
         result = await _aio.wait_for(
             build_trip_itinerary(trip_id), timeout=TOTAL_BUDGET_S,
         )
+        active_builds.pop(trip_id, None)
         logger.info(
             "[build-itinerary] Trip %d: %d places created in %.1fs",
             trip_id,
@@ -384,13 +394,33 @@ async def _build_itinerary_background(trip_id: int):
             _t.time() - start,
         )
     except _aio.TimeoutError:
+        active_builds.pop(trip_id, None)
         logger.error(
             "[build-itinerary] Trip %d TIMED OUT after %.0fs — frontend "
             "auto-retry will re-kick with already-extracted content",
             trip_id, TOTAL_BUDGET_S,
         )
     except Exception:
+        active_builds.pop(trip_id, None)
         logger.exception("Failed to build itinerary for trip %d", trip_id)
+
+
+@router.get("/build-status/{trip_id}")
+async def handle_build_status(trip_id: int):
+    """Lets the frontend tell the difference between
+      (a) a build is still running (stage + elapsed reported), and
+      (b) no build is active for this trip (frontend should retry if
+          the trip still has no items).
+    """
+    info = active_builds.get(trip_id)
+    if info is None:
+        return {"trip_id": trip_id, "active": False}
+    return {
+        "trip_id": trip_id,
+        "active": True,
+        "stage": info.get("stage", "running"),
+        "elapsed": round(time.time() - info.get("started_at", time.time()), 1),
+    }
 
 
 async def _process_link_background(
