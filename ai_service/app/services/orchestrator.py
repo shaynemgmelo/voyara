@@ -3221,13 +3221,42 @@ async def _suggest_destination_experiences(
         )
         return []
 
-    days_str = ", ".join(str(d) for d in flexible_days)
+    # Group what's already on each day so Haiku can see distribution +
+    # match themes (tango → day with San Telmo / nightlife; boat → day
+    # with Puerto Madero / waterfront). This is the core concierge brain
+    # — experiences can't land on random days anymore.
+    items_by_day: dict[int, list[dict]] = {}
+    for it in existing_items:
+        d = it.get("day") or it.get("day_number")
+        if isinstance(d, int):
+            items_by_day.setdefault(d, []).append(it)
 
-    # Hint Haiku with what the videos said about each day — so if the
-    # creator mentioned "tango" on Day 3, the show lands on Day 3 instead
-    # of a random flexible day. We include the raw day→places map and
-    # tell Haiku explicitly to match experiences to the day their theme
-    # was first mentioned.
+    day_summary_lines: list[str] = []
+    for d in range(1, num_days + 1):
+        rigidity = day_rigidity.get(d, "flexible")
+        items_on_day = items_by_day.get(d, [])
+        names = ", ".join(i.get("name", "?") for i in items_on_day) or "(vazio)"
+        count = len(items_on_day)
+        tag = "LOCKED" if rigidity == "locked" else "flexível"
+        day_summary_lines.append(
+            f"  Dia {d} [{tag}, {count} itens]: {names}"
+        )
+    day_summary = "\n".join(day_summary_lines)
+
+    # How many experiences ALREADY exist on each day (so we don't double-stack).
+    existing_exp_per_day: dict[int, int] = {}
+    for it in existing_items:
+        d = it.get("day") or it.get("day_number")
+        tags = it.get("vibe_tags") or []
+        if isinstance(d, int) and "experiencia" in tags:
+            existing_exp_per_day[d] = existing_exp_per_day.get(d, 0) + 1
+
+    cap_per_day = ", ".join(
+        f"Dia {d}: já tem {existing_exp_per_day[d]} experiência(s) — evite"
+        for d in existing_exp_per_day
+    ) or "(nenhuma)"
+
+    # Optional: video theme map
     video_hint = ""
     if video_day_mentions:
         lines = []
@@ -3239,41 +3268,57 @@ async def _suggest_destination_experiences(
             video_hint = (
                 "\n\nCONTEXTO DO VÍDEO (dias → lugares/menções):\n"
                 + "\n".join(lines)
-                + "\n\nSe a experiência se encaixa tematicamente com algum desses "
-                "dias (ex: show de tango → dia que menciona tango ou San Telmo; "
-                "passeio de barco → dia perto de Puerto Madero/Tigre), USE esse dia."
             )
 
-    prompt = f"""You are a travel expert. A traveler is going to {destination}.
-List the 3-5 SIGNATURE EXPERIENCES every visitor should do there — the
-activities locals and guidebooks agree define the place.
+    prompt = f"""Você é um concierge de viagem experiente montando um roteiro
+para {destination}. Seu trabalho NÃO é listar experiências aleatórias — é
+DISTRIBUIR experiências nos dias certos do jeito que um concierge
+profissional faria, considerando tema, ritmo, bairro e o que a pessoa já
+tem planejado em cada dia.
 
-Think concretely about THIS destination. Examples from other places:
-- Buenos Aires: show de tango, aula de tango, passeio de barco pelo Rio da Prata
-- Roma: passeio de Vespa, tour gastronômico de Trastevere, aperitivo ao pôr do sol
-- Capri: passeio de barco ao redor da ilha, blue grotto, jantar em Marina Piccola
-- Jericoacoara: passeio de buggy dia inteiro, quadriciclo nas dunas, cavalgada na praia
-- Kyoto: aula de chá, caminhada noturna em Gion, experiência de kimono
-- Marrakech: jantar em riad tradicional, passeio de camelo no deserto, hammam
+═══ ESTADO ATUAL DO ROTEIRO ═══
+{day_summary}
 
-Focus on EXPERIENCES (activities), not fixed landmarks. Think: "what
-would I regret not doing on a trip to {destination}?"
-
+Experiências já adicionadas por dia: {cap_per_day}
 {video_hint}
 
-Return ONLY a JSON array of 3-5 items (no more):
-[{{"name": "Nome da experiência", "category": "activity", "day": <number 1-{num_days}, use one of: {days_str}>, "time_slot": "HH:MM", "duration_minutes": <60-360>, "description": "2 sentences in Brazilian Portuguese explaining why this is unmissable.", "notes": "Practical tip in pt-BR.", "vibe_tags": ["experiencia", "cultural"]}}]
+═══ SUA TAREFA ═══
+Sugira 3-5 experiências ASSINATURA de {destination} e coloque cada uma
+no DIA CORRETO. Pense como concierge, não como quem faz lista aleatória.
 
-RULES:
-- Names concrete: "passeio de barco ao redor de Capri" not just "boat tour".
-- Skip experiences already in this itinerary:
-  {sorted(existing_names_lower) if existing_names_lower else '(empty)'}
-- Use days from this flexible list ONLY: {days_str}
-- IF the video mentioned a theme related to this experience on a specific
-  day (see CONTEXTO DO VÍDEO above), place the experience on THAT day.
-  Otherwise pick a day + time_slot that fits naturally
-  (boat tours → morning 10:00, shows → 20:00-21:00, food tours → 18:00).
-- description and notes in PERFECT Brazilian Portuguese with accents."""
+Exemplos do nível esperado por destino:
+- Buenos Aires: show de tango, aula de tango, passeio de barco pelo Rio da Prata, jantar com parrilla
+- Roma: passeio de Vespa, tour gastronômico de Trastevere, aperitivo ao pôr do sol no Gianicolo
+- Capri: passeio de barco ao redor da ilha, Gruta Azul, jantar em Marina Piccola
+- Jericoacoara: buggy dia inteiro nas dunas, cavalgada na praia, pôr do sol na Duna do Pôr do Sol
+- Kyoto: cerimônia do chá, caminhada noturna em Gion, experiência de kimono
+- Marrakech: jantar em riad, passeio de camelo, hammam tradicional
+
+═══ REGRAS DURAS (NÃO QUEBRAR) ═══
+1. **UMA experiência por dia, no máximo.** Nunca duas experiências no mesmo
+   dia. Se você propor 4 experiências e só tem 3 dias flexíveis, sugira só 3.
+2. **Dias disponíveis (flexíveis): {flexible_days}.** NÃO use dias LOCKED.
+3. **Evite dias que já têm experiência** (ver cap_per_day acima).
+4. **Case o TEMA com o que já está no dia:**
+   - Show de tango → dia com San Telmo / La Boca / vida noturna / bairros tradicionais.
+   - Passeio de barco → dia com Puerto Madero / Tigre / costa.
+   - Food tour → dia com mercado / bairro gastronômico.
+   - Aula de culinária → dia mais relaxado (não empilhe com day trip).
+   - Bate-volta de buggy → dia inteiro (não coloque outra coisa no dia).
+5. **Hora do dia respeita o tipo:**
+   - Boat tours, aulas, tours de manhã → 09:30-10:30.
+   - Food tour → 18:00-19:30 (tipicamente começa no fim da tarde).
+   - Shows de tango, milongas → 21:00-22:30.
+   - Pôr do sol → estime para o destino + mês.
+6. **Distribua.** Se houver 5 dias flexíveis e 3 experiências, coloque
+   nos dias 1, 3, 5 (ou similar) — não todos no dia 3.
+7. **Não duplique** o que já está listado (`existing_names_lower`).
+
+═══ SAÍDA ═══
+Retorne APENAS um array JSON:
+[{{"name": "Nome da experiência (ex: Show de tango em milonga tradicional)", "category": "activity", "day": <um dos: {flexible_days}>, "time_slot": "HH:MM", "duration_minutes": <60-360>, "description": "2 frases em pt-BR explicando por que é imperdível.", "notes": "Dica prática em pt-BR.", "vibe_tags": ["experiencia", "cultural"]}}]
+
+Nomes concretos em pt-BR, 3-5 items máximo, UM por dia. Acentos certos."""
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     try:
@@ -3301,6 +3346,28 @@ RULES:
     if not isinstance(parsed, list):
         return []
 
+    # Post-filter: enforce max 1 experience per day. Haiku occasionally
+    # stacks 3 experiences on the same day despite the prompt. When that
+    # happens, the first candidate wins the day, the rest get pushed to
+    # the next-emptiest flexible day. If there's no flexible day left
+    # (all days already have an experience from this batch OR from
+    # pre-existing items), drop the extra — better to ship 2 well-placed
+    # experiences than 4 clustered.
+    used_days = set(existing_exp_per_day.keys())
+
+    def _pick_day(requested: int) -> int | None:
+        """Return requested if it's free; otherwise pick the flexible
+        day with the fewest items (tie-break: lowest number). None if
+        every flexible day already has an experience."""
+        if requested in flexible_days and requested not in used_days:
+            return requested
+        available = [d for d in flexible_days if d not in used_days]
+        if not available:
+            return None
+        # Prefer day with least items → spreads load
+        available.sort(key=lambda d: (len(items_by_day.get(d, [])), d))
+        return available[0]
+
     suggestions: list[dict] = []
     for item in parsed[:max_suggestions]:
         if not isinstance(item, dict) or not item.get("name"):
@@ -3308,9 +3375,21 @@ RULES:
         name = str(item["name"]).strip()
         if name.lower() in existing_names_lower:
             continue
-        day = item.get("day", flexible_days[0])
-        if not isinstance(day, int) or day not in flexible_days:
-            day = flexible_days[0]
+        raw_day = item.get("day")
+        requested_day = raw_day if isinstance(raw_day, int) else flexible_days[0]
+        day = _pick_day(requested_day)
+        if day is None:
+            logger.info(
+                "[experiences] Skipping %r — no flexible day available for another experience",
+                name,
+            )
+            continue
+        if day != requested_day:
+            logger.info(
+                "[experiences] Moving %r from Day %d → Day %d (day already had an experience)",
+                name, requested_day, day,
+            )
+        used_days.add(day)
         suggestions.append({
             "day": day,
             "name": name,
