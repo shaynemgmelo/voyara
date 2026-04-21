@@ -186,6 +186,20 @@ export default function ItineraryItem({
                   ✏️ {pt ? "Você adicionou" : "Added by you"}
                 </span>
               )}
+              {/* Experience badge — items without a fixed map location
+                    (shows, boat trips, tours, food tastings) carry
+                    vibe_tag "experiencia". Recommended venues appear in
+                    the item's notes (rendered elsewhere). */}
+              {Array.isArray(item.vibe_tags) && item.vibe_tags.includes("experiencia") && (
+                <span
+                  className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700"
+                  title={pt
+                    ? "Experiência — veja recomendações de locais nas notas"
+                    : "Experience — see venue recommendations in notes"}
+                >
+                  🎭 {pt ? "Experiência" : "Experience"}
+                </span>
+              )}
               {item.duration_minutes && (
                 <span className="text-[10px] text-gray-400">
                   ⏱ {formatDuration(item.duration_minutes)}

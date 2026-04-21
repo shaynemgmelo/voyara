@@ -1880,6 +1880,72 @@ async def _get_destination_coords(destination: str, places_client: GooglePlacesC
     return None
 
 
+async def _experience_recommendations(
+    experience_name: str, destination: str, cost: CostTracker,
+) -> list[dict]:
+    """Ask Haiku for 2-3 specific venues/companies that offer this experience
+    in the destination. Used when `_looks_like_experience(name)` is True so
+    the itinerary card has concrete, bookable recommendations instead of a
+    vague "show de tango" line with no where-to-go.
+
+    Returns a list of `{name, note}` dicts (empty on failure — the card still
+    renders, it just won't have the "💡 Onde fazer" line).
+    """
+    if not experience_name or not destination:
+        return []
+
+    prompt = (
+        f'Para "{experience_name}" em {destination}, liste 3 lugares / '
+        f"empresas específicas que oferecem essa experiência. "
+        f"Inclua nomes conhecidos ou recomendados por guias e viajantes.\n\n"
+        "Responda APENAS JSON:\n"
+        '[{"name": "Nome do local/empresa", "note": "1 linha curta sobre o diferencial (estilo, preço, vibe)"}]\n\n'
+        "Regras:\n"
+        "- 3 opções distintas quando possível (ex: clássico / luxuoso / autêntico).\n"
+        "- `name` deve ser o nome REAL do local ou empresa.\n"
+        "- `note` em português, máx 60 caracteres.\n"
+        "- Se você não conhece opções concretas, retorne []."
+    )
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=500,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=15.0,
+                )
+            ),
+            timeout=20.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except Exception as e:
+        logger.warning(
+            "[experience-rec] Haiku failed for %r in %s: %s",
+            experience_name, destination, e,
+        )
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict] = []
+    for item in parsed[:3]:
+        if isinstance(item, dict) and item.get("name"):
+            out.append({
+                "name": str(item["name"])[:80],
+                "note": str(item.get("note") or "")[:80],
+            })
+    logger.info(
+        "[experience-rec] %r in %s → %d recs",
+        experience_name, destination, len(out),
+    )
+    return out
+
+
 async def _validate_and_create_items(
     place_list: list[dict],
     trip: dict,
@@ -1984,6 +2050,32 @@ async def _validate_and_create_items(
         name = place.get("name", "")
         if not name:
             return None
+
+        # Experiences (show de tango, passeio de barco, food tour, etc.)
+        # don't map to a single lat/long — skip Google Places entirely and
+        # emit 2-3 venue recommendations so the card is useful.
+        if place.get("_is_experience") or _looks_like_experience(name):
+            recs = await _experience_recommendations(name, destination, cost)
+            place["category"] = place.get("category") or "activity"
+            vibes = list(place.get("vibe_tags") or [])
+            if "experiencia" not in vibes:
+                vibes.append("experiencia")
+            place["vibe_tags"] = vibes
+            if recs:
+                # Format nicely into the notes field so existing frontend
+                # rendering shows the recommendations immediately.
+                place["notes"] = (place.get("notes") or "").strip()
+                place["notes"] += (
+                    ("\n\n" if place["notes"] else "")
+                    + "💡 Onde fazer: "
+                    + " · ".join(r["name"] for r in recs[:3])
+                )
+                # Keep structured list too for future UI work.
+                place["experience_recommendations"] = recs
+            place.pop("_is_experience", None)
+            place.pop("_out_of_fence", None)
+            return place
+
         search_city = place.get("city") or destination
         async with semaphore:
             # Primary search — name + city
@@ -2008,16 +2100,35 @@ async def _validate_and_create_items(
             if enriched:
                 return enriched
 
-            # Nothing within fence — keep the place but flag it so we don't
-            # silently put a 100km-away pin on the day. Caller will drop it
-            # if it has no coords.
+            # Nothing within fence — Google Places couldn't match this name
+            # to a geocodable location. Instead of dropping (old behaviour)
+            # we treat it as an experience: keep the card, get venue
+            # recommendations from Haiku, and tag it visually. This catches
+            # the "barco bar Humberto M" / "show de tango em Palermo" /
+            # "degustação no Mercado San Telmo" class of items that ARE
+            # real things the creator recommended but Google doesn't know
+            # about as a single POI.
             logger.warning(
-                "[geo] Could not find '%s' within %dkm of %s — keeping without coords",
+                "[geo] Could not find '%s' within %dkm of %s — "
+                "keeping as experience with venue recommendations",
                 name, max_distance_km, destination,
             )
             place.pop("latitude", None)
             place.pop("longitude", None)
-            place["_out_of_fence"] = True
+            recs = await _experience_recommendations(name, destination, cost)
+            place["category"] = "activity"
+            vibes = list(place.get("vibe_tags") or [])
+            if "experiencia" not in vibes:
+                vibes.append("experiencia")
+            place["vibe_tags"] = vibes
+            if recs:
+                place["notes"] = (place.get("notes") or "").strip()
+                place["notes"] += (
+                    ("\n\n" if place["notes"] else "")
+                    + "💡 Onde fazer: "
+                    + " · ".join(r["name"] for r in recs[:3])
+                )
+                place["experience_recommendations"] = recs
             return place
 
     validated = await asyncio.gather(*[validate_one(p) for p in place_list])
@@ -3985,6 +4096,39 @@ async def _assign_day_rigidity(
     return day_rigidity
 
 
+# Keywords that mark an item as an EXPERIENCE (activity without a fixed
+# map location), not a geocodable place. When detected we skip the Google
+# Places search and instead ask Haiku for 2-3 venue recommendations in the
+# destination — so the user sees "Show de tango — Rojo Tango, Café Tortoni,
+# El Viejo Almacén" instead of the item being silently dropped because
+# Google couldn't match it to a single pin.
+_EXPERIENCE_KEYWORDS_PT = {
+    "show de tango", "aula de tango", "tango show",
+    "passeio de barco", "passeio de lancha", "passeio em barco",
+    "bate-volta", "day trip",
+    "aula de ", "curso de ", "workshop",
+    "show ", "apresentação", "espetáculo",
+    "degustação", "tasting", "wine tour", "tour de vinho",
+    "tour gastronômico", "food tour",
+    "tour de bike", "bike tour", "tour a pé", "walking tour",
+    "catamarã", "catamara",
+    "experiência", "experiencia", "vivência", "vivencia",
+    "sunset ", "pôr do sol ", "por do sol ",
+}
+
+
+def _looks_like_experience(name: str) -> bool:
+    """Heuristic: does this name describe an activity/experience rather
+    than a geocodable landmark? Conservative on purpose — returning False
+    means we do try Google Places; returning True means we skip Places
+    and emit venue recommendations via Haiku.
+    """
+    if not name:
+        return False
+    low = name.lower()
+    return any(k in low for k in _EXPERIENCE_KEYWORDS_PT)
+
+
 def _build_place_list_from_canonical_days(
     canonical_days: dict[int, dict], day_plans: list[dict],
 ) -> list[dict]:
@@ -4009,18 +4153,23 @@ def _build_place_list_from_canonical_days(
             continue
         places_on_day = entry.get("places") or []
         for i, name in enumerate(places_on_day[:5]):
+            is_exp = _looks_like_experience(name)
             place_list.append({
                 "day": day_num,
                 "name": name,
-                "category": "attraction",  # generic; Google Places will refine via types
+                # Experiences go into "activity"; fixed places stay "attraction".
+                "category": "activity" if is_exp else "attraction",
                 "time_slot": default_slots[min(i, 4)],
                 "duration_minutes": default_durations[min(i, 4)],
                 "description": "",
                 "notes": "",
-                "vibe_tags": [],
+                "vibe_tags": ["experiencia"] if is_exp else [],
                 "alerts": [],
                 "source": "link",
                 "source_url": entry.get("source_url"),
+                # Internal flag — read by _validate_and_create_items to
+                # skip Places and emit venue recommendations instead.
+                "_is_experience": is_exp,
             })
     return place_list
 
