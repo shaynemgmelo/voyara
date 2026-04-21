@@ -3640,21 +3640,26 @@ async def _call_claude_for_itinerary(
 
         last_result = parsed
 
-        # Coverage check
+        # Coverage check. Only retry if the first attempt is SEVERELY short
+        # (missing > 30 % of days OR < 40 % of expected items). A moderately
+        # thin result (e.g. 70 % items + all days covered) is kept — a second
+        # 95-second Sonnet call just to pad items often costs more than it
+        # buys, and on slow days it's what pushed us past the 240s build
+        # budget and produced the "stuck at 95 %" UX.
         covered = {p.get("day") for p in parsed if isinstance(p.get("day"), int)}
-        coverage_ok = num_days == 0 or len(covered) >= num_days
-        count_ok = expected_items == 0 or len(parsed) >= expected_items * 0.6
+        missing_days = num_days - len(covered) if num_days > 0 else 0
+        severely_short_days = num_days > 0 and missing_days > num_days * 0.3
+        severely_short_count = (
+            expected_items > 0 and len(parsed) < expected_items * 0.4
+        )
 
-        if coverage_ok and count_ok:
+        if not severely_short_days and not severely_short_count:
             return parsed
 
         if attempt == 0:
             logger.warning(
-                "[eco] Retry needed: %d items (expected ~%d), %d/%d days covered",
-                len(parsed),
-                expected_items,
-                len(covered),
-                num_days,
+                "[eco] Retry needed (severely short): %d items (expected ~%d), %d/%d days covered",
+                len(parsed), expected_items, len(covered), num_days,
             )
             continue
 
@@ -4122,9 +4127,11 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     # Hard timeout per link so a slow Whisper/Vision download can't wedge the
     # whole build. Beyond the budget we use whatever content_text was already
     # on the link (caption-only is still useful for the classifier).
+    # Budget cut from 120s → 60s after discovering that re-extraction was
+    # eating a quarter of the total 240s build window on otherwise-slow runs.
     import time as _time
-    REEXTRACT_BUDGET_S = 50.0  # per link
-    TOTAL_REEXTRACT_BUDGET_S = 120.0  # across all stale links
+    REEXTRACT_BUDGET_S = 35.0  # per link
+    TOTAL_REEXTRACT_BUDGET_S = 60.0  # across all stale links
     reextract_start = _time.time()
     for link in stale_links:
         url = link.get("url", "")
@@ -4833,40 +4840,98 @@ async def _build_itinerary_eco(
                         len(built), day_num, dest_city,
                     )
 
-        # Verification step — only useful when there's AI output to review.
-        # Skipped if every day is locked (nothing to verify) OR if the audit
-        # has no flexible day to inject into.
+        # Verification / audit / experiences — these are *enrichment* steps
+        # that polish the output. None of them are required to produce a
+        # usable trip. Each runs with its own hard timeout, and the whole
+        # phase shares a 90s budget. If we exceed it, the remaining steps
+        # are skipped and the already-generated place_list goes straight to
+        # validate + create. Previous versions let every step expand into
+        # the user's perceived "95 % loop" — not any more.
         any_flexible = any(
             day_rigidity.get(dp["day_number"], "flexible") == "flexible"
             for dp in day_plans
         )
         if any_flexible:
-            place_list = await _verify_and_optimize_itinerary(
-                place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
-            )
+            import time as _t_enrich
+            enrich_start = _t_enrich.time()
+            # 60s total shared budget. Tight on purpose: the 240s overall
+            # wrapper needs room for validate + create (~45s) AFTER
+            # enrichment completes. If we need more headroom, we drop
+            # experiences first (can be re-run with /enrich-experiences
+            # later), then audit, keeping verify which is cheapest.
+            ENRICH_BUDGET_S = 60.0
             destination = trip.get("destination", "a destination")
-            place_list = await _audit_landmark_coverage(
-                place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
+
+            def _remaining() -> float:
+                return max(0.0, ENRICH_BUDGET_S - (_t_enrich.time() - enrich_start))
+
+            async def _try_step(step_name: str, coro, timeout: float, fallback):
+                """Run a best-effort enrichment step. On timeout / error,
+                return `fallback` (usually the pre-step place_list) and log
+                which step was skipped. Never raises."""
+                rem = _remaining()
+                if rem < 5:
+                    logger.warning(
+                        "[eco] %s SKIPPED — enrichment budget exhausted (%.0fs used)",
+                        step_name, _t_enrich.time() - enrich_start,
+                    )
+                    return fallback
+                try:
+                    step_t = min(timeout, rem)
+                    return await asyncio.wait_for(coro, timeout=step_t)
+                except asyncio.TimeoutError:
+                    logger.warning("[eco] %s timed out after %.0fs, using pre-step list", step_name, min(timeout, rem))
+                    return fallback
+                except Exception as e:
+                    logger.warning("[eco] %s failed (%s), using pre-step list", step_name, e)
+                    return fallback
+
+            # Step 1 — verify & optimize ordering. Timeout 20s.
+            place_list = await _try_step(
+                "verify",
+                _verify_and_optimize_itinerary(
+                    place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
+                ),
+                timeout=20.0,
+                fallback=place_list,
             )
-            # Inject signature destination experiences (tango in BA, buggy
-            # in Jeri, Vespa tour in Rome…). These don't show up in Google
-            # Places as a single pin, so only the destination_experience
-            # helper reliably adds them. We also pass the canonical_days
-            # map so Haiku places each experience on the day the video
-            # actually talks about that theme.
+
+            # Step 2 — landmark audit (inject missing iconic places). Timeout 20s.
+            place_list = await _try_step(
+                "audit",
+                _audit_landmark_coverage(
+                    place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
+                ),
+                timeout=20.0,
+                fallback=place_list,
+            )
+
+            # Step 3 — signature destination experiences. Timeout 20s. If this
+            # times out, user just doesn't get the "show de tango" card —
+            # they can click "Adicionar experiências" later to retry.
             video_day_mentions: dict[int, list[str]] = {}
             for day_num, entry in canonical_days.items():
                 if isinstance(entry, dict):
-                    places = entry.get("places") or []
-                    if places:
-                        video_day_mentions[day_num] = list(places)
-            destination_experiences = await _suggest_destination_experiences(
-                destination, place_list, len(day_plans), cost,
-                day_rigidity=day_rigidity,
-                video_day_mentions=video_day_mentions,
+                    dn_places = entry.get("places") or []
+                    if dn_places:
+                        video_day_mentions[day_num] = list(dn_places)
+            destination_experiences = await _try_step(
+                "experiences",
+                _suggest_destination_experiences(
+                    destination, place_list, len(day_plans), cost,
+                    day_rigidity=day_rigidity,
+                    video_day_mentions=video_day_mentions,
+                ),
+                timeout=20.0,
+                fallback=[],
             )
             if destination_experiences:
                 place_list.extend(destination_experiences)
+
+            logger.info(
+                "[eco] Enrichment phase done in %.1fs (budget=%ds)",
+                _t_enrich.time() - enrich_start, int(ENRICH_BUDGET_S),
+            )
         else:
             logger.info(
                 "[eco] Skipping verify+audit — all %d days are locked/partial",
