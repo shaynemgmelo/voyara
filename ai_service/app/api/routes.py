@@ -28,6 +28,7 @@ from app.services.orchestrator import (
     analyze_trip,
     build_trip_itinerary,
     refine_itinerary,
+    optimize_trip_routing,
 )
 
 logger = logging.getLogger(__name__)
@@ -403,6 +404,24 @@ async def _build_itinerary_background(trip_id: int):
     except Exception:
         active_builds.pop(trip_id, None)
         logger.exception("Failed to build itinerary for trip %d", trip_id)
+
+
+@router.post("/optimize-trip/{trip_id}")
+async def handle_optimize_trip(trip_id: int):
+    """Re-run the routing optimizer on an EXISTING trip without changing
+    what's in it. Reshuffles items within/between days by proximity and
+    resets time_slots by position. Used by the "Otimizar rota" button so
+    users don't have to regenerate the whole trip to get better routing.
+
+    Returns synchronously (not a background task) because the user is
+    waiting and the op is quick (no AI calls, just geo math + PATCHes).
+    """
+    try:
+        result = await optimize_trip_routing(trip_id)
+        return result
+    except Exception as e:
+        logger.exception("[optimize-trip] Trip %d failed", trip_id)
+        return {"error": str(e), "changed": 0}
 
 
 @router.get("/build-status/{trip_id}")

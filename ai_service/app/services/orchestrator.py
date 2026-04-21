@@ -3545,6 +3545,144 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
             return {"status": "confirmed", "profile": None, "cost": cost.summary()}
 
 
+async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
+    """Re-run ONLY the routing pass on an existing trip.
+
+    Takes the items exactly as they are today, runs the same geographic
+    optimizer the build pipeline uses (_enforce_main_city_on_early_days,
+    _tighten_day_clusters skipped since items already validated,
+    _optimize_day_proximity), and persists the resulting position +
+    time_slot + day changes back to Rails.
+
+    No AI calls. No changes to what's in the trip — only where things sit.
+    Fast (a few hundred ms + a handful of PATCHes).
+    """
+    rails = RailsClient(client=http_client)
+
+    try:
+        trip = await rails.get_trip(trip_id)
+        day_plans_raw = await rails.get_day_plans(trip_id)
+    except Exception as e:
+        return {"error": f"Failed to load trip: {e}", "changed": 0}
+
+    # Flatten current items + remember their original (day, position) so
+    # we can detect what actually moved.
+    place_list: list[dict] = []
+    original_state: dict[int, tuple[int, int]] = {}  # item_id -> (day, position)
+    dp_by_number: dict[int, int] = {}
+    for dp in day_plans_raw:
+        day_num = dp.get("day_number")
+        dp_by_number[day_num] = dp["id"]
+        for idx, it in enumerate(dp.get("itinerary_items") or []):
+            place = {**it, "day": day_num}
+            place_list.append(place)
+            original_state[it["id"]] = (day_num, idx)
+
+    if not place_list:
+        return {"changed": 0, "total": 0, "summary": "Trip is empty"}
+
+    num_days = len(day_plans_raw)
+
+    # Re-derive day_rigidity from the persisted day_plan.rigidity so
+    # locked days are still protected from inter-day swaps.
+    day_rigidity: dict[int, str] = {}
+    for dp in day_plans_raw:
+        dn = dp.get("day_number")
+        if isinstance(dn, int):
+            day_rigidity[dn] = dp.get("rigidity") or "flexible"
+
+    # Build the preplanned_day_places set so _enforce_main_city_on_early_days
+    # still honors Regra #0.
+    profile = trip.get("traveler_profile") or {}
+    preplanned_day_places: dict[int, set[str]] = {}
+    cc = profile.get("content_classification") or {}
+    for k, v in (cc.get("canonical_days") or {}).items():
+        try:
+            key = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, dict) and v.get("places"):
+            preplanned_day_places.setdefault(key, set()).update(v["places"])
+
+    # Run the same two passes used during build. No cluster tightening —
+    # these items already passed fence + cluster rules when first created;
+    # we don't want to drop anything.
+    place_list = _enforce_main_city_on_early_days(
+        place_list, num_days, preplanned_day_places=preplanned_day_places,
+    )
+    place_list = _optimize_day_proximity(place_list, day_rigidity=day_rigidity)
+
+    # Compute new (day, position) for each item and diff against original.
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day", 1)
+        by_day.setdefault(d, []).append(p)
+
+    slot_by_position = ["10:00", "12:30", "14:30", "16:30", "19:00"]
+    patches: list[tuple[int, int, int, dict]] = []  # (item_id, new_dp_id, new_pos, data)
+    for day_num in sorted(by_day.keys()):
+        items = by_day[day_num]
+        new_dp_id = dp_by_number.get(day_num)
+        if not new_dp_id:
+            continue
+        for pos, item in enumerate(items):
+            item_id = item.get("id")
+            if not item_id:
+                continue
+            orig = original_state.get(item_id)
+            if not orig:
+                continue
+            orig_day, orig_pos = orig
+            new_slot = slot_by_position[pos] if pos < len(slot_by_position) else item.get("time_slot")
+            changed_day = orig_day != day_num
+            changed_pos = orig_pos != pos
+            changed_slot = item.get("time_slot") != new_slot
+            if not (changed_day or changed_pos or changed_slot):
+                continue
+            data: dict = {"position": pos}
+            if new_slot:
+                data["time_slot"] = new_slot
+            # day_plan_id change goes through a MOVE-style PATCH (the
+            # controller allows changing day_plan_id on update).
+            if changed_day:
+                data["day_plan_id"] = new_dp_id
+            patches.append((item_id, new_dp_id, pos, data))
+
+    # Persist all patches in parallel. Send each to the ORIGINAL day's
+    # endpoint so we don't need a separate move call — the controller
+    # handles day_plan_id change on update.
+    id_to_original_day = {item_id: orig for item_id, orig in original_state.items()}
+
+    async def _apply_patch(item_id: int, _dp_id: int, _pos: int, data: dict):
+        orig = id_to_original_day.get(item_id)
+        if not orig:
+            return
+        orig_day, _ = orig
+        orig_dp_id = dp_by_number.get(orig_day)
+        if not orig_dp_id:
+            return
+        try:
+            await rails.update_itinerary_item(trip_id, orig_dp_id, item_id, data)
+        except Exception as e:
+            logger.warning("[optimize] PATCH failed for item %s: %s", item_id, e)
+
+    if patches:
+        await asyncio.gather(*[_apply_patch(*p) for p in patches])
+
+    logger.info(
+        "[optimize] Trip %d: %d/%d items rearranged",
+        trip_id, len(patches), len(place_list),
+    )
+    return {
+        "changed": len(patches),
+        "total": len(place_list),
+        "summary": (
+            "Rota já estava otimizada" if not patches
+            else f"{len(patches)} itens reorganizados"
+        ),
+    }
+
+
 async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     """Phase 2: Build ONE unified itinerary from all link content + confirmed profile.
 

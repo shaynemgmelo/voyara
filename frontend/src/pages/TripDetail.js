@@ -25,6 +25,7 @@ import NotePanel from "../components/logistics/NotePanel";
 import TripPDFExport from "../components/trip/TripPDFExport";
 import TripShareModal from "../components/trip/TripShareModal";
 import { getTravelTimes, recalculateSchedule } from "../api/dayPlans";
+import { optimizeTripRouting } from "../api/optimize";
 import { useLanguage } from "../i18n/LanguageContext";
 
 export default function TripDetail() {
@@ -55,6 +56,8 @@ export default function TripDetail() {
   const [selectedDayNumber, setSelectedDayNumber] = useState(null);
   const [hoveredItemId, setHoveredItemId] = useState(null);
   const [geoModalDismissed, setGeoModalDismissed] = useState(false);
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizeToast, setOptimizeToast] = useState(null);
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === "undefined") return "list";
     return localStorage.getItem("mapass.viewMode") || "timeline";
@@ -313,8 +316,40 @@ export default function TripDetail() {
             onCityChange={setActiveCity}
           />
 
-          {/* View toggle: Timeline / List */}
-          <div className="flex justify-end mb-4">
+          {/* View toggle + optimize route button */}
+          <div className="flex justify-end items-center gap-3 mb-4">
+            <button
+              onClick={async () => {
+                if (optimizing) return;
+                setOptimizing(true);
+                try {
+                  const result = await optimizeTripRouting(id);
+                  await fetchTrip();
+                  const msg =
+                    result?.summary ||
+                    (result?.changed
+                      ? `${result.changed} itens reorganizados`
+                      : "Rota já estava otimizada");
+                  setOptimizeToast(msg);
+                  setTimeout(() => setOptimizeToast(null), 3500);
+                } catch (e) {
+                  setOptimizeToast("Não foi possível otimizar agora");
+                  setTimeout(() => setOptimizeToast(null), 3500);
+                } finally {
+                  setOptimizing(false);
+                }
+              }}
+              disabled={optimizing}
+              className="px-3 py-1.5 rounded-xl text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white shadow-sm disabled:opacity-50 disabled:cursor-wait transition"
+              title="Reorganiza os itens de cada dia pela ordem mais curta no mapa e realinha os horários."
+            >
+              {optimizing ? "⏳ Otimizando..." : "🧭 Otimizar rota"}
+            </button>
+            {optimizeToast && (
+              <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1">
+                {optimizeToast}
+              </span>
+            )}
             <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
               <button
                 onClick={() => switchView("timeline")}
