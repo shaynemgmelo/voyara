@@ -401,39 +401,196 @@ async def _analyze_trip_background(trip_id: int):
 
 
 async def _build_itinerary_background(trip_id: int):
+    """Wrapper around build_trip_itinerary that guarantees the user NEVER
+    gets stuck at 95 % forever. Three defences, in order of preference:
+
+    1. Normal build succeeds → done.
+    2. Build fails or times out → emergency fallback creates skeleton
+       items directly from the links' extracted content (whatever
+       Haiku classifier found is enough). At least the user sees
+       something and can refine/edit.
+    3. Everything fails (including the fallback) → persists a clear
+       error on trip.traveler_profile.build_error so the frontend
+       shows "Falha na geração: <mensagem>" instead of an endless
+       progress bar.
+
+    Either way, active_builds is cleared and — critically — the trip
+    leaves the `confirmed + no items` state, so useTripDetail.shouldPoll
+    stops returning true and the modal closes.
+    """
     import asyncio as _aio
     import time as _t
+    from app.services.orchestrator import (
+        build_trip_itinerary,
+        RailsClient,
+    )
     TOTAL_BUDGET_S = 240.0
     start = _t.time()
-    # Register this build so /build-status/{trip_id} can tell the frontend
-    # whether the trip is actively being built or silently died.
     active_builds[trip_id] = {
         "started_at": start,
         "stage": "starting",
         "last_log_at": start,
     }
     logger.info("[build trip=%d] SCHEDULED, budget=%ds", trip_id, int(TOTAL_BUDGET_S))
+
+    places_created = 0
+    build_err: str | None = None
+
+    # PHASE A — the normal build.
     try:
         result = await _aio.wait_for(
             build_trip_itinerary(trip_id), timeout=TOTAL_BUDGET_S,
         )
-        active_builds.pop(trip_id, None)
+        places_created = int(result.get("places_created", 0) or 0)
+        if result.get("error") and places_created == 0:
+            build_err = str(result["error"])
         logger.info(
-            "[build trip=%d] DONE: %d places in %.1fs",
-            trip_id,
-            result.get("places_created", 0),
-            _t.time() - start,
+            "[build trip=%d] PHASE_A done: %d places in %.1fs (err=%s)",
+            trip_id, places_created, _t.time() - start, build_err,
         )
     except _aio.TimeoutError:
-        active_builds.pop(trip_id, None)
-        logger.error(
-            "[build trip=%d] TIMED OUT after %.0fs — frontend auto-retry "
-            "will re-kick with already-extracted content",
-            trip_id, TOTAL_BUDGET_S,
-        )
-    except Exception:
-        active_builds.pop(trip_id, None)
-        logger.exception("[build trip=%d] FAILED", trip_id)
+        build_err = f"A geração passou do limite de {int(TOTAL_BUDGET_S)}s."
+        logger.error("[build trip=%d] PHASE_A TIMED OUT", trip_id)
+    except Exception as e:
+        build_err = f"Erro inesperado: {type(e).__name__}: {str(e)[:200]}"
+        logger.exception("[build trip=%d] PHASE_A EXCEPTION", trip_id)
+
+    # PHASE B — emergency fallback: if the normal build created no items,
+    # create skeleton items straight from Rails links' extracted_data.
+    # Bypasses every AI call that could have broken; uses regex to pull
+    # names out of captions. Ships a usable trip even when the worker
+    # is degraded.
+    if places_created == 0:
+        try:
+            logger.warning(
+                "[build trip=%d] 0 items created — attempting emergency fallback",
+                trip_id,
+            )
+            places_created = await _emergency_skeleton_items(trip_id)
+            if places_created > 0:
+                build_err = None  # user got something, don't scare them
+                logger.info(
+                    "[build trip=%d] PHASE_B rescued: %d skeleton items",
+                    trip_id, places_created,
+                )
+        except Exception as e:
+            logger.exception("[build trip=%d] PHASE_B emergency fallback also failed", trip_id)
+            build_err = (build_err or "Falha desconhecida") + f" (fallback: {type(e).__name__})"
+
+    # PHASE C — if we STILL have 0 items, persist the error on the trip
+    # so the UI can show a real message instead of the endless 95 %.
+    if places_created == 0 and build_err:
+        try:
+            rails = RailsClient()
+            trip = await rails.get_trip(trip_id)
+            profile = (trip.get("traveler_profile") or {})
+            profile["build_error"] = {
+                "message": build_err,
+                "at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                "budget_exceeded": "limite" in build_err,
+            }
+            await rails.update_trip(trip_id, {"traveler_profile": profile})
+            logger.info(
+                "[build trip=%d] Persisted build_error to trip: %s",
+                trip_id, build_err,
+            )
+        except Exception:
+            logger.exception("[build trip=%d] Could not persist build_error", trip_id)
+
+    # PHASE D — if we DID create items but there was an error earlier,
+    # clear any stale build_error so the UI unlocks.
+    elif places_created > 0:
+        try:
+            rails = RailsClient()
+            trip = await rails.get_trip(trip_id)
+            profile = trip.get("traveler_profile") or {}
+            if profile.get("build_error"):
+                profile.pop("build_error", None)
+                await rails.update_trip(trip_id, {"traveler_profile": profile})
+        except Exception:
+            pass
+
+    active_builds.pop(trip_id, None)
+    logger.info(
+        "[build trip=%d] EXIT: items=%d err=%s elapsed=%.1fs",
+        trip_id, places_created, build_err, _t.time() - start,
+    )
+
+
+async def _emergency_skeleton_items(trip_id: int) -> int:
+    """Last-resort item creation that bypasses every AI call.
+
+    Pulls extracted_data.content_text from each link, runs the regex
+    keycap/numbered-list extractor (already battle-tested in
+    _regex_extract_places), and creates one item per extracted name,
+    distributed round-robin across day_plans. No Google Places, no
+    Haiku, no Sonnet. Coordinates can be filled in later via
+    optimize-trip or refine.
+
+    Returns the number of items actually created. 0 is a legitimate
+    outcome (no content at all) — the caller persists build_error in
+    that case.
+    """
+    from app.services.orchestrator import (
+        RailsClient,
+        _regex_extract_places,
+    )
+    rails = RailsClient()
+    trip = await rails.get_trip(trip_id)
+    day_plans = await rails.get_day_plans(trip_id)
+    if not day_plans:
+        return 0
+
+    # Aggregate all extracted content across links.
+    links = trip.get("links") or []
+    if not links:
+        try:
+            links = await rails.get_links(trip_id)
+        except Exception:
+            links = []
+    combined = "\n".join(
+        (l.get("extracted_data") or {}).get("content_text", "") or ""
+        for l in links
+    )
+    if not combined.strip():
+        return 0
+
+    fallback = _regex_extract_places(combined)
+    names = fallback.get("places") or []
+    if not names:
+        return 0
+
+    # Distribute round-robin across day_plans, capped at 5 per day.
+    dp_by_number = sorted(day_plans, key=lambda d: d.get("day_number", 0))
+    per_day: dict[int, list[str]] = {}
+    for i, n in enumerate(names[:len(dp_by_number) * 5]):
+        dp = dp_by_number[i % len(dp_by_number)]
+        per_day.setdefault(dp["id"], []).append(n)
+
+    slots = ["10:00", "12:30", "14:30", "16:30", "19:00"]
+    created = 0
+    for dp in dp_by_number:
+        items_for_day = per_day.get(dp["id"]) or []
+        for pos, name in enumerate(items_for_day):
+            try:
+                await rails.create_itinerary_item(trip_id, dp["id"], {
+                    "name": name,
+                    "category": "attraction",
+                    "time_slot": slots[min(pos, 4)],
+                    "duration_minutes": 90,
+                    "description": "",
+                    "notes": "",
+                    "source": "link",
+                    "origin": "extracted_from_video",
+                    "position": pos,
+                })
+                created += 1
+            except Exception as e:
+                logger.warning(
+                    "[emergency] create failed for %r in dp %d: %s",
+                    name, dp["id"], e,
+                )
+    return created
 
 
 @router.post("/enrich-experiences/{trip_id}")

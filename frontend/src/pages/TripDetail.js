@@ -223,9 +223,13 @@ export default function TripDetail() {
   // Phase 5.5 — heavy pipeline phases open a full-screen progress modal
   // instead of a tiny inline pulse. Shared phase detection with
   // ProcessingStatus so extracting stays inline and the modal only covers
-  // analyzing + generating.
+  // analyzing + generating. "failed" gets a red error card instead.
   const showProgressModal =
     pipelinePhase === "analyzing" || pipelinePhase === "generating";
+  const buildErrorMsg =
+    pipelinePhase === "failed"
+      ? trip?.traveler_profile?.build_error?.message || "Falha desconhecida"
+      : null;
 
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
@@ -235,6 +239,55 @@ export default function TripDetail() {
           trip={trip}
           onRetry={retryBuild}
         />
+      )}
+      {buildErrorMsg && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 space-y-5 border-2 border-red-200">
+            <div className="text-center">
+              <div className="text-4xl mb-2">⚠️</div>
+              <h3 className="text-xl font-bold text-gray-900">
+                Não conseguimos gerar seu roteiro
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                O servidor tentou mas não terminou a tempo.
+              </p>
+            </div>
+            <div className="rounded-xl bg-red-50 border border-red-100 p-3 text-xs text-red-900">
+              <p className="font-mono break-words leading-relaxed">{buildErrorMsg}</p>
+            </div>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Seus links e o perfil ficaram salvos. Você pode tentar de novo
+              agora (costuma funcionar na 2ª tentativa — os conteúdos dos
+              vídeos já estão em cache), ou voltar depois.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={async () => {
+                  try {
+                    const rails = trip?.id;
+                    if (rails) {
+                      const profile = {
+                        ...(trip?.traveler_profile || {}),
+                      };
+                      delete profile.build_error;
+                      await updateProfile(profile, "confirm");
+                    }
+                  } catch {}
+                  await retryBuild();
+                }}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-bold shadow-md transition"
+              >
+                🔁 Tentar de novo
+              </button>
+              <Link
+                to="/dashboard"
+                className="px-4 py-2.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold transition flex items-center"
+              >
+                Voltar
+              </Link>
+            </div>
+          </div>
+        </div>
       )}
       {/* Trip header */}
       <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">

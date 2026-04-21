@@ -31,6 +31,10 @@ export function detectPhase(trip) {
     trip.items_count > 0 ||
     trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
 
+  // Phase D — build persisted a real error on the trip profile.
+  // Surface it instead of cycling through the 95 % forever.
+  const buildError = trip?.traveler_profile?.build_error;
+
   let phase = null;
   if (hasActiveLinks) phase = "extracting";
   else if (
@@ -40,9 +44,12 @@ export function detectPhase(trip) {
     profileStatus !== "rejected"
   )
     phase = "analyzing";
-  else if (profileStatus === "confirmed" && !hasItems) phase = "generating";
+  else if (profileStatus === "confirmed" && !hasItems && !buildError)
+    phase = "generating";
+  else if (profileStatus === "confirmed" && !hasItems && buildError)
+    phase = "failed";
 
-  return { phase, totalLinks, extractedCount };
+  return { phase, totalLinks, extractedCount, buildError };
 }
 
 export default function ProcessingStatus({ trip }) {

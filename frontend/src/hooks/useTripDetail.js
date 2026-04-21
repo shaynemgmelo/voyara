@@ -58,8 +58,14 @@ export default function useTripDetail(tripId) {
     if (hasExtractedLinks && !profileReady) return true;
 
     // Profile confirmed but itinerary not generated yet? (Phase 2 in progress)
+    // STOP polling if the backend persisted a build_error — at that point
+    // the 95 % loop would never end on its own. The UI switches to the
+    // "Falha" card and waits for the user to decide.
     const hasItems = trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
-    if (trip.profile_status === "confirmed" && hasExtractedLinks && !hasItems) return true;
+    const hasBuildError = Boolean(trip?.traveler_profile?.build_error);
+    if (trip.profile_status === "confirmed" && hasExtractedLinks && !hasItems && !hasBuildError) {
+      return true;
+    }
 
     // Refining in progress — poll for updated items
     if (refining) return true;
