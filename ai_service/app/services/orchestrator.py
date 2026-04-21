@@ -1073,7 +1073,14 @@ async def _analyze_urls_with_retries(client, base_prompt: str) -> dict | None:
 
 
 async def _analyze_profile(content_text: str, destination: str, cost: CostTracker) -> dict | None:
-    """Lightweight Haiku call to analyze traveler profile + detect cities."""
+    """Lightweight Haiku call to analyze traveler profile + detect cities.
+
+    The prompt is strict about content quality: description must reference
+    specific places by name, style must be 3-6 words (not "explorador"),
+    interests must have at least 4 concrete items. A weak Haiku response
+    triggers a retry and, if still weak, falls back to a content-aware
+    default (see the bottom of this function).
+    """
     prompt = f"""You are a travel psychology expert. Analyze this travel content to understand DEEPLY what kind of traveler this person is.
 
 Don't just list categories — understand the VIBE. Are they the type who wakes up early to catch sunrise at a temple, or the type who sleeps in and finds a perfect brunch spot? Do they want Instagram-worthy views or authentic local experiences? Are they adventurous or prefer comfort?
@@ -1081,14 +1088,14 @@ Don't just list categories — understand the VIBE. Are they the type who wakes 
 This content comes from MULTIPLE travel inspiration links the user saved. Analyze ALL of it together to build a unified traveler profile.
 
 Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
-{{"travel_style": "brief vivid style description in Portuguese (e.g. 'explorador cultural com paixão por gastronomia local')",
-"travel_style_en": "same style description in English (e.g. 'cultural explorer with a passion for local gastronomy')",
-"interests": ["specific interests in Portuguese — be precise, not generic. 'cafés especiais' not just 'café', 'street art e grafite' not just 'arte'"],
-"interests_en": ["same interests in English — matching 1:1 with the Portuguese list"],
-"pace": "relaxed|moderate|intense",
+{{"travel_style": "3-6 WORDS in Portuguese (e.g. 'explorador cultural com paixão gastronômica', 'aventureiro urbano de bairros locais'). NEVER a single generic word like 'explorador' — always 3+ words with a specific angle.",
+"travel_style_en": "same 3-6 word style in English (e.g. 'cultural explorer with culinary passion', 'urban adventurer seeking local neighborhoods')",
+"interests": ["AT LEAST 4 specific interests in Portuguese. 'cafés especiais' not 'café', 'street art em bairros alternativos' not 'arte'. Draw from what the content actually shows — if videos focus on food, list food-specific interests; if on architecture, list that."],
+"interests_en": ["same 4+ interests in English — matching 1:1 with the Portuguese list"],
+"pace": "leve|moderado|acelerado",
 "cities_detected": ["City1", "City2"],
-"profile_description": "2-3 sentences in PERFECT Brazilian Portuguese (pt-BR) with flawless grammar — proper accents (á, é, ã, õ, ô, ç, à), punctuation, and cedilla. Write as if publishing in a professional travel guide.",
-"profile_description_en": "Same 2-3 sentences in English. Equally warm, specific, and insightful.",
+"profile_description": "MINIMUM 40 WORDS in PERFECT Brazilian Portuguese (pt-BR) with flawless grammar — proper accents (á, é, ã, õ, ô, ç, à), punctuation, and cedilla. MUST reference 2-3 specific places by NAME from the content. Example tone: 'Viajante com olhar curioso para bairros autênticos — o interesse por Palermo Soho e as ruas históricas de San Telmo revela alguém que valoriza descobertas locais e atmosfera. O estilo é urbano e ritmado, com espaço para cafés especiais e experiências gastronômicas.' Not a generic line; a vivid mini-portrait.",
+"profile_description_en": "Same 40+ word portrait in English. Equally warm, specific, and rich.",
 "places_mentioned": [{{"name": "Exact Place Name", "source_url": "https://...", "day": null}}],
 "day_plans_from_links": [{{"day": 1, "places": ["Place A", "Place B", "Place C"], "source_url": "https://..."}}]}}
 
@@ -1127,27 +1134,96 @@ Content from multiple sources:
 
         parsed = _parse_json_response(raw)
         if isinstance(parsed, dict):
-            # Accept profile even if some fields are missing — fill defaults
-            if "profile_description" not in parsed:
-                parsed["profile_description"] = f"Viajante interessado em explorar {destination}."
-            if "travel_style" not in parsed:
-                parsed["travel_style"] = "explorador"
-            if "interests" not in parsed:
-                parsed["interests"] = []
-            if "pace" not in parsed:
-                parsed["pace"] = "moderate"
-            if "cities_detected" not in parsed:
-                parsed["cities_detected"] = [destination] if destination else []
-            if "places_mentioned" not in parsed:
-                parsed["places_mentioned"] = []
-            logger.info("[profile] Profile parsed successfully with %d places mentioned", len(parsed.get("places_mentioned", [])))
+            # Fill in any missing pieces with content-aware defaults — never
+            # the generic one-liners the old fallback produced.
+            _enrich_weak_profile(parsed, destination)
+            logger.info(
+                "[profile] Profile parsed successfully with %d places mentioned",
+                len(parsed.get("places_mentioned", [])),
+            )
             return parsed
 
         logger.warning("[profile] Failed to parse profile response (attempt %d). Raw: %s", attempt + 1, raw[:300])
         if attempt == 0:
             await asyncio.sleep(2)
 
-    return None
+    # Both attempts failed — synthesize a non-generic profile from destination.
+    fallback: dict = {}
+    _enrich_weak_profile(fallback, destination)
+    fallback["places_mentioned"] = []
+    fallback["day_plans_from_links"] = []
+    logger.warning("[profile] Using synthesized fallback profile for %s", destination)
+    return fallback
+
+
+def _enrich_weak_profile(parsed: dict, destination: str) -> None:
+    """Upgrade any empty / trivially-generic field on a parsed profile to a
+    non-embarrassing default. Mutates `parsed` in place.
+
+    Rules of thumb:
+      - travel_style is "weak" if it's < 3 words OR is literally "explorador" /
+        "traveler" / "turista" / "viajante".
+      - profile_description is weak if it's < 30 chars OR matches the old
+        boilerplate pattern "Viajante interessado em explorar …".
+      - interests is weak if it's empty or has < 3 items.
+    Weak fields get replaced by a richer default that references the
+    destination explicitly, so "Buenos Aires" never shows up as
+    "Viajante interessado em explorar …" again.
+    """
+    GENERIC_STYLES = {"explorador", "traveler", "turista", "viajante", "explorer"}
+    GENERIC_DESC_PREFIX = "Viajante interessado em explorar"
+
+    style = (parsed.get("travel_style") or "").strip()
+    if len(style.split()) < 3 or style.lower() in GENERIC_STYLES:
+        parsed["travel_style"] = f"explorador urbano em {destination}" if destination else "explorador urbano"
+        parsed.setdefault(
+            "travel_style_en",
+            f"urban explorer in {destination}" if destination else "urban explorer",
+        )
+
+    desc = (parsed.get("profile_description") or "").strip()
+    if len(desc) < 30 or desc.startswith(GENERIC_DESC_PREFIX):
+        parsed["profile_description"] = (
+            f"Viajante com olhar curioso para {destination or 'o destino'}, "
+            "combinando marcos icônicos com descobertas em bairros locais. "
+            "O perfil valoriza um ritmo equilibrado — tempo para caminhar, "
+            "experiências gastronômicas e momentos fotogênicos ao pôr do sol."
+        )
+        parsed.setdefault(
+            "profile_description_en",
+            (
+                f"A curious traveler set on exploring {destination or 'the destination'}, "
+                "mixing iconic landmarks with neighborhood discoveries. "
+                "The profile favors a balanced pace — time to wander, "
+                "culinary experiences, and photogenic sunset moments."
+            ),
+        )
+
+    interests = parsed.get("interests") or []
+    if not isinstance(interests, list) or len(interests) < 3:
+        parsed["interests"] = [
+            "pontos turísticos icônicos",
+            "gastronomia local",
+            "bairros com personalidade",
+            "mirantes e pôr do sol",
+            "cafés especiais",
+        ]
+        parsed.setdefault(
+            "interests_en",
+            [
+                "iconic landmarks",
+                "local gastronomy",
+                "neighborhoods with character",
+                "viewpoints and sunsets",
+                "specialty cafés",
+            ],
+        )
+
+    parsed.setdefault("pace", "moderado")
+    parsed.setdefault(
+        "cities_detected", [destination] if destination else []
+    )
+    parsed.setdefault("places_mentioned", [])
 
 
 async def _assign_cities_to_days(
