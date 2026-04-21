@@ -418,7 +418,12 @@ async def _build_itinerary_background(trip_id: int):
         build_trip_itinerary,
         RailsClient,
     )
-    TOTAL_BUDGET_S = 240.0
+    # Aggressive cap. New pipeline math:
+    #   fetch ~2s + re-extract 25s + classify 15s + sonnet 65s + validate/create 40s = ~147s
+    # If the build can't finish in 150s it's not going to, and the user
+    # would rather see a clean failure modal + retry button than keep staring
+    # at 95 %.
+    TOTAL_BUDGET_S = 150.0
     start = _t.time()
     active_builds[trip_id] = {
         "started_at": start,

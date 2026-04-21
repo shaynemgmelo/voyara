@@ -50,6 +50,7 @@ export default function TripDetail() {
     addLodging,
     removeLodging,
     fetchTrip,
+    clientForcedFailure,
   } = useTripDetail(id);
 
   const [selectedItemId, setSelectedItemId] = useState(null);
@@ -224,11 +225,19 @@ export default function TripDetail() {
   // instead of a tiny inline pulse. Shared phase detection with
   // ProcessingStatus so extracting stays inline and the modal only covers
   // analyzing + generating. "failed" gets a red error card instead.
+  //
+  // `clientForcedFailure` is the 180 s ceiling from useTripDetail — it
+  // flips the UI into the failure card even when the backend hasn't yet
+  // acknowledged the problem, so the user is NEVER stranded on 95 %.
+  const effectivePhase = clientForcedFailure ? "failed" : pipelinePhase;
   const showProgressModal =
-    pipelinePhase === "analyzing" || pipelinePhase === "generating";
+    effectivePhase === "analyzing" || effectivePhase === "generating";
   const buildErrorMsg =
-    pipelinePhase === "failed"
-      ? trip?.traveler_profile?.build_error?.message || "Falha desconhecida"
+    effectivePhase === "failed"
+      ? (trip?.traveler_profile?.build_error?.message
+         || (clientForcedFailure
+             ? "A geração está demorando mais do que o normal. Pode ter sido instabilidade temporária — tentar de novo costuma funcionar."
+             : "Falha desconhecida"))
       : null;
 
   return (

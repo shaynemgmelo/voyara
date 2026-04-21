@@ -3552,120 +3552,47 @@ async def _call_claude_for_itinerary(
       - fewer than 60% of expected_items returned, OR
       - fewer than all days are covered (user asked for N days, got <N).
     """
+    # Single Sonnet attempt with a 65s hard timeout. NO retries — one call is
+    # all we can afford inside the 150s total build budget. In practice this
+    # call finishes in 15-40s. A retry-after-timeout would fire a SECOND 65s
+    # wait, which is exactly how the old "stuck at 95 %" pile-up happened.
+    # If the result is moderately thin, we still use it — shipping SOMETHING
+    # in 50s beats shipping NOTHING after 130s.
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    last_result: list[dict] | None = None
-
-    for attempt in range(2):
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            if attempt == 1:
-                # Build a precise reminder of what went wrong
-                issues: list[str] = []
-                if last_result is not None:
-                    covered = {
-                        p.get("day")
-                        for p in last_result
-                        if isinstance(p.get("day"), int)
-                    }
-                    missing_days = [
-                        d for d in range(1, num_days + 1) if d not in covered
-                    ]
-                    if missing_days:
-                        issues.append(
-                            f"Days {missing_days} had ZERO places — EVERY day from 1 to {num_days} MUST have 4-5 places."
-                        )
-                    if expected_items > 0 and len(last_result) < expected_items:
-                        issues.append(
-                            f"Only {len(last_result)} places returned but {expected_items} expected."
-                        )
-                reminder = "\n\nCRITICAL REMINDER: The user asked for a "
-                reminder += f"{num_days}-day trip. "
-                if issues:
-                    reminder += " ".join(issues) + " "
-                reminder += (
-                    f"Generate at least {expected_items} places total, "
-                    f"distributed across ALL {num_days} days (4-5 per day). "
-                    "Every single day from 1 to "
-                    f"{num_days} MUST appear. Do NOT cut short."
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=12000,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=60.0,  # httpx-level timeout inside the SDK
                 )
-                messages[0]["content"] += reminder
-                messages.append({"role": "assistant", "content": "["})
-
-            # Hard timeout so a slow Sonnet response can't keep the user
-            # stuck at 95% forever. 90s is very generous — typical calls
-            # finish in 15-40s even on 25+ item itineraries.
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=16000,
-                        messages=messages,
-                        timeout=90.0,  # httpx-level timeout inside the SDK
-                    )
-                ),
-                timeout=95.0,  # asyncio-level belt-and-suspenders
-            )
-            cost.record_usage(response.usage)
-            raw = response.content[0].text if response.content else "[]"
-            if attempt == 1:
-                raw = "[" + raw  # we prefilled
-        except asyncio.TimeoutError:
-            logger.error(
-                "[eco] Sonnet itinerary call TIMED OUT after 95s (attempt %d)",
-                attempt + 1,
-            )
-            if attempt == 0:
-                continue
-            return None
-        except Exception as e:
-            logger.error(
-                "[eco] Claude itinerary call failed (attempt %d): %s",
-                attempt + 1,
-                e,
-            )
-            if attempt == 0:
-                continue
-            return last_result
-
-        parsed = _parse_json_response(raw)
-        if not isinstance(parsed, list):
-            logger.error(
-                "[eco] Failed to parse response as list. Raw (first 500): %s",
-                raw[:500],
-            )
-            if attempt == 0:
-                continue
-            return last_result
-
-        last_result = parsed
-
-        # Coverage check. Only retry if the first attempt is SEVERELY short
-        # (missing > 30 % of days OR < 40 % of expected items). A moderately
-        # thin result (e.g. 70 % items + all days covered) is kept — a second
-        # 95-second Sonnet call just to pad items often costs more than it
-        # buys, and on slow days it's what pushed us past the 240s build
-        # budget and produced the "stuck at 95 %" UX.
-        covered = {p.get("day") for p in parsed if isinstance(p.get("day"), int)}
-        missing_days = num_days - len(covered) if num_days > 0 else 0
-        severely_short_days = num_days > 0 and missing_days > num_days * 0.3
-        severely_short_count = (
-            expected_items > 0 and len(parsed) < expected_items * 0.4
+            ),
+            timeout=65.0,  # asyncio-level belt-and-suspenders
         )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.error("[eco] Sonnet itinerary call TIMED OUT after 65s — no retry, failing build")
+        return None
+    except Exception as e:
+        logger.error("[eco] Claude itinerary call failed: %s", e)
+        return None
 
-        if not severely_short_days and not severely_short_count:
-            return parsed
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.error("[eco] Failed to parse response as list. Raw (first 500): %s", raw[:500])
+        return None
 
-        if attempt == 0:
-            logger.warning(
-                "[eco] Retry needed (severely short): %d items (expected ~%d), %d/%d days covered",
-                len(parsed), expected_items, len(covered), num_days,
-            )
-            continue
-
-        return parsed
-
-    return last_result
+    covered = {p.get("day") for p in parsed if isinstance(p.get("day"), int)}
+    logger.info(
+        "[eco] Sonnet returned %d places across %d/%d days (expected %d items)",
+        len(parsed), len(covered), num_days, expected_items,
+    )
+    # Accept ANY non-empty result. Shipping what we have beats timing out.
+    return parsed if parsed else None
 
 
 # ──────────────────────────────────────────────
@@ -4127,11 +4054,11 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     # Hard timeout per link so a slow Whisper/Vision download can't wedge the
     # whole build. Beyond the budget we use whatever content_text was already
     # on the link (caption-only is still useful for the classifier).
-    # Budget cut from 120s → 60s after discovering that re-extraction was
-    # eating a quarter of the total 240s build window on otherwise-slow runs.
+    # Budget now tight: 25s total, 20s per link. In production most links
+    # have cached content — re-extraction only fires for first-build.
     import time as _time
-    REEXTRACT_BUDGET_S = 35.0  # per link
-    TOTAL_REEXTRACT_BUDGET_S = 60.0  # across all stale links
+    REEXTRACT_BUDGET_S = 20.0  # per link
+    TOTAL_REEXTRACT_BUDGET_S = 25.0  # across all stale links
     reextract_start = _time.time()
     for link in stale_links:
         url = link.get("url", "")
@@ -4840,103 +4767,19 @@ async def _build_itinerary_eco(
                         len(built), day_num, dest_city,
                     )
 
-        # Verification / audit / experiences — these are *enrichment* steps
-        # that polish the output. None of them are required to produce a
-        # usable trip. Each runs with its own hard timeout, and the whole
-        # phase shares a 90s budget. If we exceed it, the remaining steps
-        # are skipped and the already-generated place_list goes straight to
-        # validate + create. Previous versions let every step expand into
-        # the user's perceived "95 % loop" — not any more.
-        any_flexible = any(
-            day_rigidity.get(dp["day_number"], "flexible") == "flexible"
-            for dp in day_plans
+        # Previous versions ran verify + audit + experiences INSIDE the build
+        # (up to 145s extra). That was the main reason the 240s wrapper kept
+        # timing out → 0 items → 95 % loop. Now we SKIP all enrichment in the
+        # build. The frontend runs them afterwards as background calls
+        # (/optimize-trip + /enrich-experiences) once items are visible, so
+        # the user sees the trip FAST and enrichment happens invisibly.
+        #
+        # The only thing we keep inline is the semantic dedup + cluster
+        # tightening, which are cheap and done inside _validate_and_create_items.
+        logger.info(
+            "[eco] Skipping in-build enrichment (verify/audit/experiences). "
+            "Frontend will trigger /enrich-experiences after items land."
         )
-        if any_flexible:
-            import time as _t_enrich
-            enrich_start = _t_enrich.time()
-            # 60s total shared budget. Tight on purpose: the 240s overall
-            # wrapper needs room for validate + create (~45s) AFTER
-            # enrichment completes. If we need more headroom, we drop
-            # experiences first (can be re-run with /enrich-experiences
-            # later), then audit, keeping verify which is cheapest.
-            ENRICH_BUDGET_S = 60.0
-            destination = trip.get("destination", "a destination")
-
-            def _remaining() -> float:
-                return max(0.0, ENRICH_BUDGET_S - (_t_enrich.time() - enrich_start))
-
-            async def _try_step(step_name: str, coro, timeout: float, fallback):
-                """Run a best-effort enrichment step. On timeout / error,
-                return `fallback` (usually the pre-step place_list) and log
-                which step was skipped. Never raises."""
-                rem = _remaining()
-                if rem < 5:
-                    logger.warning(
-                        "[eco] %s SKIPPED — enrichment budget exhausted (%.0fs used)",
-                        step_name, _t_enrich.time() - enrich_start,
-                    )
-                    return fallback
-                try:
-                    step_t = min(timeout, rem)
-                    return await asyncio.wait_for(coro, timeout=step_t)
-                except asyncio.TimeoutError:
-                    logger.warning("[eco] %s timed out after %.0fs, using pre-step list", step_name, min(timeout, rem))
-                    return fallback
-                except Exception as e:
-                    logger.warning("[eco] %s failed (%s), using pre-step list", step_name, e)
-                    return fallback
-
-            # Step 1 — verify & optimize ordering. Timeout 20s.
-            place_list = await _try_step(
-                "verify",
-                _verify_and_optimize_itinerary(
-                    place_list, trip, day_plans, cost, day_rigidity=day_rigidity,
-                ),
-                timeout=20.0,
-                fallback=place_list,
-            )
-
-            # Step 2 — landmark audit (inject missing iconic places). Timeout 20s.
-            place_list = await _try_step(
-                "audit",
-                _audit_landmark_coverage(
-                    place_list, destination, len(day_plans), cost, day_rigidity=day_rigidity,
-                ),
-                timeout=20.0,
-                fallback=place_list,
-            )
-
-            # Step 3 — signature destination experiences. Timeout 20s. If this
-            # times out, user just doesn't get the "show de tango" card —
-            # they can click "Adicionar experiências" later to retry.
-            video_day_mentions: dict[int, list[str]] = {}
-            for day_num, entry in canonical_days.items():
-                if isinstance(entry, dict):
-                    dn_places = entry.get("places") or []
-                    if dn_places:
-                        video_day_mentions[day_num] = list(dn_places)
-            destination_experiences = await _try_step(
-                "experiences",
-                _suggest_destination_experiences(
-                    destination, place_list, len(day_plans), cost,
-                    day_rigidity=day_rigidity,
-                    video_day_mentions=video_day_mentions,
-                ),
-                timeout=20.0,
-                fallback=[],
-            )
-            if destination_experiences:
-                place_list.extend(destination_experiences)
-
-            logger.info(
-                "[eco] Enrichment phase done in %.1fs (budget=%ds)",
-                _t_enrich.time() - enrich_start, int(ENRICH_BUDGET_S),
-            )
-        else:
-            logger.info(
-                "[eco] Skipping verify+audit — all %d days are locked/partial",
-                len(day_plans),
-            )
 
     result = await _validate_and_create_items(
         place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,

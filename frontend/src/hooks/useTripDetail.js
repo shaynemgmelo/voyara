@@ -14,6 +14,13 @@ export default function useTripDetail(tripId) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refining, setRefining] = useState(false);
+  // Client-side hard failure. When generation has been running for more
+  // than CLIENT_FAILURE_AFTER_MS and the backend still hasn't either
+  // delivered items OR persisted a build_error, we forcibly transition
+  // into a failure state so the user isn't stranded on 95 %. If the
+  // backend DOES finish later, polling picks it up and the items still
+  // land — this flag only controls the modal.
+  const [clientForcedFailure, setClientForcedFailure] = useState(false);
   const pollRef = useRef(null);
   const analyzeRetried = useRef(false);
   // Auto-retry for Phase 2 (itinerary build). We stamp the time we first saw
@@ -23,6 +30,10 @@ export default function useTripDetail(tripId) {
   const buildStuckSinceRef = useRef(null);
   const buildRetried = useRef(false);
   const RETRY_BUILD_AFTER_MS = 90_000;
+  // Absolute ceiling for how long we're willing to show the 95 % modal.
+  // Backend wrapper budget is 150 s — so 180 s on the client gives a 30 s
+  // grace window for polling delays.
+  const CLIENT_FAILURE_AFTER_MS = 180_000;
   // Browser-notification bookkeeping — we fire at most one "ready" push per
   // page-load so the user gets pinged even when the tab is in the background.
   const wasGeneratingRef = useRef(false);
@@ -61,6 +72,10 @@ export default function useTripDetail(tripId) {
     // STOP polling if the backend persisted a build_error — at that point
     // the 95 % loop would never end on its own. The UI switches to the
     // "Falha" card and waits for the user to decide.
+    //
+    // We KEEP polling when clientForcedFailure is true — the modal shows
+    // "Tentar de novo" but if the backend quietly finishes the items in
+    // the background, we want to catch them and unlock the trip.
     const hasItems = trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
     const hasBuildError = Boolean(trip?.traveler_profile?.build_error);
     if (trip.profile_status === "confirmed" && hasExtractedLinks && !hasItems && !hasBuildError) {
@@ -200,13 +215,25 @@ export default function useTripDetail(tripId) {
           //     retry IMMEDIATELY (no need to wait 90s — the worker already
           //     died silently).
           //   - Otherwise, fall back to the 90s timer as a safety net.
+          //   - Hard ceiling: at 180s we FORCE the UI into failure state
+          //     so the user sees a retry button even if the backend is
+          //     still silently grinding or dead.
+          const hasBackendError = Boolean(data?.traveler_profile?.build_error);
           const generating =
-            data.profile_status === "confirmed" && hasExtracted && !hasItems;
+            data.profile_status === "confirmed" && hasExtracted && !hasItems && !hasBackendError;
           if (generating) {
             if (!buildStuckSinceRef.current) {
               buildStuckSinceRef.current = Date.now();
             }
             const stuckFor = Date.now() - buildStuckSinceRef.current;
+
+            // Client-side hard failure — never let the user sit on 95 %
+            // for more than CLIENT_FAILURE_AFTER_MS. If the backend
+            // eventually succeeds, polling will pick up the items and
+            // the UI transitions back to success on its own.
+            if (stuckFor > CLIENT_FAILURE_AFTER_MS && !clientForcedFailure) {
+              setClientForcedFailure(true);
+            }
 
             // Fast retry path: after 30s, ask the AI service. Retry ONLY
             // if the server says there's no active build AND (was_stale
@@ -257,6 +284,11 @@ export default function useTripDetail(tripId) {
             }
           } else {
             buildStuckSinceRef.current = null;
+            if (hasItems && clientForcedFailure) {
+              // Backend quietly succeeded after we flipped into forced
+              // failure — un-flip so the trip becomes visible again.
+              setClientForcedFailure(false);
+            }
           }
 
           const keepPolling = hasActive
@@ -539,6 +571,9 @@ export default function useTripDetail(tripId) {
     }
     buildStuckSinceRef.current = null;
     buildRetried.current = false;
+    // Clear the client-side forced failure so the modal swaps back to
+    // "Gerando roteiro" and the user sees the build actually running.
+    setClientForcedFailure(false);
     // Step 1: punch through the dedup guard by clearing any stale/fresh
     // active entry. Safe — if there's no entry, the endpoint is a no-op.
     try {
@@ -556,11 +591,33 @@ export default function useTripDetail(tripId) {
     await fetchTrip();
   }, [trip, tripId, fetchTrip]);
 
+  // Ticker so the 180 s client failure threshold actually fires even if
+  // polling stalls briefly. Runs only while we're waiting for items.
+  useEffect(() => {
+    if (clientForcedFailure) return;
+    if (!trip) return;
+    const waitingForItems =
+      trip.profile_status === "confirmed"
+      && trip.links?.some((l) => l.status === "extracted")
+      && !trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0)
+      && !trip?.traveler_profile?.build_error;
+    if (!waitingForItems) return;
+    const id = setInterval(() => {
+      if (!buildStuckSinceRef.current) return;
+      const stuckFor = Date.now() - buildStuckSinceRef.current;
+      if (stuckFor > CLIENT_FAILURE_AFTER_MS) {
+        setClientForcedFailure(true);
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, [trip, clientForcedFailure]);
+
   return {
     trip,
     loading,
     error,
     refining,
+    clientForcedFailure,
     fetchTrip,
     addItem,
     updateItem,
