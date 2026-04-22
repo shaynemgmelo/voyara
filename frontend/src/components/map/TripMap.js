@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GoogleMap, useJsApiLoader, Marker, Polyline, InfoWindow } from "@react-google-maps/api";
 import { getDayColor } from "../../utils/colors";
 import { categoryIcon } from "../../utils/formatters";
+import { splitByGap } from "../../utils/geo";
 import { useLanguage } from "../../i18n/LanguageContext";
 
 const LIGHT_MAP_STYLE = [
@@ -213,29 +214,93 @@ export default function TripMap({
         />
       ))}
 
-      {/* Route lines per day */}
+      {/* Route lines per day — split into sub-segments when consecutive
+          items are >80km apart. The long-distance hop between segments
+          becomes a dashed line (transport) with a ✈️ icon at midpoint,
+          so a multi-city day never draws a solid 700km line across the
+          map like a walking path. */}
       {dayPlans
         .filter((dp) => !selectedDayNumber || dp.day_number === selectedDayNumber)
-        .map((dp) => {
+        .flatMap((dp) => {
           const items = (dp.itinerary_items || [])
             .filter((i) => i.latitude && i.longitude)
             .sort((a, b) => a.position - b.position);
-          if (items.length < 2) return null;
+          if (items.length < 2) return [];
 
-          return (
-            <Polyline
-              key={`route-${dp.id}-${items.map((i) => i.id).join(",")}`}
-              path={items.map((i) => ({
-                lat: parseFloat(i.latitude),
-                lng: parseFloat(i.longitude),
-              }))}
-              options={{
-                strokeColor: getDayColor(dp.day_number),
-                strokeOpacity: 0.6,
-                strokeWeight: 3,
-              }}
-            />
-          );
+          const { segments, transports } = splitByGap(items);
+          const color = getDayColor(dp.day_number);
+          const nodes = [];
+
+          segments.forEach((seg, idx) => {
+            if (seg.length < 2) return;
+            nodes.push(
+              <Polyline
+                key={`route-${dp.id}-${idx}-${seg.map((p) => p.item.id).join(",")}`}
+                path={seg.map((p) => ({ lat: p.lat, lng: p.lng }))}
+                options={{
+                  strokeColor: color,
+                  strokeOpacity: 0.6,
+                  strokeWeight: 3,
+                }}
+              />,
+            );
+          });
+
+          transports.forEach((t, idx) => {
+            const path = [
+              { lat: t.from.lat, lng: t.from.lng },
+              { lat: t.to.lat, lng: t.to.lng },
+            ];
+            nodes.push(
+              <Polyline
+                key={`transport-${dp.id}-${idx}`}
+                path={path}
+                options={{
+                  strokeOpacity: 0,
+                  strokeWeight: 0,
+                  icons: [
+                    {
+                      icon: {
+                        path: "M 0,-1 0,1",
+                        strokeOpacity: 1,
+                        strokeColor: color,
+                        strokeWeight: 2,
+                        scale: 3,
+                      },
+                      offset: "0",
+                      repeat: "12px",
+                    },
+                  ],
+                }}
+              />,
+            );
+            const midLat = (t.from.lat + t.to.lat) / 2;
+            const midLng = (t.from.lng + t.to.lng) / 2;
+            nodes.push(
+              <Marker
+                key={`transport-icon-${dp.id}-${idx}`}
+                position={{ lat: midLat, lng: midLng }}
+                icon={{
+                  // Data-URL SVG emoji pin so we don't depend on google maps
+                  // spritesheet. Slightly offset anchor so it sits above line.
+                  url:
+                    "data:image/svg+xml;utf-8," +
+                    encodeURIComponent(
+                      `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+                        <circle cx="14" cy="14" r="12" fill="white" stroke="${color}" stroke-width="2"/>
+                        <text x="14" y="19" text-anchor="middle" font-size="14">✈️</text>
+                      </svg>`,
+                    ),
+                  scaledSize: { width: 28, height: 28 },
+                  anchor: { x: 14, y: 14 },
+                }}
+                clickable={false}
+                zIndex={0}
+              />,
+            );
+          });
+
+          return nodes;
         })}
 
       {/* Dashed lines from hotel to first/last items of selected day */}

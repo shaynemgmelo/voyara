@@ -313,6 +313,19 @@ export default function TripTimeline({
 
   const day = allDays[activeDayIdx];
   const items = day.itinerary_items || [];
+  const previousDay = activeDayIdx > 0 ? allDays[activeDayIdx - 1] : null;
+
+  // Inter-city transport hint — when the active day is in a different city
+  // than the previous day, the pipeline is really describing a flight /
+  // train / van day, not a walking itinerary. Surface that with its own
+  // card so the user knows to book transport (and so it visually explains
+  // why the day has fewer places than a normal city day).
+  const normalizeCity = (c) => (c || "").trim().toLowerCase();
+  const showTransportCard =
+    previousDay &&
+    day.city &&
+    previousDay.city &&
+    normalizeCity(day.city) !== normalizeCity(previousDay.city);
 
   return (
     <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
@@ -395,6 +408,26 @@ export default function TripTimeline({
           })}
         </div>
       </div>
+
+      {/* Inter-city transport card — shown before the day header whenever
+          the active day is in a different city than the previous one. */}
+      {showTransportCard && (
+        <div className="mb-4 mx-2 rounded-2xl border-2 border-amber-200 bg-gradient-to-r from-amber-50 via-amber-50 to-orange-50 p-4 flex items-center gap-4">
+          <div className="text-3xl flex-shrink-0" aria-hidden="true">✈️</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-[11px] font-bold tracking-wider text-amber-700 uppercase">
+              Dia de deslocamento
+            </div>
+            <div className="text-base font-semibold text-slate-900 truncate">
+              {previousDay.city} <span className="text-amber-600">→</span> {day.city}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              Reserve o transporte antes de fechar o roteiro — voo, trem ou van
+              costumam ser as opções.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Active day header (contextual) */}
       <div className="flex items-baseline justify-between mb-4 px-2">
