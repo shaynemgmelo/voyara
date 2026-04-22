@@ -125,8 +125,16 @@ class GooglePlacesClient:
 
         client = await self._get_client()
 
+        # Only append `location` to the query when it's not ALREADY a
+        # substring — the caller often passes a query like "Wat Pho Bangkok,
+        # Thailand" and a location "Bangkok, Thailand", which would
+        # duplicate the city. Case-insensitive check.
+        if location and location.lower() not in query.lower():
+            final_query = f"{query} {location}"
+        else:
+            final_query = query
         params = {
-            "query": f"{query} {location}" if location else query,
+            "query": final_query,
             "key": settings.google_places_api_key,
         }
 

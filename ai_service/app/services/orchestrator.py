@@ -1925,6 +1925,15 @@ async def _get_destination_coords(destination: str, places_client: GooglePlacesC
     return None
 
 
+# Global semaphore for Haiku experience_recommendations to respect
+# Anthropic's org-level rate limit (50 req/min on Haiku 4.5). On a
+# 15-day multi-base trip we previously fired 30+ concurrent calls and
+# got 429-stormed — half the items ended up with empty recommendations.
+# Concurrency of 4 keeps us under the limit even with bursts while still
+# processing a full trip in ~5-10s.
+_HAIKU_REC_SEMAPHORE = asyncio.Semaphore(4)
+
+
 async def _experience_recommendations(
     experience_name: str, destination: str, cost: CostTracker,
 ) -> list[dict]:
@@ -1935,6 +1944,9 @@ async def _experience_recommendations(
 
     Returns a list of `{name, note}` dicts (empty on failure — the card still
     renders, it just won't have the "💡 Onde fazer" line).
+
+    Rate-limited via a global semaphore so parallel calls from
+    _validate_and_create_items never burst past Anthropic's 50 req/min cap.
     """
     if not experience_name or not destination:
         return []
@@ -1961,27 +1973,28 @@ async def _experience_recommendations(
         "- Se não conhece opções concretas em " + destination + ", retorne []."
     )
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}],
-                    timeout=15.0,
-                )
-            ),
-            timeout=20.0,
-        )
-        cost.record_usage(response.usage)
-        raw = response.content[0].text if response.content else "[]"
-    except Exception as e:
-        logger.warning(
-            "[experience-rec] Haiku failed for %r in %s: %s",
-            experience_name, destination, e,
-        )
-        return []
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=1)
+    async with _HAIKU_REC_SEMAPHORE:
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=500,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=15.0,
+                    )
+                ),
+                timeout=20.0,
+            )
+            cost.record_usage(response.usage)
+            raw = response.content[0].text if response.content else "[]"
+        except Exception as e:
+            logger.warning(
+                "[experience-rec] Haiku failed for %r in %s: %s",
+                experience_name, destination, e,
+            )
+            return []
 
     parsed = _parse_json_response(raw)
     if not isinstance(parsed, list):
@@ -5298,53 +5311,86 @@ _GENERIC_CATEGORY_NAMES = {
     # Beach relaxation
     "relaxar na praia", "relax na praia", "beach day", "beach relaxation",
     "praia", "praias", "beach", "descansar", "descanso", "chill",
+    "beach exploration", "blue sea", "crystal clear sea", "clear sea",
+    "calm and tranquil island", "maldives-like scenery",
     # Food / markets generic
     "food tour", "street food", "comida de rua", "mercados", "mercados locais",
-    "comida local", "food experience",
+    "comida local", "food experience", "upscale restaurant", "fine dining",
+    "restaurants", "restaurant",
     # Cultural generic
     "cultural immersion", "imersao cultural", "cultura local",
-    "templos", "templos budistas", "temples",
+    "templos", "templos budistas", "temples", "temple",
+    "thai culture", "thai culture and religion", "culture", "religion",
+    "cultural experience", "festival of lanterns", "festival",
     # Nightlife generic
     "vida noturna", "nightlife", "night out", "festa",
     # Shopping generic
     "shopping", "compras", "mercado", "market",
+    "hotels", "luxury hotels", "luxury hotel", "accommodation",
     # Generic activities
     "passeio", "passeios", "tour", "tours", "atividade", "atividades",
     "city tour", "walking tour",  # unless named (e.g. "Free Walking Tour Rome")
+    "island hopping", "ilhas", "islands", "island",
+    "famous cave", "cave", "caverna",
+    "boat transfer", "boat transfer (4 hours)", "ferry transfer",
+    "early morning visit",
+}
+
+# Generic adjective/noun tokens — if EVERY meaningful token in the item
+# name is in this set, the name is structural filler, not a venue.
+_GENERIC_TOKENS = {
+    "calm", "tranquil", "luxury", "upscale", "crystal", "clear",
+    "blue", "famous", "historic", "beautiful", "amazing", "iconic",
+    "traditional", "local", "thai", "asian", "tropical",
+    "hotels", "hotel", "restaurant", "restaurants", "cafe", "bar", "bars",
+    "temples", "temple", "beach", "beaches", "island", "islands",
+    "cave", "caves", "market", "markets", "street", "food",
+    "tour", "tours", "passeio", "relaxation", "exploration",
+    "visit", "experience", "scenery",
+    "and", "or", "the", "a", "an", "of", "with", "in",
+    "com", "de", "da", "do", "das", "dos", "o", "a", "e", "ou",
 }
 
 
 def _is_generic_category_name(item_name: str) -> bool:
     """True if the item's name is a bare category ("rooftop bars",
-    "city exploration") rather than a specific venue. These items
-    destroy the itinerary by burying real places in their notes field.
-    See _GENERIC_CATEGORY_NAMES.
+    "city exploration", "luxury hotels", "blue sea") rather than a
+    specific venue. These items destroy the itinerary by burying real
+    places in their notes field.
 
-    Returns False for names that contain a SPECIFIC marker (a proper
-    noun, a number, or a quoted title) even if a generic keyword is
-    also present. E.g. "Rooftop Mahanakhon SkyWalk" → False.
+    Detection uses TWO signals:
+      1. Exact match against _GENERIC_CATEGORY_NAMES (hand-curated list).
+      2. Structural check: after stripping parenthetical notes, every
+         meaningful token is in _GENERIC_TOKENS (common adjectives and
+         plural common nouns). A real venue name always has at least
+         one proper-noun token Google/humans would capitalize.
     """
     nname = _normalize_for_compare(item_name)
     if not nname:
         return False
+    # Strip parenthetical notes like "(end of year)" or "(4 hours)".
+    import re as _re
+    stripped = _re.sub(r"\s*\([^)]*\)\s*", " ", nname).strip()
     # Exact match — the most reliable signal.
-    if nname in _GENERIC_CATEGORY_NAMES:
+    if stripped in _GENERIC_CATEGORY_NAMES or nname in _GENERIC_CATEGORY_NAMES:
         return True
-    # "Onde fazer em X" style → still generic.
-    if nname.startswith("onde fazer") or nname.startswith("o que fazer"):
+    # "Onde fazer em X" / "O que fazer" style → still generic.
+    if stripped.startswith("onde fazer") or stripped.startswith("o que fazer"):
         return True
-    # Short generic + a city doesn't redeem it ("rooftop bars bangkok" is
-    # still generic). But a name with multiple proper-noun tokens is fine.
-    # Heuristic: if every token is in the generic set or < 4 chars, flag.
-    tokens = nname.split()
-    if len(tokens) <= 3:
-        non_generic_tokens = [
-            t for t in tokens
-            if t not in _GENERIC_CATEGORY_NAMES
-            and len(t) >= 4
-            and t not in {"the", "and", "com", "para", "das", "dos"}
-        ]
-        if not non_generic_tokens:
+    # "Chegada" / "Arrival" with nothing else is generic.
+    if stripped in {"chegada", "arrival", "partida", "departure", "volta", "voo"}:
+        return True
+    # Structural: every meaningful token is common/generic. Strips short
+    # tokens (<3 chars) which are usually articles/conjunctions.
+    tokens = [t for t in stripped.split() if len(t) >= 3]
+    if len(tokens) >= 1:
+        non_generic = [t for t in tokens if t not in _GENERIC_TOKENS]
+        if not non_generic:
+            return True
+        # Length 1-2 AND at least one token is generic → likely generic.
+        if len(tokens) <= 2 and any(t in _GENERIC_TOKENS for t in tokens) and all(
+            t in _GENERIC_TOKENS or t in _GENERIC_CATEGORY_NAMES for t in tokens
+        ):
             return True
     return False
 
@@ -6119,14 +6165,41 @@ async def _build_itinerary_eco(
     # Fast path: skip the 30-60s Sonnet call when the classifier already has
     # every scheduled day covered with locked data. Kicks in when a D-category
     # video (or multi-video consolidation) fills every day_plan.
+    #
+    # IMPORTANT — we now DISABLE the fast path for multi_base and tour_driven
+    # destinations AND whenever the classifier emitted activity_hints. Those
+    # scenarios need Sonnet's reasoning to (a) resolve hints into concrete
+    # named venues, (b) structure transfer days between bases, (c) apply the
+    # "no generic category items" hard rule. The fast path skipped all of
+    # that and was producing cards titled "rooftop bars" / "temples" /
+    # "Thai culture" — the exact user complaint.
     num_scheduled_days = len(day_plans)
+    dest_type_from_profile = (
+        (profile.get("destination_classification") or {}).get("destination_type")
+    )
+    any_day_has_hints = any(
+        bool((entry or {}).get("activity_hints"))
+        for entry in canonical_days.values()
+    )
+    fast_path_unsafe = (
+        dest_type_from_profile in {"multi_base", "tour_driven"}
+        or any_day_has_hints
+    )
     fast_path = (
-        num_scheduled_days > 0
+        not fast_path_unsafe
+        and num_scheduled_days > 0
         and len(canonical_days) >= num_scheduled_days
         and all(
             day_rigidity.get(dp["day_number"]) == "locked" for dp in day_plans
         )
     )
+    if fast_path_unsafe and len(canonical_days) >= num_scheduled_days:
+        logger.info(
+            "[eco] FAST PATH skipped — destination_type=%s any_hints=%s. "
+            "Using Sonnet so hints resolve to concrete named venues and "
+            "multi-base transfer structure gets applied.",
+            dest_type_from_profile, any_day_has_hints,
+        )
 
     place_list: list[dict] | None
     if fast_path:
