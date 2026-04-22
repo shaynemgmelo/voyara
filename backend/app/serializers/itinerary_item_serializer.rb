@@ -39,11 +39,13 @@ class ItineraryItemSerializer
       item_status: @item.item_status,
       best_turn: @item.best_turn,
       region: @item.region,
-      # Camada 4 — planning model per item.
-      activity_model: @item.activity_model,
-      visit_mode: @item.visit_mode,
+      # Camada 4 — planning model per item. Defensive reads via
+      # respond_to? so a pre-migration DB (columns not yet added) still
+      # serializes cleanly instead of 500-ing every /trips request.
+      activity_model: @item.respond_to?(:activity_model) ? @item.activity_model : nil,
+      visit_mode: @item.respond_to?(:visit_mode) ? @item.visit_mode : nil,
       # STEP 2 — semantic role for UI icons / filters.
-      item_role: @item.item_role,
+      item_role: @item.respond_to?(:item_role) ? @item.item_role : nil,
       personal_notes: @item.personal_notes,
       vibe_tags: @item.vibe_tags,
       alerts: @item.alerts,

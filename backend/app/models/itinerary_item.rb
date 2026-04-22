@@ -49,9 +49,19 @@ class ItineraryItem < ApplicationRecord
   validates :item_status, inclusion: { in: ITEM_STATUSES }
   validates :best_turn, inclusion: { in: BEST_TURNS }, allow_nil: true
   validates :extraction_method, inclusion: { in: EXTRACTION_METHODS }, allow_nil: true
-  validates :activity_model, inclusion: { in: ACTIVITY_MODELS }, allow_nil: true
-  validates :visit_mode, inclusion: { in: VISIT_MODES }, allow_nil: true
-  validates :item_role, inclusion: { in: ITEM_ROLES }, allow_nil: true
+  # Camada 4 / STEP 2 — only validate when the column exists in the
+  # current schema. Protects against migration skew (fresh deploy running
+  # with an un-migrated db still serves 200s instead of 500-ing every
+  # request that touches an ItineraryItem).
+  if column_names.include?("activity_model")
+    validates :activity_model, inclusion: { in: ACTIVITY_MODELS }, allow_nil: true
+  end
+  if column_names.include?("visit_mode")
+    validates :visit_mode, inclusion: { in: VISIT_MODES }, allow_nil: true
+  end
+  if column_names.include?("item_role")
+    validates :item_role, inclusion: { in: ITEM_ROLES }, allow_nil: true
+  end
 
   before_validation :sync_legacy_source
   before_save       :backfill_best_turn
