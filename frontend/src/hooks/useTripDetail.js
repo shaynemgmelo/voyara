@@ -30,10 +30,12 @@ export default function useTripDetail(tripId) {
   const buildStuckSinceRef = useRef(null);
   const buildRetried = useRef(false);
   const RETRY_BUILD_AFTER_MS = 90_000;
-  // Absolute ceiling for how long we're willing to show the 95 % modal.
-  // Backend wrapper budget is 200 s — so 240 s on the client gives a 40 s
-  // grace window for polling delays + backend error persistence.
-  const CLIENT_FAILURE_AFTER_MS = 240_000;
+  // Absolute ceiling for how long we're willing to show the progress modal.
+  // The new combined pipeline (extract + profile + build) has a 350s backend
+  // budget — 400s on the client gives a 50s grace window for polling delays
+  // and the backend's build_error persistence step. Worst case the user
+  // sees the failure modal at 400s with a "Tentar de novo" button.
+  const CLIENT_FAILURE_AFTER_MS = 400_000;
   // Browser-notification bookkeeping — we fire at most one "ready" push per
   // page-load so the user gets pinged even when the tab is in the background.
   const wasGeneratingRef = useRef(false);
@@ -525,9 +527,13 @@ export default function useTripDetail(tripId) {
       profile_status: updated.profile_status,
     }));
 
-    // Resume processing: trigger ONE itinerary build for the whole trip
-    // Only need to call once — the AI service builds a unified itinerary for all links
-    if (status === "confirmed") {
+    // Resume processing: trigger a build ONLY if the trip has no items yet
+    // (user is in the initial flow and confirmed an empty profile). When the
+    // trip already has items, this is just a profile edit from the inline
+    // card — no rebuild, otherwise we'd duplicate every item. The user can
+    // still use the explicit "refine" flow if they want a rebuild.
+    const hasItems = trip?.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
+    if (status === "confirmed" && !hasItems) {
       const anyLink = trip?.links?.[0];
       if (anyLink) {
         try {

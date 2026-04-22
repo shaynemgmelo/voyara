@@ -1,6 +1,18 @@
 import { useState, useMemo } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
 
+/**
+ * Editable inline profile card. Phase 3 of the deferred-extraction redesign
+ * removed the blocking "confirm or reject this profile" modal — instead the
+ * profile is auto-confirmed by the backend and shown here as a normal
+ * collapsible section the user can edit at any time.
+ *
+ * Props:
+ *   profile  — trip.traveler_profile JSON blob
+ *   numDays  — trip duration (used for the multi-city distribution slider)
+ *   onSave   — async (updatedProfile) => void; PATCHes the trip
+ */
+
 const CATEGORY_PREFS = [
   { key: "restaurants", icon: "🍽️", default: true },
   { key: "attractions", icon: "🏛️", default: true },
@@ -12,9 +24,10 @@ const CATEGORY_PREFS = [
   { key: "viewpoints", icon: "📸", default: true },
 ];
 
-export default function TravelerProfileCard({ profile, numDays, onConfirm, onReject }) {
+export default function TravelerProfileCard({ profile, numDays, onSave }) {
   const { t, lang } = useLanguage();
   const isEn = lang === "en";
+  const pt = lang === "pt-BR";
 
   const localizedField = (obj, field) => {
     if (isEn) return obj?.[`${field}_en`] || obj?.[field] || "";
@@ -25,10 +38,12 @@ export default function TravelerProfileCard({ profile, numDays, onConfirm, onRej
     return obj?.[field] || [];
   };
 
-  const [step, setStep] = useState(0); // 0: profile overview, 1: category prefs, 2: pace + city
+  const [collapsed, setCollapsed] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editedProfile, setEditedProfile] = useState({ ...profile });
   const [categoryPrefs, setCategoryPrefs] = useState(() => {
-    const saved = profile.category_preferences || {};
+    const saved = profile?.category_preferences || {};
     const prefs = {};
     CATEGORY_PREFS.forEach((c) => {
       prefs[c.key] = saved[c.key] !== undefined ? saved[c.key] : c.default;
@@ -36,7 +51,7 @@ export default function TravelerProfileCard({ profile, numDays, onConfirm, onRej
     return prefs;
   });
 
-  const cities = profile.cities_detected || [];
+  const cities = profile?.cities_detected || [];
 
   const defaultDistribution = useMemo(() => {
     if (cities.length < 2) return {};
@@ -50,153 +65,195 @@ export default function TravelerProfileCard({ profile, numDays, onConfirm, onRej
     return dist;
   }, [cities, numDays]);
 
-  const [dayDistribution, setDayDistribution] = useState(defaultDistribution);
+  const [dayDistribution, setDayDistribution] = useState(
+    profile?.day_distribution || defaultDistribution
+  );
   const totalAssigned = Object.values(dayDistribution).reduce((a, b) => a + b, 0);
   const isValidDistribution = cities.length < 2 || totalAssigned === numDays;
+
+  // No profile yet → don't render. Happens briefly during the early
+  // extracting/analyzing phases of the build.
+  if (!profile || (!editedProfile.travel_style && !editedProfile.interests?.length)) {
+    return null;
+  }
 
   const handleDayChange = (city, value) => {
     const num = Math.max(0, Math.min(numDays, parseInt(value) || 0));
     setDayDistribution((prev) => ({ ...prev, [city]: num }));
   };
 
-  const handleConfirm = () => {
-    const finalProfile = { ...editedProfile, category_preferences: categoryPrefs };
-    if (cities.length >= 2) {
-      finalProfile.day_distribution = dayDistribution;
+  const handleSave = async () => {
+    if (!onSave) return;
+    setSaving(true);
+    try {
+      const finalProfile = { ...editedProfile, category_preferences: categoryPrefs };
+      if (cities.length >= 2) {
+        finalProfile.day_distribution = dayDistribution;
+      }
+      await onSave(finalProfile);
+      setEditing(false);
+    } finally {
+      setSaving(false);
     }
-    onConfirm(finalProfile);
   };
 
-  const totalSteps = cities.length >= 2 ? 3 : 2;
+  const interestPills = localizedList(editedProfile, "interests");
+  const style = localizedField(editedProfile, "travel_style");
+  const description = localizedField(editedProfile, "profile_description");
 
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col">
-        {/* Progress */}
-        <div className="flex justify-center gap-2 pt-5 px-6">
-          {Array.from({ length: totalSteps }).map((_, i) => (
-            <div
-              key={i}
-              className={`h-1.5 rounded-full transition-all ${
-                i === step ? "w-8 bg-coral-500" : i < step ? "w-4 bg-coral-300" : "w-4 bg-gray-200"
-              }`}
-            />
-          ))}
-        </div>
-
-        {/* Step 0: Profile overview */}
-        {step === 0 && (
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            <div className="text-center mb-5">
-              <span className="text-3xl mb-2 block">✨</span>
-              <h2 className="text-lg font-bold text-gray-900">{t("profile.title")}</h2>
-              <p className="text-xs text-gray-400 mt-1">{t("profile.modalSubtitle")}</p>
+  // ── Read-only collapsed summary (default state) ──────────────────
+  if (!editing) {
+    return (
+      <div className="mb-4 rounded-2xl bg-white border border-gray-200 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left"
+        >
+          <span className="text-xl">✨</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-gray-900 truncate">
+              {style || (pt ? "Seu perfil de viagem" : "Your traveler profile")}
             </div>
-
-            {/* Description */}
-            {localizedField(editedProfile, "profile_description") ? (
-              <p className="text-gray-600 text-sm leading-relaxed text-center mb-5">
-                {localizedField(editedProfile, "profile_description")}
-              </p>
-            ) : (
-              <p className="text-gray-400 text-sm italic text-center mb-5">
-                {t("profile.emptyFallback")}
-              </p>
-            )}
-
-            {/* Style */}
-            {localizedField(editedProfile, "travel_style") && (
-              <div className="text-center mb-4">
-                <span className="text-xs text-gray-400">{t("profile.style")}</span>
-                <p className="text-sm font-medium text-coral-600">{localizedField(editedProfile, "travel_style")}</p>
+            {!collapsed ? null : (
+              <div className="text-xs text-gray-500 truncate">
+                {interestPills.slice(0, 3).join(" · ") || (pt ? "toque pra ver detalhes" : "tap to see details")}
               </div>
             )}
+          </div>
+          <span className="text-gray-400 text-xs">{collapsed ? "▾" : "▴"}</span>
+        </button>
 
-            {/* Interests */}
-            {localizedList(editedProfile, "interests").length > 0 && (
-              <div className="flex flex-wrap justify-center gap-1.5">
-                {localizedList(editedProfile, "interests").map((interest) => (
+        {!collapsed && (
+          <div className="px-4 pb-4 space-y-3 border-t border-gray-100">
+            {description && (
+              <p className="text-sm text-gray-600 leading-relaxed">{description}</p>
+            )}
+            {interestPills.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {interestPills.map((interest) => (
                   <span
                     key={interest}
-                    className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200"
+                    className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700"
                   >
                     {interest}
                   </span>
                 ))}
               </div>
             )}
+            <div className="flex items-center gap-3 text-xs text-gray-500">
+              <span>
+                {pt ? "Ritmo:" : "Pace:"}{" "}
+                <strong className="text-coral-600">{editedProfile.pace || "moderate"}</strong>
+              </span>
+              {cities.length > 0 && (
+                <span>
+                  {pt ? "Cidades:" : "Cities:"}{" "}
+                  <strong className="text-gray-700">{cities.join(", ")}</strong>
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="text-xs font-semibold text-coral-600 hover:text-coral-700"
+            >
+              {pt ? "Editar perfil →" : "Edit profile →"}
+            </button>
           </div>
         )}
+      </div>
+    );
+  }
 
-        {/* Step 1: Category preferences */}
-        {step === 1 && (
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            <div className="text-center mb-5">
-              <span className="text-3xl mb-2 block">🎯</span>
-              <h2 className="text-lg font-bold text-gray-900">{t("profile.whatYouWant")}</h2>
-              <p className="text-xs text-gray-400 mt-1">{t("profile.whatYouWantDesc")}</p>
-            </div>
+  // ── Edit mode ────────────────────────────────────────────────────
+  return (
+    <div className="mb-4 rounded-2xl bg-white border-2 border-coral-300 shadow-sm overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-xl">✏️</span>
+          <span className="text-sm font-semibold text-gray-900">
+            {pt ? "Editando perfil" : "Editing profile"}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(false);
+            setEditedProfile({ ...profile });
+          }}
+          className="text-xs text-gray-400 hover:text-gray-600"
+        >
+          {pt ? "Cancelar" : "Cancel"}
+        </button>
+      </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              {CATEGORY_PREFS.map((cat) => {
-                const active = categoryPrefs[cat.key];
-                return (
-                  <button
-                    key={cat.key}
-                    onClick={() =>
-                      setCategoryPrefs((prev) => ({ ...prev, [cat.key]: !prev[cat.key] }))
-                    }
-                    className={`flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all text-left ${
-                      active
-                        ? "border-coral-400 bg-coral-50"
-                        : "border-gray-200 bg-white hover:border-gray-300"
-                    }`}
-                  >
-                    <span className="text-xl">{cat.icon}</span>
-                    <span className={`text-sm font-medium ${active ? "text-gray-900" : "text-gray-400"}`}>
-                      {t(`profile.cat_${cat.key}`)}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Pace selection */}
-            <div className="mt-6">
-              <h3 className="text-sm font-medium text-gray-700 mb-3 text-center">{t("profile.selectPace")}</h3>
-              <div className="flex gap-2">
-                {["relaxed", "moderate", "intense"].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setEditedProfile((prev) => ({ ...prev, pace: p }))}
-                    className={`flex-1 py-2.5 rounded-xl border-2 text-sm font-medium transition-all ${
-                      editedProfile.pace === p
-                        ? "border-coral-400 bg-coral-50 text-gray-900"
-                        : "border-gray-200 text-gray-400 hover:border-gray-300"
-                    }`}
-                  >
-                    {p === "relaxed" && "🧘"} {p === "moderate" && "🚶"} {p === "intense" && "🏃"}
-                    <br />
-                    <span className="text-xs">{t(`profile.${p}`)}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
+      <div className="px-4 py-4 space-y-5">
+        {/* Categories */}
+        <div>
+          <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+            {pt ? "Categorias" : "Categories"}
+          </h3>
+          <div className="grid grid-cols-2 gap-2">
+            {CATEGORY_PREFS.map((cat) => {
+              const active = categoryPrefs[cat.key];
+              return (
+                <button
+                  key={cat.key}
+                  type="button"
+                  onClick={() =>
+                    setCategoryPrefs((prev) => ({ ...prev, [cat.key]: !prev[cat.key] }))
+                  }
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border-2 transition text-left text-xs ${
+                    active
+                      ? "border-coral-400 bg-coral-50 text-gray-900"
+                      : "border-gray-200 bg-white text-gray-400 hover:border-gray-300"
+                  }`}
+                >
+                  <span className="text-base">{cat.icon}</span>
+                  <span className="font-medium truncate">{t(`profile.cat_${cat.key}`)}</span>
+                </button>
+              );
+            })}
           </div>
-        )}
+        </div>
 
-        {/* Step 2: City distribution (only for multi-city) */}
-        {step === 2 && cities.length >= 2 && (
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            <div className="text-center mb-5">
-              <span className="text-3xl mb-2 block">🗺️</span>
-              <h2 className="text-lg font-bold text-gray-900">{t("profile.howSplit", { days: numDays })}</h2>
-            </div>
+        {/* Pace */}
+        <div>
+          <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+            {pt ? "Ritmo" : "Pace"}
+          </h3>
+          <div className="flex gap-2">
+            {["relaxed", "moderate", "intense"].map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setEditedProfile((prev) => ({ ...prev, pace: p }))}
+                className={`flex-1 py-2 rounded-lg border-2 text-xs font-medium transition ${
+                  editedProfile.pace === p
+                    ? "border-coral-400 bg-coral-50 text-gray-900"
+                    : "border-gray-200 text-gray-400 hover:border-gray-300"
+                }`}
+              >
+                {p === "relaxed" && "🧘 "}
+                {p === "moderate" && "🚶 "}
+                {p === "intense" && "🏃 "}
+                {t(`profile.${p}`)}
+              </button>
+            ))}
+          </div>
+        </div>
 
-            <div className="space-y-3">
+        {/* City distribution (only when ≥2 cities) */}
+        {cities.length >= 2 && (
+          <div>
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              {pt ? `Dias por cidade (${numDays} no total)` : `Days per city (${numDays} total)`}
+            </h3>
+            <div className="space-y-2">
               {cities.map((city) => (
                 <div key={city} className="flex items-center gap-3">
-                  <span className="text-sm text-gray-600 w-36 truncate" title={city}>
+                  <span className="text-xs text-gray-700 w-32 truncate" title={city}>
                     📍 {city}
                   </span>
                   <input
@@ -205,75 +262,40 @@ export default function TravelerProfileCard({ profile, numDays, onConfirm, onRej
                     max={numDays}
                     value={dayDistribution[city] || 0}
                     onChange={(e) => handleDayChange(city, e.target.value)}
-                    className="flex-1 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-coral-500"
+                    className="flex-1 accent-coral-500"
                   />
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleDayChange(city, (dayDistribution[city] || 0) - 1)}
-                      className="w-6 h-6 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs flex items-center justify-center"
-                    >
-                      -
-                    </button>
-                    <span className="text-sm font-mono text-coral-600 w-6 text-center">
-                      {dayDistribution[city] || 0}
-                    </span>
-                    <button
-                      onClick={() => handleDayChange(city, (dayDistribution[city] || 0) + 1)}
-                      className="w-6 h-6 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs flex items-center justify-center"
-                    >
-                      +
-                    </button>
-                  </div>
+                  <span className="text-xs font-mono text-coral-600 w-8 text-right">
+                    {dayDistribution[city] || 0}
+                  </span>
                 </div>
               ))}
             </div>
-
-            <div className="mt-3 text-center">
-              <span className={`text-xs ${isValidDistribution ? "text-emerald-600" : "text-red-500"}`}>
-                {totalAssigned}/{numDays} {t("profile.daysLabel")} {isValidDistribution && "✓"}
-              </span>
-            </div>
+            <p className={`text-xs text-right mt-1 ${isValidDistribution ? "text-emerald-600" : "text-red-500"}`}>
+              {totalAssigned}/{numDays} {isValidDistribution ? "✓" : ""}
+            </p>
           </div>
         )}
+      </div>
 
-        {/* Actions */}
-        <div className="px-6 pb-5 pt-3 flex items-center gap-3 border-t border-gray-100">
-          {step > 0 && (
-            <button
-              onClick={() => setStep(step - 1)}
-              className="px-4 py-2 text-gray-400 hover:text-gray-600 text-sm font-medium transition-colors"
-            >
-              {t("onboarding.back")}
-            </button>
-          )}
-          <div className="flex-1" />
-          <button
-            onClick={onReject}
-            className="px-3 py-2 text-gray-400 hover:text-gray-600 text-sm transition-colors"
-          >
-            {t("profile.skip")}
-          </button>
-          {step < totalSteps - 1 ? (
-            <button
-              onClick={() => setStep(step + 1)}
-              className="px-6 py-2.5 bg-coral-500 hover:bg-coral-400 text-white text-sm font-semibold rounded-lg transition-colors"
-            >
-              {t("onboarding.next")}
-            </button>
-          ) : (
-            <button
-              onClick={handleConfirm}
-              disabled={!isValidDistribution}
-              className={`px-6 py-2.5 text-white text-sm font-semibold rounded-lg transition-colors ${
-                isValidDistribution
-                  ? "bg-coral-500 hover:bg-coral-400"
-                  : "bg-gray-300 cursor-not-allowed"
-              }`}
-            >
-              {t("profile.confirm")}
-            </button>
-          )}
-        </div>
+      <div className="px-4 py-3 border-t border-gray-100 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(false);
+            setEditedProfile({ ...profile });
+          }}
+          className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700"
+        >
+          {pt ? "Descartar" : "Discard"}
+        </button>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || !isValidDistribution}
+          className="px-5 py-2 bg-coral-500 hover:bg-coral-600 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition"
+        >
+          {saving ? (pt ? "Salvando..." : "Saving...") : (pt ? "Salvar" : "Save")}
+        </button>
       </div>
     </div>
   );

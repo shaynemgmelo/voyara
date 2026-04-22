@@ -377,13 +377,15 @@ export default function TripDetail() {
           {/* Processing status feedback */}
           <ProcessingStatus trip={trip} />
 
-          {/* Traveler profile card */}
-          {trip.profile_status === "suggested" && (
+          {/* Traveler profile card — always shown when a profile exists.
+              Phase 3 of the deferred-extraction redesign: the modal
+              confirm/reject UI was replaced with an editable inline card
+              the user can open whenever they want to adjust prefs. */}
+          {trip.traveler_profile && (
             <TravelerProfileCard
               profile={trip.traveler_profile}
               numDays={trip.num_days}
-              onConfirm={(p) => updateProfile(p, "confirm")}
-              onReject={() => updateProfile({}, "reject")}
+              onSave={(p) => updateProfile(p, "confirm")}
             />
           )}
 

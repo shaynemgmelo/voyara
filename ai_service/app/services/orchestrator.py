@@ -3795,18 +3795,21 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
 
     if profile:
         try:
+            # Auto-confirm — the user can edit the profile inline on the trip
+            # page now (Phase 3 of the deferred-extraction redesign). No more
+            # confirmation modal blocking the build.
             await rails.update_trip(trip_id, {
                 "traveler_profile": profile,
-                "profile_status": "suggested",
+                "profile_status": "confirmed",
             })
         except Exception as e:
             logger.warning("[analyze] Failed to save profile: %s", e)
             return {"error": str(e)}
 
-        logger.info("[analyze] Phase 1 complete — profile suggested, cities: %s",
+        logger.info("[analyze] Phase 1 complete — profile auto-confirmed, cities: %s",
                     profile.get("cities_detected", []))
         return {
-            "status": "suggested",
+            "status": "confirmed",
             "profile": profile,
             "cost": cost.summary(),
         }
