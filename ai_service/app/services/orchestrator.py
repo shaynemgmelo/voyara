@@ -3731,6 +3731,29 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
             "elapsed_s": round(_t.time() - pipeline_start, 1),
         }
 
+    # If profile analysis flagged needs_destination AND the trip has no
+    # destination, skip the build — the AskDestinationModal in the UI
+    # will collect a city, save it on the trip, then re-trigger /build.
+    # Without a destination the build picks random places anywhere on
+    # earth, which is worse than asking once.
+    try:
+        refreshed_trip = await rails.get_trip(trip_id)
+        refreshed_profile = refreshed_trip.get("traveler_profile") or {}
+        if (
+            refreshed_profile.get("needs_destination")
+            and not (refreshed_trip.get("destination") or "").strip()
+        ):
+            _mark("needs_destination flagged — pausing build, UI will ask user")
+            return {
+                "status": "needs_destination",
+                "places_created": 0,
+                "elapsed_s": round(_t.time() - pipeline_start, 1),
+            }
+    except Exception:
+        # Best-effort check — if the refresh fails, fall through to the
+        # build and let it do its best with whatever it can infer.
+        pass
+
     _mark("building itinerary")
     try:
         build_result = await build_trip_itinerary(trip_id, http_client=http_client)
@@ -3794,20 +3817,38 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
     profile = await _analyze_profile(combined_content, destination, cost)
 
     if profile:
+        # Phase 4 — flag if no city was inferred. The frontend uses this to
+        # show an AskDestinationModal because the build can't pick landmarks
+        # / Google-Places-validate without knowing the destination. Trip
+        # destination is also blank in this case (the user no longer types
+        # it in the trip-create form).
+        cities = profile.get("cities_detected") or []
+        trip_destination = (trip.get("destination") or "").strip()
+        profile["needs_destination"] = (
+            not cities and not trip_destination
+        )
+
         try:
             # Auto-confirm — the user can edit the profile inline on the trip
             # page now (Phase 3 of the deferred-extraction redesign). No more
             # confirmation modal blocking the build.
-            await rails.update_trip(trip_id, {
+            updates = {
                 "traveler_profile": profile,
                 "profile_status": "confirmed",
-            })
+            }
+            # Auto-set trip.destination from the first inferred city so the
+            # build (and the trip header in the UI) has something to display.
+            if cities and not trip_destination:
+                updates["destination"] = cities[0]
+            await rails.update_trip(trip_id, updates)
         except Exception as e:
             logger.warning("[analyze] Failed to save profile: %s", e)
             return {"error": str(e)}
 
-        logger.info("[analyze] Phase 1 complete — profile auto-confirmed, cities: %s",
-                    profile.get("cities_detected", []))
+        logger.info(
+            "[analyze] Phase 1 complete — profile auto-confirmed, cities=%s needs_destination=%s",
+            cities, profile["needs_destination"],
+        )
         return {
             "status": "confirmed",
             "profile": profile,

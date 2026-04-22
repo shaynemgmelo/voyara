@@ -17,6 +17,9 @@ import TravelerProfileCard from "../components/trips/TravelerProfileCard";
 import CityTabs from "../components/itinerary/CityTabs";
 import ProcessingStatus, { detectPhase } from "../components/trips/ProcessingStatus";
 import GenerationProgressModal from "../components/modals/GenerationProgressModal";
+import AskDestinationModal from "../components/modals/AskDestinationModal";
+import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
+import { updateTrip, triggerBuild } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -204,6 +207,29 @@ export default function TripDetail() {
     if (!destination) return;
     if (source.droppableId === destination.droppableId && source.index === destination.index) return;
 
+    // Drag FROM the manual-mode extracted-places panel TO a day → create a
+    // new itinerary_item on that day. The draggableId encodes the place name
+    // ("extracted::<name>::<index>") since extracted places have no DB id yet.
+    if (source.droppableId === ExtractedPlacesPanel.DROPPABLE_ID) {
+      const destDayId = parseInt(destination.droppableId);
+      if (Number.isNaN(destDayId)) return;
+      // Format: "extracted::<name>::<index>"
+      const parts = draggableId.split("::");
+      const name = parts[1] || "";
+      if (!name) return;
+      // Reuse the source_url from the profile if we have it.
+      const place = (trip?.traveler_profile?.places_mentioned || [])
+        .find((p) => p.name === name);
+      addItem(destDayId, {
+        name,
+        category: "attraction",
+        source: "link",
+        origin: "extracted_from_video",
+        source_url: place?.source_url || null,
+      });
+      return;
+    }
+
     const sourceDayId = parseInt(source.droppableId);
     const destDayId = parseInt(destination.droppableId);
     const itemId = parseInt(draggableId);
@@ -218,6 +244,30 @@ export default function TripDetail() {
     } else {
       // Move between days
       moveItemBetweenDays(sourceDayId, destDayId, itemId, destination.index);
+    }
+  };
+
+  // Phase 4 — destination fallback. Persists the user-typed city to the
+  // trip, clears the needs_destination flag, then re-triggers the build
+  // so the AI can finally pick landmarks / validate places.
+  const handleDestinationSubmit = async (city) => {
+    try {
+      const updatedProfile = {
+        ...(trip?.traveler_profile || {}),
+      };
+      delete updatedProfile.needs_destination;
+      await updateTrip(trip.id, {
+        destination: city,
+        traveler_profile: updatedProfile,
+      });
+      await fetchTrip();
+      // Re-fire the combined pipeline. Extraction will skip cached links;
+      // profile + build run again with the destination this time.
+      await triggerBuild(trip.id);
+      await fetchTrip();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[trip] destination fallback failed:", e);
     }
   };
 
@@ -240,6 +290,12 @@ export default function TripDetail() {
              : "Falha desconhecida"))
       : null;
 
+  // Phase 4 — destination fallback. Fires when extraction completed but
+  // no city was inferred AND the trip has no destination set. Pauses
+  // everything until the user types a city.
+  const needsDestination = effectivePhase === "needs_destination";
+  const isManualMode = trip?.ai_mode === "manual";
+
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
       {showProgressModal && (
@@ -248,6 +304,9 @@ export default function TripDetail() {
           trip={trip}
           onRetry={retryBuild}
         />
+      )}
+      {needsDestination && (
+        <AskDestinationModal onSubmit={handleDestinationSubmit} />
       )}
       {buildErrorMsg && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -415,31 +474,36 @@ export default function TripDetail() {
               buttons, but the user asked for those to be automatic
               (zero clicks). Now they run during trip creation AND, for
               trips built before those features existed, silently on
-              first mount via the useEffect below. */}
-          <div className="flex justify-end items-center gap-3 mb-4">
-            <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
-              <button
-                onClick={() => switchView("timeline")}
-                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
-                  viewMode === "timeline"
-                    ? "bg-emerald-500 text-white shadow"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                ✨ Timeline
-              </button>
-              <button
-                onClick={() => switchView("list")}
-                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
-                  viewMode === "list"
-                    ? "bg-emerald-500 text-white shadow"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                ☰ Lista
-              </button>
+              first mount via the useEffect below.
+              In manual mode the toggle is hidden — list view is forced
+              so the ExtractedPlacesPanel's drag-and-drop works (timeline
+              view has its own DragDropContext that we can't share). */}
+          {!isManualMode && (
+            <div className="flex justify-end items-center gap-3 mb-4">
+              <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+                <button
+                  onClick={() => switchView("timeline")}
+                  className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
+                    viewMode === "timeline"
+                      ? "bg-emerald-500 text-white shadow"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  ✨ Timeline
+                </button>
+                <button
+                  onClick={() => switchView("list")}
+                  className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition ${
+                    viewMode === "list"
+                      ? "bg-emerald-500 text-white shadow"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  ☰ Lista
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Phase 5.4 — surface any pending conflict_alerts (from refine
               steps) so the user can confirm keep/replace/remove for items
@@ -459,8 +523,10 @@ export default function TripDetail() {
             </div>
           )}
 
-          {/* Day plans — Timeline carousel OR classic list */}
-          {viewMode === "timeline" ? (
+          {/* Day plans — Timeline carousel OR classic list. Manual mode
+              forces list view because the ExtractedPlacesPanel below shares
+              the list view's DragDropContext (timeline owns its own). */}
+          {(!isManualMode && viewMode === "timeline") ? (
             <TripTimeline
               dayPlans={(activeCity
                 ? trip.day_plans?.filter((dp) => dp.city === activeCity)
@@ -485,6 +551,11 @@ export default function TripDetail() {
             />
           ) : (
             <DragDropContext onDragEnd={handleDragEnd}>
+              <div className={isManualMode ? "grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4" : ""}>
+                {isManualMode && (
+                  <ExtractedPlacesPanel trip={trip} />
+                )}
+                <div className="space-y-4">
               {(activeCity
                 ? trip.day_plans?.filter((dp) => dp.city === activeCity)
                 : trip.day_plans
@@ -519,6 +590,8 @@ export default function TripDetail() {
                   }}
                 />
               ))}
+                </div>
+              </div>
             </DragDropContext>
           )}
         </div>

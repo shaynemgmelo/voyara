@@ -27,6 +27,7 @@ export function detectPhase(trip) {
   const allExtracted = extractedCount === totalLinks && totalLinks > 0;
   const hasActiveLinks = processingCount > 0 || pendingCount > 0;
   const profileStatus = trip.profile_status;
+  const aiMode = trip.ai_mode || "eco";
   const hasItems =
     trip.items_count > 0 ||
     trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
@@ -34,22 +35,36 @@ export function detectPhase(trip) {
   // Phase D — build persisted a real error on the trip profile.
   // Surface it instead of cycling through the 95 % forever.
   const buildError = trip?.traveler_profile?.build_error;
+  const needsDestination =
+    trip?.traveler_profile?.needs_destination === true
+    && !(trip?.destination || "").trim();
 
   let phase = null;
-  if (hasActiveLinks) phase = "extracting";
-  else if (
+  if (hasActiveLinks) {
+    phase = "extracting";
+  } else if (
     allExtracted &&
     profileStatus !== "suggested" &&
     profileStatus !== "confirmed" &&
     profileStatus !== "rejected"
-  )
+  ) {
     phase = "analyzing";
-  else if (profileStatus === "confirmed" && !hasItems && !buildError)
-    phase = "generating";
-  else if (profileStatus === "confirmed" && !hasItems && buildError)
+  } else if (profileStatus === "confirmed" && needsDestination) {
+    // Phase 4 — pipeline paused waiting for the user to give a city.
+    // The AskDestinationModal handles the transition.
+    phase = "needs_destination";
+  } else if (profileStatus === "confirmed" && !hasItems && buildError) {
     phase = "failed";
+  } else if (
+    profileStatus === "confirmed" && !hasItems && !buildError
+    && aiMode !== "manual"
+  ) {
+    // Manual mode is EXPECTED to land here with zero items — that's
+    // success, not a generating state. Skip "generating" for manual.
+    phase = "generating";
+  }
 
-  return { phase, totalLinks, extractedCount, buildError };
+  return { phase, totalLinks, extractedCount, buildError, needsDestination };
 }
 
 export default function ProcessingStatus({ trip }) {

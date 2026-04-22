@@ -71,16 +71,27 @@ export default function useTripDetail(tripId) {
     if (hasExtractedLinks && !profileReady) return true;
 
     // Profile confirmed but itinerary not generated yet? (Phase 2 in progress)
-    // STOP polling if the backend persisted a build_error — at that point
-    // the 95 % loop would never end on its own. The UI switches to the
-    // "Falha" card and waits for the user to decide.
-    //
-    // We KEEP polling when clientForcedFailure is true — the modal shows
-    // "Tentar de novo" but if the backend quietly finishes the items in
-    // the background, we want to catch them and unlock the trip.
+    // STOP polling if any of the following hold — they're all "waiting on
+    // the user, not on the backend" terminal states:
+    //   - build_error persisted by the backend                     (failure)
+    //   - traveler_profile.needs_destination flagged + no dest set (Phase 4 modal)
+    //   - ai_mode === "manual" (user is expected to drag items)
+    // For everything else, keep polling so the modal closes the moment
+    // items appear or build_error surfaces.
     const hasItems = trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
     const hasBuildError = Boolean(trip?.traveler_profile?.build_error);
-    if (trip.profile_status === "confirmed" && hasExtractedLinks && !hasItems && !hasBuildError) {
+    const needsDestination =
+      trip?.traveler_profile?.needs_destination === true
+      && !(trip?.destination || "").trim();
+    const isManual = trip.ai_mode === "manual";
+    if (
+      trip.profile_status === "confirmed"
+      && hasExtractedLinks
+      && !hasItems
+      && !hasBuildError
+      && !needsDestination
+      && !isManual
+    ) {
       return true;
     }
 
@@ -221,8 +232,16 @@ export default function useTripDetail(tripId) {
           //     so the user sees a retry button even if the backend is
           //     still silently grinding or dead.
           const hasBackendError = Boolean(data?.traveler_profile?.build_error);
+          const dataNeedsDestination =
+            data?.traveler_profile?.needs_destination === true
+            && !(data?.destination || "").trim();
+          const dataIsManual = data?.ai_mode === "manual";
+          // "Generating" is the state where we're WAITING for the backend
+          // to land items. Manual mode and needs_destination are user-action
+          // terminal states — they get their own modals, not the progress one.
           const generating =
-            data.profile_status === "confirmed" && hasExtracted && !hasItems && !hasBackendError;
+            data.profile_status === "confirmed" && hasExtracted && !hasItems
+            && !hasBackendError && !dataNeedsDestination && !dataIsManual;
           if (generating) {
             if (!buildStuckSinceRef.current) {
               buildStuckSinceRef.current = Date.now();
@@ -295,7 +314,8 @@ export default function useTripDetail(tripId) {
 
           const keepPolling = hasActive
             || (hasExtracted && !profileDone)
-            || (data.profile_status === "confirmed" && hasExtracted && !hasItems);
+            || (data.profile_status === "confirmed" && hasExtracted && !hasItems
+                && !dataNeedsDestination && !dataIsManual);
           if (!keepPolling && pollRef.current) {
             clearInterval(pollRef.current);
             pollRef.current = null;
