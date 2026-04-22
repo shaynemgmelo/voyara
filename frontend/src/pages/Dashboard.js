@@ -1,16 +1,13 @@
 import { useState, useEffect } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useNavigate } from "react-router-dom";
 import useTrips from "../hooks/useTrips";
 import TripCard from "../components/trips/TripCard";
 import { useLanguage } from "../i18n/LanguageContext";
-import LinkAnalyzer from "../components/links/LinkAnalyzer";
-import AnalyzeResultModal from "../components/links/AnalyzeResultModal";
 
 export default function Dashboard() {
   const { trips, loading, error, deleteTrip } = useTrips();
-  const [analyzeResult, setAnalyzeResult] = useState(null);
-  const [showNewTripModal, setShowNewTripModal] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { t, lang } = useLanguage();
 
   // Persisted order: which trip ID is pinned as hero
@@ -22,13 +19,16 @@ export default function Dashboard() {
   // Drag state
   const [dragOverHero, setDragOverHero] = useState(false);
 
-  // Open modal if ?new=1 in URL
+  // ?new=1 → forward straight to the unified trip-create form. The old
+  // dashboard "New Trip" modal that did upfront link analysis is gone —
+  // extraction is now deferred until the user clicks Generate on the
+  // /trips/new form (see Phase 2 of the deferred-extraction redesign).
   useEffect(() => {
     if (searchParams.get("new") === "1") {
-      setShowNewTripModal(true);
       setSearchParams({}, { replace: true });
+      navigate("/trips/new");
     }
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, navigate]);
 
   const pt = lang === "pt-BR";
 
@@ -80,33 +80,6 @@ export default function Dashboard() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      {/* New trip modal with LinkAnalyzer */}
-      {showNewTripModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowNewTripModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-8" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-bold text-gray-900">
-                {pt ? "Nova viagem" : "New trip"}
-              </h2>
-              <button onClick={() => setShowNewTripModal(false)} className="text-gray-400 hover:text-gray-600 text-xl p-1">✕</button>
-            </div>
-            <LinkAnalyzer onResult={(data) => { setAnalyzeResult(data); setShowNewTripModal(false); }} />
-            <div className="mt-4 text-center">
-              <Link
-                to="/trips/new"
-                className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                {pt ? "ou crie manualmente sem link →" : "or create manually without a link →"}
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {analyzeResult && (
-        <AnalyzeResultModal data={analyzeResult} onClose={() => setAnalyzeResult(null)} />
-      )}
-
       {trips.length === 0 ? (
         <div className="text-center py-16">
           <div className="text-6xl mb-6">🌍</div>
@@ -118,12 +91,12 @@ export default function Dashboard() {
               ? "Comece colando um link de viagem ou crie sua primeira viagem."
               : "Start by pasting a travel link or create your first trip."}
           </p>
-          <button
-            onClick={() => setShowNewTripModal(true)}
-            className="bg-coral-500 hover:bg-coral-600 text-white font-semibold px-8 py-3 rounded-xl transition-colors"
+          <Link
+            to="/trips/new"
+            className="inline-block bg-coral-500 hover:bg-coral-600 text-white font-semibold px-8 py-3 rounded-xl transition-colors"
           >
             {t("dashboard.createFirst")}
-          </button>
+          </Link>
         </div>
       ) : (
         <>
