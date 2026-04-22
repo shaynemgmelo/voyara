@@ -4528,6 +4528,30 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
             not cities and not country and not trip_destination
         )
 
+        # GUARD against race-condition regression. extract-and-build and the
+        # frontend's own /analyze-trip call can both fire for the same trip
+        # in parallel. If one run comes back with a SYNTHESIZED FALLBACK
+        # profile (Haiku parse failed → _enrich_weak_profile emits empty
+        # cities/country) AND the trip already has a richer profile persisted
+        # from a concurrent successful run, writing this one would overwrite
+        # the good data with empty cities → frontend sees needs_destination=
+        # true → user gets the "Onde é a viagem?" modal even though the
+        # classifier had correctly extracted 6 Thailand cities.
+        # Rule: never regress cities_detected from N≥2 to 0.
+        existing_profile = trip.get("traveler_profile") or {}
+        existing_cities = existing_profile.get("cities_detected") or []
+        if not cities and len(existing_cities) >= 2:
+            logger.warning(
+                "[analyze] Skipping profile save — synthesized fallback "
+                "would regress cities from %d to 0. Keeping existing profile.",
+                len(existing_cities),
+            )
+            return {
+                "status": "confirmed",
+                "profile": existing_profile,
+                "cost": cost.summary(),
+            }
+
         try:
             # Auto-confirm — the user can edit the profile inline on the trip
             # page now (Phase 3 of the deferred-extraction redesign). No more

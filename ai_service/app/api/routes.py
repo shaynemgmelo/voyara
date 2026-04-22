@@ -293,6 +293,15 @@ async def _generate_itinerary_background(trip_id: int):
         logger.exception("[generate-itinerary] Failed for trip %d", trip_id)
 
 
+# Lock against concurrent analyze-trip runs for the same trip. Before this
+# guard, the frontend's manual /analyze-trip call could race with the one
+# already kicked off by /extract-and-build. If the second run's Haiku call
+# failed to parse and fell back to the synthesized empty profile, it would
+# overwrite the first run's good profile, wiping out `cities_detected` and
+# triggering the wrong "Onde é a viagem?" modal.
+_analyze_inflight: set[int] = set()
+
+
 @router.post("/analyze-trip/{trip_id}", response_model=ProcessLinkResponse, status_code=202)
 async def handle_analyze_trip(
     trip_id: int, background_tasks: BackgroundTasks
@@ -301,6 +310,16 @@ async def handle_analyze_trip(
 
     Called by Rails when all links are extracted, or manually.
     """
+    if trip_id in _analyze_inflight:
+        logger.info(
+            "Skipping analyze-trip for trip_id=%d — already in flight",
+            trip_id,
+        )
+        return ProcessLinkResponse(
+            status="already_running",
+            message=f"Trip {trip_id} already being analyzed",
+        )
+
     logger.info("Received analyze-trip request for trip_id=%d", trip_id)
 
     background_tasks.add_task(_analyze_trip_background, trip_id)
@@ -394,11 +413,14 @@ async def _refine_itinerary_background(
 
 
 async def _analyze_trip_background(trip_id: int):
+    _analyze_inflight.add(trip_id)
     try:
         result = await analyze_trip(trip_id)
         logger.info("[analyze-trip] Trip %d: %s", trip_id, result.get("status", "unknown"))
     except Exception as e:
         logger.exception("Failed to analyze trip %d", trip_id)
+    finally:
+        _analyze_inflight.discard(trip_id)
 
 
 async def _build_itinerary_background(trip_id: int):
