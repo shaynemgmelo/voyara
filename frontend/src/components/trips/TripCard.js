@@ -1,54 +1,90 @@
 import { Link } from "react-router-dom";
 import { useLanguage } from "../../i18n/LanguageContext";
 
-// Destination → Unsplash photo mapping (landscape, high quality)
-const DESTINATION_IMAGES = {
-  paris: "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=800&h=500&fit=crop&q=80",
-  tokyo: "https://images.unsplash.com/photo-1540959733332-eab4deabeeaf?w=800&h=500&fit=crop&q=80",
-  rome: "https://images.unsplash.com/photo-1552832230-c0197dd311b5?w=800&h=500&fit=crop&q=80",
-  "new york": "https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?w=800&h=500&fit=crop&q=80",
-  barcelona: "https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=800&h=500&fit=crop&q=80",
-  bali: "https://images.unsplash.com/photo-1537996194471-e657df975ab4?w=800&h=500&fit=crop&q=80",
-  london: "https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?w=800&h=500&fit=crop&q=80",
-  "los angeles": "https://images.unsplash.com/photo-1534190760961-74e8c1c5c3da?w=800&h=500&fit=crop&q=80",
-  la: "https://images.unsplash.com/photo-1534190760961-74e8c1c5c3da?w=800&h=500&fit=crop&q=80",
-  "las vegas": "https://images.unsplash.com/photo-1605833556294-ea5c7a74f57d?w=800&h=500&fit=crop&q=80",
-  vegas: "https://images.unsplash.com/photo-1605833556294-ea5c7a74f57d?w=800&h=500&fit=crop&q=80",
-  miami: "https://images.unsplash.com/photo-1533106497176-45ae19e68ba2?w=800&h=500&fit=crop&q=80",
-  dubai: "https://images.unsplash.com/photo-1512453979798-5ea266f8880c?w=800&h=500&fit=crop&q=80",
-  istanbul: "https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=800&h=500&fit=crop&q=80",
-  lisbon: "https://images.unsplash.com/photo-1585208798174-6cedd86e019a?w=800&h=500&fit=crop&q=80",
-  amsterdam: "https://images.unsplash.com/photo-1534351590666-13e3e96b5017?w=800&h=500&fit=crop&q=80",
-  sydney: "https://images.unsplash.com/photo-1506973035872-a4ec16b8e8d9?w=800&h=500&fit=crop&q=80",
-  rio: "https://images.unsplash.com/photo-1483729558449-99ef09a8c325?w=800&h=500&fit=crop&q=80",
-  "rio de janeiro": "https://images.unsplash.com/photo-1483729558449-99ef09a8c325?w=800&h=500&fit=crop&q=80",
-  bangkok: "https://images.unsplash.com/photo-1508009603885-50cf7c579365?w=800&h=500&fit=crop&q=80",
-  "buenos aires": "https://images.unsplash.com/photo-1589909202802-8f4aadce1849?w=800&h=500&fit=crop&q=80",
-  cairo: "https://images.unsplash.com/photo-1539768942893-daf53e736b68?w=800&h=500&fit=crop&q=80",
-  prague: "https://images.unsplash.com/photo-1519677100203-a0e668c92439?w=800&h=500&fit=crop&q=80",
-  berlin: "https://images.unsplash.com/photo-1560969184-10fe8719e047?w=800&h=500&fit=crop&q=80",
-  madrid: "https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=800&h=500&fit=crop&q=80",
-  singapore: "https://images.unsplash.com/photo-1525625293386-3f8f99389edd?w=800&h=500&fit=crop&q=80",
-  "san francisco": "https://images.unsplash.com/photo-1501594907352-04cda38ebc29?w=800&h=500&fit=crop&q=80",
-  kyoto: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=800&h=500&fit=crop&q=80",
-  florence: "https://images.unsplash.com/photo-1543429258-3e9a0a0a0b8a?w=800&h=500&fit=crop&q=80",
-  hawaii: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&h=500&fit=crop&q=80",
-  cancun: "https://images.unsplash.com/photo-1510097467424-192d713fd8b2?w=800&h=500&fit=crop&q=80",
-  mexico: "https://images.unsplash.com/photo-1518638150340-f706e86654de?w=800&h=500&fit=crop&q=80",
-};
+// Destination → Unsplash photo mapping. Aliases cover common language
+// variants (pt-BR vs en) and country names so a trip called "Tailandia"
+// picks a Thailand photo instead of falling back to the default.
+// Each entry: [list of keywords, image url]. Keywords are matched as
+// WHOLE WORDS so "la" (Los Angeles) won't accidentally match inside
+// "Tailandia" — a real bug we had before.
+const DESTINATION_IMAGES = [
+  [["paris", "france"], "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=800&h=500&fit=crop&q=80"],
+  [["tokyo", "japan", "japao", "japão"], "https://images.unsplash.com/photo-1540959733332-eab4deabeeaf?w=800&h=500&fit=crop&q=80"],
+  [["kyoto"], "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=800&h=500&fit=crop&q=80"],
+  [["rome", "italy", "italia", "itália", "roma"], "https://images.unsplash.com/photo-1552832230-c0197dd311b5?w=800&h=500&fit=crop&q=80"],
+  [["florence", "firenze"], "https://images.unsplash.com/photo-1543429258-3e9a0a0a0b8a?w=800&h=500&fit=crop&q=80"],
+  [["new york", "nyc", "manhattan", "brooklyn"], "https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?w=800&h=500&fit=crop&q=80"],
+  [["barcelona"], "https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=800&h=500&fit=crop&q=80"],
+  [["madrid"], "https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=800&h=500&fit=crop&q=80"],
+  [["bali", "indonesia", "indonésia", "ubud"], "https://images.unsplash.com/photo-1537996194471-e657df975ab4?w=800&h=500&fit=crop&q=80"],
+  [["london", "england", "inglaterra", "uk"], "https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?w=800&h=500&fit=crop&q=80"],
+  [["los angeles", "la", "hollywood"], "https://images.unsplash.com/photo-1534190760961-74e8c1c5c3da?w=800&h=500&fit=crop&q=80"],
+  [["las vegas", "vegas"], "https://images.unsplash.com/photo-1605833556294-ea5c7a74f57d?w=800&h=500&fit=crop&q=80"],
+  [["miami"], "https://images.unsplash.com/photo-1533106497176-45ae19e68ba2?w=800&h=500&fit=crop&q=80"],
+  [["dubai", "uae"], "https://images.unsplash.com/photo-1512453979798-5ea266f8880c?w=800&h=500&fit=crop&q=80"],
+  [["istanbul", "turkey", "turquia"], "https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=800&h=500&fit=crop&q=80"],
+  [["lisbon", "lisboa", "portugal"], "https://images.unsplash.com/photo-1585208798174-6cedd86e019a?w=800&h=500&fit=crop&q=80"],
+  [["porto", "oporto"], "https://images.unsplash.com/photo-1555881400-74d7acaacd8b?w=800&h=500&fit=crop&q=80"],
+  [["amsterdam", "netherlands", "holanda"], "https://images.unsplash.com/photo-1534351590666-13e3e96b5017?w=800&h=500&fit=crop&q=80"],
+  [["sydney", "australia"], "https://images.unsplash.com/photo-1506973035872-a4ec16b8e8d9?w=800&h=500&fit=crop&q=80"],
+  [["rio", "rio de janeiro"], "https://images.unsplash.com/photo-1483729558449-99ef09a8c325?w=800&h=500&fit=crop&q=80"],
+  [["sao paulo", "são paulo"], "https://images.unsplash.com/photo-1543059080-f9b1272213d5?w=800&h=500&fit=crop&q=80"],
+  [["salvador", "bahia"], "https://images.unsplash.com/photo-1516306580123-e6e52b1b7b5f?w=800&h=500&fit=crop&q=80"],
+  [["bangkok", "thailand", "tailandia", "tailândia", "phuket", "krabi", "chiang mai"], "https://images.unsplash.com/photo-1508009603885-50cf7c579365?w=800&h=500&fit=crop&q=80"],
+  [["buenos aires", "argentina"], "https://images.unsplash.com/photo-1589909202802-8f4aadce1849?w=800&h=500&fit=crop&q=80"],
+  [["cairo", "egypt", "egito"], "https://images.unsplash.com/photo-1539768942893-daf53e736b68?w=800&h=500&fit=crop&q=80"],
+  [["prague", "praga", "czech"], "https://images.unsplash.com/photo-1519677100203-a0e668c92439?w=800&h=500&fit=crop&q=80"],
+  [["berlin", "germany", "alemanha"], "https://images.unsplash.com/photo-1560969184-10fe8719e047?w=800&h=500&fit=crop&q=80"],
+  [["singapore", "singapura"], "https://images.unsplash.com/photo-1525625293386-3f8f99389edd?w=800&h=500&fit=crop&q=80"],
+  [["san francisco", "sf"], "https://images.unsplash.com/photo-1501594907352-04cda38ebc29?w=800&h=500&fit=crop&q=80"],
+  [["hawaii", "havai", "havaí", "maui", "oahu"], "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&h=500&fit=crop&q=80"],
+  [["cancun", "cancún", "tulum", "playa del carmen"], "https://images.unsplash.com/photo-1510097467424-192d713fd8b2?w=800&h=500&fit=crop&q=80"],
+  [["mexico", "méxico", "mexico city", "cdmx"], "https://images.unsplash.com/photo-1518638150340-f706e86654de?w=800&h=500&fit=crop&q=80"],
+  [["greece", "grecia", "grécia", "santorini", "athens", "atenas", "mykonos"], "https://images.unsplash.com/photo-1533105079780-92b9be482077?w=800&h=500&fit=crop&q=80"],
+  [["morocco", "marrocos", "marrakech", "fes"], "https://images.unsplash.com/photo-1489493512598-d08130f49bea?w=800&h=500&fit=crop&q=80"],
+  [["iceland", "islandia", "islândia", "reykjavik"], "https://images.unsplash.com/photo-1504829857797-ddff29c27927?w=800&h=500&fit=crop&q=80"],
+  [["peru", "machu picchu", "cusco", "lima"], "https://images.unsplash.com/photo-1526392060635-9d6019884377?w=800&h=500&fit=crop&q=80"],
+  [["vietnam", "vietna", "vietnã", "hanoi", "ho chi minh"], "https://images.unsplash.com/photo-1528127269322-539801943592?w=800&h=500&fit=crop&q=80"],
+  [["india", "índia", "delhi", "jaipur", "mumbai", "taj mahal"], "https://images.unsplash.com/photo-1564507592333-c60657eea523?w=800&h=500&fit=crop&q=80"],
+  [["south africa", "africa do sul", "cape town", "cidade do cabo"], "https://images.unsplash.com/photo-1580060839134-75a5edca2e99?w=800&h=500&fit=crop&q=80"],
+  [["croatia", "croacia", "croácia", "dubrovnik", "split"], "https://images.unsplash.com/photo-1555990793-da11153b2473?w=800&h=500&fit=crop&q=80"],
+];
 
 const DEFAULT_IMAGE = "https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=800&h=500&fit=crop&q=80";
 
-function getDestinationImage(trip) {
-  const searchTerms = [
-    trip.destination,
-    trip.name,
-  ].filter(Boolean);
+/**
+ * Strip accents, lowercase, collapse to letters+digits+spaces so
+ * "Tailândia" and "tailandia" and "Tailandia" all hit the same way.
+ */
+function normalize(s) {
+  if (!s) return "";
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
 
-  for (const term of searchTerms) {
-    const lower = term.toLowerCase();
-    for (const [key, url] of Object.entries(DESTINATION_IMAGES)) {
-      if (lower.includes(key)) return url;
+/**
+ * Word-boundary match so short keywords like "la" don't accidentally
+ * match inside "Tailandia". A keyword matches if it appears surrounded
+ * by non-letter boundaries (start/end of string, space, comma, etc.).
+ */
+function hasWord(haystack, needle) {
+  if (!needle) return false;
+  // Escape regex specials in the needle (none expected in our keys but safe).
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i");
+  return re.test(haystack);
+}
+
+function getDestinationImage(trip) {
+  const searchTerms = [trip.destination, trip.name].filter(Boolean).map(normalize);
+  if (searchTerms.length === 0) return DEFAULT_IMAGE;
+  const haystack = searchTerms.join(" ");
+  for (const [keywords, url] of DESTINATION_IMAGES) {
+    for (const kw of keywords) {
+      if (hasWord(haystack, normalize(kw))) return url;
     }
   }
   return DEFAULT_IMAGE;
