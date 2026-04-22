@@ -695,7 +695,14 @@ Return ONLY a JSON object (no markdown, no prose, no code fences):
   "confidence": 0.0-1.0,
   "creator_handle": "@handle or null",
   "detected_days": [
-    {{"day": 1, "places": ["Place A", "Place B"], "region_hint": "Microcentro", "is_day_trip": false}}
+    {{
+      "day": 1,
+      "places": ["Place A", "Place B"],
+      "region_hint": "Microcentro",
+      "is_day_trip": false,
+      "activity_hints": ["rooftop bar with city view", "nearby waterfall"],
+      "alternatives": [{{"day": 3, "options": ["rooftop bar", "shopping mall"]}}]
+    }}
   ],
   "loose_places": ["Place X", "Place Y"],
   "complementary_tips": [{{"name": "Café X", "category": "cafe"}}],
@@ -704,6 +711,27 @@ Return ONLY a JSON object (no markdown, no prose, no code fences):
   "vibe_signature": ["urbano", "estetico", "cafes"],
   "raw_summary": "One sentence."
 }}
+
+ACTIVITY HINT EXTRACTION (CRITICAL — this is where most fidelity is lost):
+The video often contains SUGGESTIONS that are not proper-noun places:
+  • "rooftop ou shopping" → Day 3 activity_hint: "rooftop bar" AND "shopping mall"
+  • "cachoeira próxima" / "nearby waterfall" → activity_hint: "nearby waterfall"
+  • "festa à noite" → activity_hint: "nightlife"
+  • "compras antes do voo" → activity_hint: "shopping before departure"
+  • "mercado de rua para comer" → activity_hint: "street food market"
+  • "templo da montanha" → activity_hint: "mountain temple"
+For EVERY day in detected_days, extract these activity_hints if they appear
+in the transcript for THAT day. These hints tell the downstream generator
+that the creator DID suggest something specific for that day — even if no
+proper noun was used — and the generator MUST honor that with a concrete
+venue in that day's base city. Missing these hints is the #1 cause of
+"the video said X but the generated trip has Y" complaints.
+
+ALTERNATIVES EXTRACTION:
+When the creator offers TWO or more mutually exclusive options for the
+same day ("rooftop OU shopping", "Similan OU James Bond islands"), add
+them to the `alternatives` array with their day. Don't pick one — capture
+both so the UI can surface them as alternative_group cards.
 
 CATEGORY CRITERIA (strict — pick one, set confidence honestly):
 
@@ -848,6 +876,9 @@ def _resolve_multi_video_conflicts(classified: list[dict]) -> dict:
     items_per_day_votes: list[int] = []
     creator_handles_by_day: dict[int, str] = {}
     per_url_types: dict[str, str] = {}
+    # Per-day mutually-exclusive options the creator offered
+    # ("rooftop OU shopping"). Keyed by day → list of option lists.
+    day_alternatives: dict[int, list[list[str]]] = {}
     destination = ""
     base_city = ""
 
@@ -880,10 +911,15 @@ def _resolve_multi_video_conflicts(classified: list[dict]) -> dict:
             if not isinstance(day, int) or day < 1:
                 continue
             places = [p for p in (dd.get("places") or []) if isinstance(p, str) and p.strip()]
-            if not places:
+            hints = [h for h in (dd.get("activity_hints") or []) if isinstance(h, str) and h.strip()]
+            # A day counts as "detected" if it has EITHER places or hints.
+            # A day with only hints ("cachoeira próxima" + nothing named) is
+            # still creator guidance we need to honor.
+            if not places and not hints:
                 continue
             proposal = {
                 "places": places,
+                "activity_hints": hints,
                 "region_hint": dd.get("region_hint"),
                 "is_day_trip": bool(dd.get("is_day_trip")),
                 "source_url": url,
@@ -947,6 +983,15 @@ def _resolve_multi_video_conflicts(classified: list[dict]) -> dict:
                     "reason": "same category — first submitted wins",
                 })
 
+        # Top-level alternatives ("rooftop OU shopping" offered for a day)
+        for alt in (row.get("alternatives") or []):
+            if not isinstance(alt, dict):
+                continue
+            d = alt.get("day")
+            opts = [o for o in (alt.get("options") or []) if isinstance(o, str) and o.strip()]
+            if isinstance(d, int) and d >= 1 and len(opts) >= 2:
+                day_alternatives.setdefault(d, []).append(opts)
+
         # Non-detected-day items
         for p in (row.get("loose_places") or []):
             if isinstance(p, str) and p.strip():
@@ -999,6 +1044,9 @@ def _resolve_multi_video_conflicts(classified: list[dict]) -> dict:
         "conflicts_detected": conflicts_detected,
         "creator_handles_by_day": creator_handles_by_day,
         "per_url_types": per_url_types,
+        # Mutually-exclusive options per day (creator said "A OU B").
+        # Downstream prompt uses alternative_group to surface both.
+        "day_alternatives": day_alternatives,
     }
 
 
@@ -2677,26 +2725,67 @@ IMPORTANT: When generating places, search for attractions IN THE CORRECT CITY fo
     # Phase 3 — authoritative rigidity table. When content_classification
     # produced canonical_days, this block tells Claude exactly which days
     # are locked (from a D-category video) vs flexible (AI-created).
+    # Pull day-level activity hints + alternatives from the consolidated
+    # content_classification so they can be injected next to the rigidity
+    # table. These were previously lost — "rooftop ou shopping", "cachoeira
+    # próxima", "festa à noite" all got discarded because they weren't
+    # proper-noun places.
+    cc_blob = (profile.get("content_classification") or {})
+    day_alternatives = cc_blob.get("day_alternatives") or {}
+    # day_alternatives is keyed by day number (possibly as string after JSON
+    # roundtrip through Rails). Normalize to int.
+    normalized_alternatives: dict[int, list[list[str]]] = {}
+    for k, v in day_alternatives.items():
+        try:
+            normalized_alternatives[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+
     rigidity_section = ""
     if canonical_days or day_rigidity:
         rigidity_lines: list[str] = []
         for n in range(1, num_days + 1):
             rig = day_rigidity.get(n, "flexible")
-            entry = canonical_days.get(n)
+            entry = canonical_days.get(n) or {}
+            places = entry.get("places") or []
+            hints = entry.get("activity_hints") or []
+            alts_for_day = normalized_alternatives.get(n) or []
+            places_str = ", ".join(places) if places else "(none named)"
+            hints_str = "; ".join(hints)
+            alts_str = " | ".join(
+                "(" + " OR ".join(opts) + ")" for opts in alts_for_day if opts
+            )
+
             if rig == "locked" and entry:
-                places_str = ", ".join(entry.get("places") or [])
                 creator = entry.get("creator") or "video"
                 day_type_hint = "DAY TRIP" if entry.get("is_day_trip") else "urban"
-                rigidity_lines.append(
+                line = (
                     f"  Dia {n} → LOCKED ({day_type_hint}, from {creator}). "
                     f"Locked places (must appear in this exact order): {places_str}"
                 )
+                if hints:
+                    line += f" | MUST also include concrete venues for these hints: {hints_str}"
+                if alts_str:
+                    line += f" | Creator offered alternatives: {alts_str}"
+                rigidity_lines.append(line)
             elif rig == "partially_flexible" and entry:
-                places_str = ", ".join(entry.get("places") or [])
-                rigidity_lines.append(
-                    f"  Dia {n} → PARTIALLY_FLEXIBLE. Seed places (keep on this day, "
-                    f"you may add AI items around them): {places_str}"
+                line = (
+                    f"  Dia {n} → PARTIALLY_FLEXIBLE. Seed places (keep on this day): {places_str}"
                 )
+                if hints:
+                    line += f" | MUST also cover these video hints: {hints_str}"
+                if alts_str:
+                    line += f" | Alternatives to surface: {alts_str}"
+                rigidity_lines.append(line)
+            elif hints or alts_str:
+                # Flexible day but the video still suggested things for it.
+                line = f"  Dia {n} → FLEXIBLE, but video suggested:"
+                if hints:
+                    line += f" hints={hints_str};"
+                if alts_str:
+                    line += f" alternatives={alts_str};"
+                line += " treat these as HIGH-PRIORITY seeds when building the day."
+                rigidity_lines.append(line)
             else:
                 rigidity_lines.append(f"  Dia {n} → FLEXIBLE (build from your expertise)")
         rigidity_section = f"""
@@ -2716,9 +2805,30 @@ HOW TO READ THIS TABLE:
 - FLEXIBLE: build this day freely using the destination's landmarks and
   your expertise. Match the pace/vibe of any LOCKED days.
 
+ACTIVITY HINTS (CRITICAL — THIS IS NEW):
+When a day says "MUST also include concrete venues for these hints: X, Y",
+it means the CREATOR of the video verbally suggested X and Y for that day,
+even though they didn't name a specific place. You MUST pick a real venue
+that fits each hint IN THAT DAY'S CITY and mark it with "source": "link"
+(because the creator suggested it, even if not by proper noun). Examples:
+  hint "rooftop bar with city view" on Day 3 in Bangkok → "Mahanakhon
+    SkyWalk" or "Sky Bar at lebua" (pick one, set source=link)
+  hint "nearby waterfall" on Day 4 in Chiang Mai → "Huay Kaew Waterfall"
+    or "Mae Sa Waterfall" (pick one, set source=link)
+  hint "street food market" on Day 3 in Bangkok → "Chinatown Yaowarat"
+    (pick the iconic one, source=link)
+Failing to cover an explicit hint = failing the user's video.
+
+ALTERNATIVES (when creator offered options like "rooftop OU shopping"):
+For each "(A OR B)" block, emit TWO items for that day — one for each
+option — with the same `alternative_group` value (e.g., "day3_evening"),
+so the UI renders them as mutually exclusive choices. Both get
+source: "link" because the creator mentioned both. Do NOT pick one
+silently — the user wants to see the choice.
+
 A traveler who opens the video side-by-side with the itinerary MUST see
-Day N map to Day N of the video. Failure to match the rigidity table
-makes the itinerary unusable for this user.
+Day N map to Day N of the video, WITH every place AND every hint the
+creator mentioned covered.
 """
 
     return f"""You are an expert travel planner building a {num_days}-day itinerary for {destination}.
@@ -5747,8 +5857,19 @@ def _build_place_list_from_canonical_days(
         if not entry:
             continue
         places_on_day = entry.get("places") or []
-        for i, name in enumerate(places_on_day[:5]):
-            is_exp = _looks_like_experience(name)
+        hints_on_day = entry.get("activity_hints") or []
+        # Each hint becomes an item marked as experience so
+        # _validate_and_create_items treats it like a free-text activity
+        # and fetches top-3 venue recommendations. This preserves the
+        # creator's guidance even without a proper noun.
+        combined = [(name, False) for name in places_on_day[:5]]
+        # Fill remaining day slots with hints if there's room.
+        room_left = max(0, 5 - len(combined))
+        for hint in hints_on_day[:room_left]:
+            combined.append((hint, True))
+
+        for i, (name, is_hint) in enumerate(combined):
+            is_exp = is_hint or _looks_like_experience(name)
             place_list.append({
                 "day": day_num,
                 "name": name,
