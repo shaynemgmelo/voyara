@@ -214,11 +214,11 @@ export default function TripMap({
         />
       ))}
 
-      {/* Route lines per day — split into sub-segments when consecutive
-          items are >80km apart. The long-distance hop between segments
-          becomes a dashed line (transport) with a ✈️ icon at midpoint,
-          so a multi-city day never draws a solid 700km line across the
-          map like a walking path. */}
+      {/* Route lines per day — split into intra-city sub-segments when
+          consecutive items are >80km apart. Transport hops between cities
+          are NOT drawn on the map (too confusing — dashed 700km lines
+          crossing the ocean). The transport card in the timeline carries
+          that information instead. */}
       {dayPlans
         .filter((dp) => !selectedDayNumber || dp.day_number === selectedDayNumber)
         .flatMap((dp) => {
@@ -227,13 +227,11 @@ export default function TripMap({
             .sort((a, b) => a.position - b.position);
           if (items.length < 2) return [];
 
-          const { segments, transports } = splitByGap(items);
+          const { segments } = splitByGap(items);
           const color = getDayColor(dp.day_number);
-          const nodes = [];
-
-          segments.forEach((seg, idx) => {
-            if (seg.length < 2) return;
-            nodes.push(
+          return segments
+            .filter((seg) => seg.length >= 2)
+            .map((seg, idx) => (
               <Polyline
                 key={`route-${dp.id}-${idx}-${seg.map((p) => p.item.id).join(",")}`}
                 path={seg.map((p) => ({ lat: p.lat, lng: p.lng }))}
@@ -242,65 +240,8 @@ export default function TripMap({
                   strokeOpacity: 0.6,
                   strokeWeight: 3,
                 }}
-              />,
-            );
-          });
-
-          transports.forEach((t, idx) => {
-            const path = [
-              { lat: t.from.lat, lng: t.from.lng },
-              { lat: t.to.lat, lng: t.to.lng },
-            ];
-            nodes.push(
-              <Polyline
-                key={`transport-${dp.id}-${idx}`}
-                path={path}
-                options={{
-                  strokeOpacity: 0,
-                  strokeWeight: 0,
-                  icons: [
-                    {
-                      icon: {
-                        path: "M 0,-1 0,1",
-                        strokeOpacity: 1,
-                        strokeColor: color,
-                        strokeWeight: 2,
-                        scale: 3,
-                      },
-                      offset: "0",
-                      repeat: "12px",
-                    },
-                  ],
-                }}
-              />,
-            );
-            const midLat = (t.from.lat + t.to.lat) / 2;
-            const midLng = (t.from.lng + t.to.lng) / 2;
-            nodes.push(
-              <Marker
-                key={`transport-icon-${dp.id}-${idx}`}
-                position={{ lat: midLat, lng: midLng }}
-                icon={{
-                  // Data-URL SVG emoji pin so we don't depend on google maps
-                  // spritesheet. Slightly offset anchor so it sits above line.
-                  url:
-                    "data:image/svg+xml;utf-8," +
-                    encodeURIComponent(
-                      `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
-                        <circle cx="14" cy="14" r="12" fill="white" stroke="${color}" stroke-width="2"/>
-                        <text x="14" y="19" text-anchor="middle" font-size="14">✈️</text>
-                      </svg>`,
-                    ),
-                  scaledSize: { width: 28, height: 28 },
-                  anchor: { x: 14, y: 14 },
-                }}
-                clickable={false}
-                zIndex={0}
-              />,
-            );
-          });
-
-          return nodes;
+              />
+            ));
         })}
 
       {/* Dashed lines from hotel to first/last items of selected day */}
