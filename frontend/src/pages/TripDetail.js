@@ -23,6 +23,7 @@ import { updateTrip, triggerBuild } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
+import ValidationReportBanner from "../components/itinerary/ValidationReportBanner";
 import FlightPanel from "../components/logistics/FlightPanel";
 import NotePanel from "../components/logistics/NotePanel";
 import TripPDFExport from "../components/trip/TripPDFExport";
@@ -510,6 +511,13 @@ export default function TripDetail() {
               that came from their videos. Re-polled whenever `refining`
               transitions false→true→false. */}
           <ConflictsBanner tripId={id} refreshKey={refining ? 1 : 0} />
+
+          {/* Post-build validation report (STEPs 6-9 of the planning spec).
+              Shows only when the validator dropped destination-as-activity
+              items, injected transfer days, or flagged thin days. */}
+          <ValidationReportBanner
+            report={trip?.traveler_profile?.validation_report}
+          />
 
           {/* Trip-level AI feedback */}
           {trip.day_plans?.some((dp) => dp.itinerary_items?.length > 0) && (

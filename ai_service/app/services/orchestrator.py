@@ -2889,6 +2889,42 @@ ACTIVITY_MODEL rules (MANDATORY — Camada 4 of the planning spec):
 - "day_trip" — a day dedicated to a SECONDARY city (Tigre from BA, Sintra from Lisbon). Signals to the UI that it's a bate-volta.
 - "transfer" — a travel day between base cities (e.g. Bangkok→Chiang Mai). Duration reflects the trip time. 1-2 short activities max.
 
+═══════════════════════════════════════════════════════════════
+  DESTINATION ≠ ACTIVITY (HARD RULE, STEP 7 of the planning spec)
+═══════════════════════════════════════════════════════════════
+- NEVER emit an item whose NAME is just a destination (a city, country,
+  region, or neighborhood). Destinations are CONTAINERS, not activities.
+  ✗ WRONG: {{"day": 2, "name": "Paris", ...}}
+  ✗ WRONG: {{"day": 3, "name": "Phuket", ...}}
+  ✗ WRONG: {{"day": 5, "name": "Tailândia", ...}}
+  ✓ RIGHT: {{"day": 2, "name": "Louvre Museum", ...}}
+  ✓ RIGHT: {{"day": 3, "name": "Phi Phi Islands day tour", "activity_model": "guided_excursion", ...}}
+- Every item must have at least one CONCRETE action (visit X, eat at Y,
+  take a boat to Z, walk through <neighborhood>). "Explore Paris" is too
+  vague unless accompanied by specific streets/landmarks.
+- A day that contains only a destination name is a broken day. Fill it
+  with real places — this is the entire point of the service.
+
+═══════════════════════════════════════════════════════════════
+  DAY COMPLETENESS (HARD RULE, STEP 6)
+═══════════════════════════════════════════════════════════════
+- Every day must contain EITHER:
+    (a) at least 2 coherent activities that flow geographically, OR
+    (b) exactly one full-day activity (duration_minutes ≥ 360) — typically
+        a guided_excursion, day_trip, or transfer.
+- A day with 1 short item (duration < 360) is INVALID. Either add more
+  items around it or upgrade it to a full-day experience.
+
+═══════════════════════════════════════════════════════════════
+  TRANSPORT BETWEEN BASES (HARD RULE, STEP 8)
+═══════════════════════════════════════════════════════════════
+- Multi-base trips: when two consecutive days have DIFFERENT `city`
+  values on their day_plan, the second day MUST include a "transfer"
+  activity_model item (travel logistics: flight/train/van). Do not
+  pretend the traveler magically appears in the next city.
+- The transfer item covers the morning or midday of the travel day and
+  leaves room for 1 light activity after arrival.
+
 VISIT_MODE rules:
 - "self_guided" — traveler just shows up (walks, parks, most attractions, restaurants).
 - "guided" — typically done with a tour guide but not an operator package (free walking tour, museum audioguide).
@@ -5013,6 +5049,209 @@ def _compute_day_signature(day_items: list[dict]) -> dict:
     }
 
 
+# ──────────────────────────────────────────────
+# OUTPUT VALIDATION + REPAIR LAYER (spec STEPs 6, 7, 8, 9)
+# ──────────────────────────────────────────────
+
+
+def _normalize_for_compare(s: str) -> str:
+    """Lowercase + strip accents for name/destination comparisons."""
+    if not s:
+        return ""
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s.lower())
+        if unicodedata.category(c) != "Mn"
+    ).strip()
+
+
+def _is_destination_as_activity(
+    item_name: str,
+    destination: str,
+    cities: list[str],
+    country: str,
+) -> bool:
+    """Return True if this item's name is just a bare destination (city,
+    country, region) with no activity context. These never survive the
+    validator — they're structurally useless cards like 'Day 2: Paris'.
+
+    Heuristic: normalized name is an exact match (or prefix before a comma)
+    of the trip's destination, a detected city, or the country.
+    """
+    nname = _normalize_for_compare(item_name)
+    if not nname or len(nname) < 3:
+        return False
+    candidates: list[str] = []
+    if destination:
+        candidates.append(_normalize_for_compare(destination))
+        # Destinations often come as "City, Country" — split and compare.
+        if "," in destination:
+            for part in destination.split(","):
+                candidates.append(_normalize_for_compare(part))
+    if country:
+        candidates.append(_normalize_for_compare(country))
+    for city in cities or []:
+        candidates.append(_normalize_for_compare(city))
+    return any(nname == c for c in candidates if c)
+
+
+def _validate_and_repair_itinerary(
+    place_list: list[dict],
+    trip: dict,
+    day_plans: list[dict],
+    day_rigidity: dict[int, str] | None = None,
+) -> tuple[list[dict], dict]:
+    """Final programmatic pass that enforces the spec's output rules:
+
+      STEP 6 — Day completeness: a day must have ≥2 items OR exactly one
+               full-day item (duration ≥ 360 min) OR be a pure transfer day.
+      STEP 7 — Destination ≠ activity: never keep an item whose name is
+               just a bare city/country/region.
+      STEP 8 — Multi-base transport: in multi-base trips, the day between
+               two different base cities MUST carry a `transfer` item.
+      STEP 9 — Validation report: surface every violation the validator
+               couldn't auto-fix so the UI can show a "heads up" banner.
+
+    Auto-fixes applied:
+      - destination-as-activity items are DROPPED
+      - thin days are MARKED incomplete (completable in a later refine pass)
+      - missing transfer days get a synthesized transfer item injected so
+        the traveler isn't left guessing about cross-base travel
+
+    Returns `(repaired_place_list, validation_report)`. The report is
+    persisted on traveler_profile.validation_report so the frontend can
+    surface issues (empty-day banner, "we couldn't fill Day 3", etc.)
+    """
+    day_rigidity = day_rigidity or {}
+    profile = trip.get("traveler_profile") or {}
+    destination = (trip.get("destination") or "").strip()
+    cities = profile.get("cities_detected") or []
+    country = (profile.get("country_detected") or "").strip()
+
+    report: dict = {
+        "dropped_destination_as_activity": [],
+        "thin_days": [],
+        "injected_transfers": [],
+        "total_violations": 0,
+    }
+
+    # ── STEP 7: strip destination-as-activity items ────────────────────
+    filtered: list[dict] = []
+    for p in place_list:
+        name = (p.get("name") or "").strip()
+        if _is_destination_as_activity(name, destination, cities, country):
+            report["dropped_destination_as_activity"].append({
+                "name": name,
+                "day": p.get("day"),
+            })
+            logger.warning(
+                "[validate] Dropping '%s' on day %s — bare destination, not an activity",
+                name, p.get("day"),
+            )
+            continue
+        filtered.append(p)
+
+    place_list = filtered
+
+    # Index by day for the remaining checks.
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(p)
+
+    num_days = len(day_plans)
+    day_plan_by_number = {dp.get("day_number"): dp for dp in day_plans}
+
+    # ── STEP 8: multi-base transport enforcement ──────────────────────
+    # Group day_plans by city to detect base transitions.
+    prev_city: str | None = None
+    for d in range(1, num_days + 1):
+        dp = day_plan_by_number.get(d)
+        city = (dp.get("city") if dp else None) or ""
+        if prev_city and city and city != prev_city:
+            # Transition happened on this day. Check if the day's items
+            # include a transfer marker. If not, inject one.
+            day_items = by_day.get(d, [])
+            has_transfer = any(
+                (it.get("activity_model") == "transfer")
+                or "transfer" in (it.get("category") or "")
+                or "transport" in (it.get("category") or "")
+                for it in day_items
+            )
+            if not has_transfer:
+                injected = {
+                    "day": d,
+                    "name": f"Transfer: {prev_city} → {city}",
+                    "category": "transport",
+                    "activity_model": "transfer",
+                    "visit_mode": "self_guided",
+                    "time_slot": "09:00",
+                    "duration_minutes": 180,
+                    "description": (
+                        f"Dia de transferência entre {prev_city} e {city}. "
+                        f"Reserve a manhã/metade do dia para o deslocamento."
+                    ),
+                    "notes": "Confira horários de voo/trem/van e chegue com folga.",
+                    "source": "ai",
+                }
+                # Insert at the beginning of the day's items.
+                place_list.append(injected)
+                by_day.setdefault(d, []).insert(0, injected)
+                report["injected_transfers"].append({
+                    "day": d, "from": prev_city, "to": city,
+                })
+                logger.info(
+                    "[validate] Injected transfer on Day %d: %s → %s",
+                    d, prev_city, city,
+                )
+        if city:
+            prev_city = city
+
+    # ── STEP 6: day completeness ──────────────────────────────────────
+    for d in range(1, num_days + 1):
+        day_items = by_day.get(d, [])
+        if len(day_items) >= 2:
+            continue
+        # Single-item days are OK if it's a genuine full-day activity.
+        if len(day_items) == 1:
+            solo = day_items[0]
+            dur = solo.get("duration_minutes") or 0
+            amodel = solo.get("activity_model") or ""
+            if dur >= 360 or amodel in ("guided_excursion", "day_trip", "transfer"):
+                continue
+        # Locked days are treated as-is — user/video said so.
+        if day_rigidity.get(d) == "locked":
+            continue
+        report["thin_days"].append({
+            "day": d,
+            "item_count": len(day_items),
+            "reason": "empty" if len(day_items) == 0 else "short_items_only",
+        })
+        logger.warning(
+            "[validate] Day %d is thin — %d item(s), no full-day activity",
+            d, len(day_items),
+        )
+
+    # Rollup
+    report["total_violations"] = (
+        len(report["dropped_destination_as_activity"])
+        + len(report["thin_days"])
+        + len(report["injected_transfers"])
+    )
+    if report["total_violations"]:
+        logger.info(
+            "[validate] Validation pass — dropped=%d thin=%d transfers=%d",
+            len(report["dropped_destination_as_activity"]),
+            len(report["thin_days"]),
+            len(report["injected_transfers"]),
+        )
+    else:
+        logger.info("[validate] All validation rules passed cleanly")
+
+    return place_list, report
+
+
 async def _assign_day_rigidity(
     trip: dict,
     day_plans: list[dict],
@@ -5336,10 +5575,35 @@ async def _build_itinerary_eco(
             "Frontend will trigger /enrich-experiences after items land."
         )
 
+    # Final output validation pass — drops destination-as-activity items,
+    # injects missing transfer days on multi-base trips, flags thin days.
+    # See _validate_and_repair_itinerary for the full rule set (STEPs 6-9
+    # of the travel-planning spec).
+    place_list, validation_report = _validate_and_repair_itinerary(
+        place_list, trip, day_plans, day_rigidity=day_rigidity,
+    )
+    # Persist the report on the profile so the frontend can surface any
+    # non-fatal issues (thin days, etc.) as a banner. Best-effort; a
+    # failure here doesn't block the build.
+    if validation_report.get("total_violations"):
+        try:
+            refreshed = await rails.get_trip(trip_id)
+            profile_blob = (refreshed.get("traveler_profile") or {})
+            profile_blob["validation_report"] = validation_report
+            await rails.update_trip(
+                trip_id, {"traveler_profile": profile_blob},
+            )
+        except Exception as e:
+            logger.warning("[validate] Failed to persist validation_report: %s", e)
+
     result = await _validate_and_create_items(
         place_list, trip, day_plans, rails, places, cost, trip_id, source_urls,
         day_rigidity=day_rigidity,
     )
+    # Echo the validation report on the result so the background task can
+    # log it (useful for debugging bad trips in production).
+    if validation_report.get("total_violations"):
+        result["validation_report"] = validation_report
 
     # Phase 3.5 — persist pattern signatures for locked/partially_flexible days.
     # This records the "flavor" of video-sourced days (density, category mix,
