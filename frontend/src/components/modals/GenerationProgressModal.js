@@ -1,53 +1,165 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
+import { fetchBuildStatus } from "../../api/buildStatus";
 
 /**
  * Full-screen progress modal for the itinerary generation pipeline.
  *
- * Why a modal (not inline): generation takes 30-120 seconds and during that
- * window the page has nothing useful to do. A centered modal gives the user
- * focused feedback + a clear percentage instead of a vague spinner.
+ * Percentage model (rewritten — was time-based, now STAGE-based):
+ *   - We poll /api/build-status every 3s and map the backend `stage` string
+ *     to a percentage. This way a 90-second Sonnet call shows the correct
+ *     "generating — 75%" label instead of creeping up to 95% by elapsed
+ *     time alone. The bar reflects ACTUAL pipeline progress.
+ *   - When extracting, we refine the percentage further using the
+ *     extracted link count (e.g. link 2/3 done → higher % than 1/3).
+ *   - If the backend doesn't return a stage (poll failed), we fall back
+ *     to the phase prop and a conservative time-based estimate.
  *
- * Percentage model:
- *   - We don't have true per-phase telemetry from the backend, so the bar
- *     is TIME-WEIGHTED with an asymptotic ease-out that never hits 100%
- *     until the backend signals `hasItems` (i.e. real completion).
- *   - Extraction sub-phase: 0→25% driven by extractedCount / totalLinks.
- *   - Classification: 25→40% (fixed bump when all links are extracted).
- *   - Generation: 40→95% eased by elapsed time with an estimated duration
- *     of 75 seconds. Past that it creeps very slowly to 95% to avoid
- *     the "stuck at 100% for 30s" feeling.
- *   - Done: 100% (snaps to full, then dismisses).
- *
- * Phase detection mirrors ProcessingStatus — this component is rendered by
- * the page only when we're in a generating/analyzing/extracting phase.
+ * Stuck detection (rewritten — was 90s wall clock, now stage-change):
+ *   - "Stuck" means the backend's `stage` field has not changed for 60
+ *     seconds. A build that's in the middle of a legitimate 80-second
+ *     Sonnet call is NOT stuck — it's just working. We only show the
+ *     escape-hatch card when the same stage string has been reported for
+ *     60+ seconds in a row. This removes the false "stuck" alarm that
+ *     was freaking users out on normal slow builds.
  */
+
+// Stage → percentage mapping. Covers every stage string emitted by the
+// orchestrator's `_mark()` calls in extract_profile_and_build + build_trip_itinerary.
+// Keys are tested as SUBSTRINGS, first match wins (order matters).
+const STAGE_TO_PCT = [
+  ["fetching trip", 3],
+  ["need to extract", 5],
+  ["extracted link", 15], // refined per-link below
+  ["analyzing profile", 30],
+  ["profile auto-confirmed", 38],
+  ["external research", 42],
+  ["destination classified", 46],
+  ["building itinerary", 50],
+  ["start — fetching", 50],
+  ["aggregating content", 52],
+  ["content ready", 55],
+  ["classifying sources", 60],
+  ["generating itinerary", 65],
+  // Inside build_trip_itinerary, "generating" covers the Sonnet call +
+  // Google Places validation. We let time refine it from 65 → 92.
+  ["validate", 88],
+  ["creating items", 92],
+  ["marking links", 95],
+  ["DONE", 99],
+];
+
+function stageToPercent(stage, extractedCount, totalLinks, stageElapsed) {
+  if (!stage) return null;
+  const low = stage.toLowerCase();
+  for (const [keyword, basePct] of STAGE_TO_PCT) {
+    if (low.includes(keyword)) {
+      // Special refinements:
+      if (keyword === "extracted link" && totalLinks > 0) {
+        // 5 → 28% distributed over the link count
+        const ratio = Math.min(extractedCount / totalLinks, 1);
+        return Math.round(5 + ratio * 23);
+      }
+      if (keyword === "generating itinerary") {
+        // 65 → 88% eased by stage elapsed (Sonnet usually 40-80s)
+        const t = Math.min(stageElapsed / 80_000, 1);
+        return Math.round(65 + t * 23);
+      }
+      return basePct;
+    }
+  }
+  return null;
+}
+
+// Human-readable label for the current stage — shown under the percentage.
+function stageToLabel(stage, pt) {
+  if (!stage) return null;
+  const low = stage.toLowerCase();
+  if (low.includes("fetching") || low.includes("aggregating")) {
+    return pt ? "Carregando dados da viagem..." : "Loading trip data...";
+  }
+  if (low.includes("extracted link") || low.includes("need to extract")) {
+    return pt ? "Lendo vídeos (áudio + imagem)..." : "Reading videos (audio + image)...";
+  }
+  if (low.includes("analyzing profile") || low.includes("auto-confirmed")) {
+    return pt ? "Identificando seu perfil de viagem..." : "Identifying your travel profile...";
+  }
+  if (low.includes("destination classified") || low.includes("external research")) {
+    return pt ? "Classificando o destino..." : "Classifying the destination...";
+  }
+  if (low.includes("classifying sources")) {
+    return pt ? "Lendo a estrutura dos vídeos..." : "Reading video structure...";
+  }
+  if (low.includes("generating itinerary") || low.includes("building itinerary")) {
+    return pt ? "Gerando seu roteiro com IA..." : "Generating your itinerary with AI...";
+  }
+  if (low.includes("validate") || low.includes("creating items")) {
+    return pt ? "Validando lugares no Google Maps..." : "Validating places on Google Maps...";
+  }
+  if (low.includes("marking links") || low.includes("done")) {
+    return pt ? "Finalizando..." : "Finalizing...";
+  }
+  return null;
+}
+
 export default function GenerationProgressModal({ phase, trip, onRetry }) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
+
   const [now, setNow] = useState(Date.now());
   const [startedAt, setStartedAt] = useState(null);
+  // Real backend state
+  const [backendStage, setBackendStage] = useState(null);
+  const [backendElapsed, setBackendElapsed] = useState(0);
+  // Track when the current stage first appeared — this is what drives the
+  // "stuck" detection (60s on the same stage = real stuck, not just slow).
+  const stageChangedAtRef = useRef(Date.now());
+  const lastStageRef = useRef(null);
 
-  // Pick a start time the first time we enter a generating-like phase, so
-  // the bar only resets when the user retries — not when React re-renders.
+  // Pick a start time the first time we enter a generating-like phase.
   useEffect(() => {
     if (!startedAt && phase) setStartedAt(Date.now());
-    if (!phase) setStartedAt(null);
+    if (!phase) {
+      setStartedAt(null);
+      setBackendStage(null);
+      stageChangedAtRef.current = Date.now();
+      lastStageRef.current = null;
+    }
   }, [phase, startedAt]);
 
-  // Tick every 500ms so the bar visibly moves. Cheap re-render — no fetch.
+  // Tick every 500ms so the bar visibly moves.
   useEffect(() => {
     if (!phase) return;
     const t = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(t);
   }, [phase]);
 
-  // Stuck detection — after 90s show the escape card. Backend has a 240s
-  // ceiling per build, but the user shouldn't have to stare at 95% for
-  // 2½ minutes before getting an "try again" button. Also 90s is the
-  // same threshold the hook auto-retry uses, so UI + backend align.
+  // Poll /api/build-status every 3s for the real backend stage.
+  useEffect(() => {
+    if (!phase || !trip?.id) return;
+    let alive = true;
+    const poll = async () => {
+      const status = await fetchBuildStatus(trip.id);
+      if (!alive) return;
+      if (status.active && status.stage) {
+        setBackendStage(status.stage);
+        setBackendElapsed((status.elapsed || 0) * 1000);
+        // Detect stage change — reset the stuck timer
+        if (lastStageRef.current !== status.stage) {
+          lastStageRef.current = status.stage;
+          stageChangedAtRef.current = Date.now();
+        }
+      }
+    };
+    poll(); // immediate
+    const id = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [phase, trip?.id]);
+
   const elapsedMs = startedAt ? now - startedAt : 0;
-  const stuck = elapsedMs > 90_000; // 1.5 minutes
 
   const links = trip?.links || [];
   const extractedCount = links.filter(
@@ -55,30 +167,39 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
   ).length;
   const totalLinks = links.length;
 
+  // NEW percent calculation — prefer real backend stage, fall back to phase-based.
   const percent = useMemo(() => {
     if (!phase) return 0;
-    const elapsed = startedAt ? now - startedAt : 0;
-
+    const stageElapsed = backendStage ? now - stageChangedAtRef.current : 0;
+    const fromStage = stageToPercent(
+      backendStage, extractedCount, totalLinks, stageElapsed,
+    );
+    if (fromStage !== null) return fromStage;
+    // Fallback to the old phase-based estimate when we don't have stage yet.
     if (phase === "extracting") {
-      // 0 → 25% based on extracted/total
-      const linkRatio = totalLinks > 0 ? extractedCount / totalLinks : 0;
-      return Math.round(linkRatio * 25);
+      const ratio = totalLinks > 0 ? extractedCount / totalLinks : 0;
+      return Math.round(ratio * 25);
     }
     if (phase === "analyzing") {
-      // 25 → 40%, eased over 15s
-      const t = Math.min(elapsed / 15_000, 1);
+      const t = Math.min(elapsedMs / 15_000, 1);
       return Math.round(25 + t * 15);
     }
     if (phase === "generating") {
-      // 40 → 95% with ease-out; 75s to reach ~90%, then asymptotic toward 95
-      const estMs = 75_000;
-      const t = elapsed / estMs;
-      const eased = 1 - Math.pow(1 - Math.min(t, 1), 2); // quadratic ease-out
-      const slowTail = t > 1 ? Math.min(0.05, (t - 1) * 0.02) : 0; // creep
-      return Math.min(95, Math.round(40 + eased * 55 + slowTail * 100));
+      const t = Math.min(elapsedMs / 75_000, 1);
+      const eased = 1 - Math.pow(1 - t, 2);
+      return Math.min(90, Math.round(40 + eased * 50));
     }
     return 0;
-  }, [phase, now, startedAt, extractedCount, totalLinks]);
+  }, [phase, backendStage, now, extractedCount, totalLinks, elapsedMs]);
+
+  // NEW stuck detection — backend stage hasn't changed for 60s.
+  // Fallback: if we have no backend stage at all after 120s, consider stuck.
+  const stageAge = Date.now() - stageChangedAtRef.current;
+  const stuck = useMemo(() => {
+    if (backendStage && stageAge > 60_000) return true;
+    if (!backendStage && elapsedMs > 120_000) return true; // no status in 2min = something's off
+    return false;
+  }, [backendStage, stageAge, elapsedMs]);
 
   const steps = useMemo(() => {
     const defs = [
@@ -114,6 +235,8 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
     }));
   }, [phase, pt]);
 
+  const stageLabel = stageToLabel(backendStage, pt);
+
   if (!phase) return null;
 
   return (
@@ -124,10 +247,7 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
       aria-label={pt ? "Gerando roteiro" : "Generating itinerary"}
     >
       <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 space-y-6">
-        {/* Header + big number + elapsed timer (so the user sees
-             something moving even when the % is asymptotically holding
-             near 95). The seconds tick even while the tab was backgrounded
-             because `now` is a wall-clock delta. */}
+        {/* Header + big number + stage label */}
         <div className="text-center">
           <div className="text-4xl mb-1">
             {steps.find((s) => s.state === "active")?.icon || "✨"}
@@ -135,10 +255,8 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
           <div className="text-5xl font-bold text-gray-900 tabular-nums tracking-tight">
             {percent}%
           </div>
-          <p className="text-sm text-gray-500 mt-1">
-            {pt
-              ? "Estamos montando sua viagem..."
-              : "We're building your trip..."}
+          <p className="text-sm text-gray-600 mt-2 font-medium min-h-[20px]">
+            {stageLabel || (pt ? "Iniciando..." : "Starting...")}
           </p>
           {startedAt && (
             <p className="text-[11px] text-gray-400 mt-1 tabular-nums">
@@ -193,24 +311,26 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
           ))}
         </div>
 
-        {/* Helper text + stuck escape hatch */}
+        {/* Helper text + stuck escape hatch. The hatch now fires only when
+             the backend stage hasn't changed for 60s — not just when wall
+             time passed 90s. A slow-but-working build no longer cries wolf. */}
         {!stuck && (
           <p className="text-[11px] text-gray-400 text-center">
             {pt
-              ? "Pode demorar até 2 minutos em vídeos longos. Não feche a página."
-              : "May take up to 2 minutes on long videos. Keep this page open."}
+              ? "Pode demorar até 3 minutos em vídeos longos. Não feche a página."
+              : "May take up to 3 minutes on long videos. Keep this page open."}
           </p>
         )}
         {stuck && (
           <div className="rounded-xl bg-amber-50 border-2 border-amber-300 p-3 space-y-2">
             <p className="text-sm text-amber-900 font-bold flex items-center gap-2">
               <span>⚠️</span>
-              {pt ? "Geração travada?" : "Stuck?"}
+              {pt ? "Parece travado" : "Looks stuck"}
             </p>
             <p className="text-[11px] text-amber-800/90 leading-relaxed">
               {pt
-                ? "O botão abaixo força o servidor a começar de novo, limpando qualquer tentativa anterior presa. Os lugares que já foram extraídos dos seus links ficam salvos — nada é perdido."
-                : "The button below forces the server to start fresh, clearing any stuck previous attempt. Already-extracted places stay saved — nothing is lost."}
+                ? `A geração está na mesma etapa há ${Math.floor(stageAge / 1000)}s. Se quiser, clica abaixo pra forçar reiniciar — nada que já foi extraído é perdido.`
+                : `Generation has been on the same step for ${Math.floor(stageAge / 1000)}s. You can force a restart below — nothing already extracted is lost.`}
             </p>
             <button
               onClick={() => {
