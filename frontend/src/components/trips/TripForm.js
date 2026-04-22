@@ -126,7 +126,7 @@ export default function TripForm({ onSubmit, initial }) {
           <input
             type="range"
             min="1"
-            max="30"
+            max="15"
             value={numDays}
             onChange={(e) => setNumDays(parseInt(e.target.value) || 1)}
             className="flex-1 accent-coral-500"
