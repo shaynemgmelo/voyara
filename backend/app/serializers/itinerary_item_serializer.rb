@@ -42,6 +42,8 @@ class ItineraryItemSerializer
       # Camada 4 — planning model per item.
       activity_model: @item.activity_model,
       visit_mode: @item.visit_mode,
+      # STEP 2 — semantic role for UI icons / filters.
+      item_role: @item.item_role,
       personal_notes: @item.personal_notes,
       vibe_tags: @item.vibe_tags,
       alerts: @item.alerts,

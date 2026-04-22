@@ -199,6 +199,8 @@ class Api::V1::ItineraryItemsController < Api::V1::BaseController
       :priority, :item_status, :best_turn, :region,
       # Camada 4 — planning model per item.
       :activity_model, :visit_mode,
+      # STEP 2 — semantic role (landmark, museum_cultural, beach_island, etc.)
+      :item_role,
       operating_hours: {}, photos: [], vibe_tags: [], alerts: []
     )
   end

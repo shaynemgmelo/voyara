@@ -2380,6 +2380,15 @@ async def _validate_and_create_items(
             # Camada 4 — new planning-model fields.
             "activity_model": amodel,
             "visit_mode": vmode,
+            # STEP 2 — computed semantic role from activity_model + category
+            # + vibe_tags + name. Rails-side enum validation will coerce
+            # invalid values to null.
+            "item_role": _compute_item_role({
+                "activity_model": amodel,
+                "category": category,
+                "vibe_tags": place.get("vibe_tags") or [],
+                "name": place.get("name") or "",
+            }),
         }
         item_data = {k: v for k, v in item_data.items() if v is not None}
         create_tasks.append((trip_id, day_plan_id, item_data, place.get("name")))
@@ -2540,6 +2549,19 @@ Prioritize places matching their interests while still creating a complete trip 
             dest_section += "\nDESTINATION-SPECIFIC NOTES (from the classifier):\n"
             for note in planning_notes[:6]:
                 dest_section += f"  - {note}\n"
+
+    # STEP 4 — Inject external research (Tavily snippets) when available.
+    # Gives Sonnet real-world itinerary structure instead of forcing it to
+    # reason every destination from scratch. Only present for tour_driven
+    # and multi_base destinations where Sonnet's internal knowledge alone
+    # is weakest.
+    external_research = profile.get("external_research")
+    if external_research:
+        dest_section += (
+            "\nCOMMON PATTERNS FROM REAL TRAVEL GUIDES (use as structural reference,\n"
+            "not as ground truth — cross-check against the user's video content):\n"
+            f"{external_research}\n"
+        )
 
     # Source URLs for traceability
     sources_info = ""
@@ -4146,6 +4168,23 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
             )
             if classification:
                 refreshed_profile["destination_classification"] = classification
+                # STEP 4 — external research only when the destination type
+                # actually benefits from it (tour_driven / multi_base). Stored
+                # in the profile so _build_itinerary_prompt can inject it.
+                dtype = classification.get("destination_type")
+                if dtype in ("tour_driven", "multi_base") and settings.tavily_api_key:
+                    try:
+                        research = await _research_itinerary_patterns(
+                            country=country,
+                            cities=cities,
+                            num_days=num_days,
+                            destination_type=dtype,
+                        )
+                        if research:
+                            refreshed_profile["external_research"] = research
+                            _mark(f"external research gathered ({len(research)} chars)")
+                    except Exception:
+                        logger.exception("[research] Non-fatal — continuing without external context")
                 await rails.update_trip(
                     trip_id, {"traveler_profile": refreshed_profile},
                 )
@@ -5252,6 +5291,322 @@ def _validate_and_repair_itinerary(
     return place_list, report
 
 
+# ──────────────────────────────────────────────
+# STEP 3 — Auto-refine thin days (targeted Sonnet call)
+# ──────────────────────────────────────────────
+
+async def _repair_thin_days(
+    thin_days: list[dict],
+    place_list: list[dict],
+    trip: dict,
+    day_plans: list[dict],
+    cost: CostTracker,
+) -> list[dict]:
+    """When the validator flagged thin days (<2 items, no full-day item),
+    fire ONE focused Sonnet call asking for 2-3 activities per thin day.
+    Respects the day's base city, the trip's destination_type, and the
+    items already present on neighboring days (for geographic flow).
+
+    Returns an updated place_list with the injected items appended. If
+    the call fails/times out, returns the original list unchanged — the
+    thin-day banner in the UI still surfaces the issue so the user can
+    refine via chat.
+    """
+    if not thin_days:
+        return place_list
+
+    profile = trip.get("traveler_profile") or {}
+    destination = trip.get("destination") or ""
+    country = profile.get("country_detected") or ""
+    cities = profile.get("cities_detected") or []
+    dest_classification = profile.get("destination_classification") or {}
+    dest_type = dest_classification.get("destination_type") or "walkable_urban"
+    travel_style = profile.get("travel_style") or ""
+    interests = ", ".join(profile.get("interests") or [])
+
+    # Build a quick summary of existing items by day (keeps the prompt small).
+    items_by_day: dict[int, list[str]] = {}
+    for p in place_list:
+        d = p.get("day")
+        if isinstance(d, int):
+            items_by_day.setdefault(d, []).append(p.get("name") or "")
+    day_plan_by_num = {dp.get("day_number"): dp for dp in day_plans}
+
+    # Compose a context block per thin day.
+    thin_contexts = []
+    thin_day_numbers: list[int] = []
+    for t in thin_days:
+        d = t.get("day")
+        if not isinstance(d, int):
+            continue
+        thin_day_numbers.append(d)
+        dp = day_plan_by_num.get(d) or {}
+        city = dp.get("city") or cities[0] if cities else ""
+        existing = items_by_day.get(d, [])
+        neighbors = []
+        for nd in (d - 1, d + 1):
+            ni = items_by_day.get(nd, [])
+            if ni:
+                neighbors.append(f"Day {nd}: {', '.join(ni[:3])}")
+        thin_contexts.append(
+            f"- Day {d} (base: {city or 'unspecified'}). Already has: "
+            f"{', '.join(existing) if existing else '(nothing)'}. "
+            f"Neighbors — {' · '.join(neighbors) if neighbors else 'no context'}."
+        )
+
+    if not thin_day_numbers:
+        return place_list
+
+    prompt = f"""You are filling in thin days in a travel itinerary. The main build finished, but these days ended up with too few activities to be usable. Add 2-3 coherent activities per listed day.
+
+Trip context:
+  Destination: {destination}
+  Country: {country}
+  Destination type: {dest_type}
+  Traveler style: {travel_style}
+  Interests: {interests}
+
+Thin days to repair:
+{chr(10).join(thin_contexts)}
+
+Rules:
+- Each new item must be a REAL place or concrete activity — never a bare city/country name.
+- Respect the day's base city. Do not pull items from a different city.
+- Items on the same day must be geographically coherent (walkable or within 20 min).
+- If the day is in a tour_driven or multi_base destination, prefer one full-day excursion over four short items.
+- Use the traveler's interests. If the profile says "museums", include museums; if "nature", include parks/hikes.
+- Do NOT duplicate items already on that day or on neighboring days.
+
+Return ONLY a JSON array. Each object:
+{{"day": <day number>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|cafe|shopping|nightlife|other", "time_slot": "HH:MM", "duration_minutes": <minutes>, "description": "One short sentence in Brazilian Portuguese (pt-BR) with proper accents — why this is worth it.", "notes": "Practical tip in pt-BR.", "vibe_tags": ["tag1"], "activity_model": "direct_place|anchored_experience|guided_excursion|day_trip", "visit_mode": "self_guided|guided|book_separately|operator_based", "source": "ai"}}
+
+Output 2-3 items per thin day. Nothing else."""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
+
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=45.0,
+                )
+            ),
+            timeout=50.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.warning("[thin-repair] Timed out — leaving thin days flagged")
+        return place_list
+    except Exception as e:
+        logger.warning("[thin-repair] Call failed (%s) — leaving thin days flagged", e)
+        return place_list
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.warning("[thin-repair] Parse failed, raw: %s", raw[:200])
+        return place_list
+
+    # Sanity-filter: only keep items whose day matches a thin day.
+    added = 0
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        d = item.get("day")
+        if not isinstance(d, int) or d not in thin_day_numbers:
+            continue
+        # Default activity_model/visit_mode if missing.
+        item.setdefault("activity_model", "direct_place")
+        item.setdefault("visit_mode", "self_guided")
+        item.setdefault("source", "ai")
+        place_list.append(item)
+        added += 1
+
+    logger.info(
+        "[thin-repair] Sonnet added %d items across %d thin days",
+        added, len(thin_day_numbers),
+    )
+    return place_list
+
+
+# ──────────────────────────────────────────────
+# STEP 4 — External itinerary research (Tavily)
+# ──────────────────────────────────────────────
+
+async def _research_itinerary_patterns(
+    country: str,
+    cities: list[str],
+    num_days: int,
+    destination_type: str,
+    http_client=None,
+) -> str:
+    """Query Tavily for real travel guides to learn how this destination
+    is commonly structured (STEP 4 of the planning spec). Returns a
+    compact summary string (≤ 1500 chars) that gets injected into the
+    Sonnet prompt under "COMMON PATTERNS FROM REAL TRAVEL GUIDES".
+
+    Only fires for destinations that benefit from external structure:
+    tour_driven and multi_base. Walkable urban cities rarely need it —
+    Sonnet already knows Paris/Rome inside out.
+
+    Fails open: if Tavily is unconfigured, times out, or returns junk,
+    returns an empty string and the build proceeds without the research
+    context.
+    """
+    if destination_type not in {"tour_driven", "multi_base"}:
+        return ""
+    if not settings.tavily_api_key:
+        logger.info("[research] Tavily not configured — skipping external research")
+        return ""
+    if not country:
+        return ""
+
+    import httpx as _httpx
+
+    # Two focused queries. Tavily returns both snippets and curated answers.
+    queries = [
+        f"{num_days}-day itinerary {country}",
+        f"best day trips and tours in {country}",
+    ]
+    own_client = http_client is None
+    client = http_client or _httpx.AsyncClient(timeout=15.0)
+
+    snippets: list[str] = []
+    try:
+        for q in queries:
+            try:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": settings.tavily_api_key,
+                            "query": q,
+                            "search_depth": "basic",
+                            "include_answer": True,
+                            "max_results": 3,
+                        },
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[research] Tavily %d on '%s': %s",
+                        resp.status_code, q, resp.text[:200],
+                    )
+                    continue
+                data = resp.json()
+                answer = (data.get("answer") or "").strip()
+                if answer:
+                    snippets.append(f"[Q: {q}]\n{answer[:600]}")
+                for r in (data.get("results") or [])[:2]:
+                    content = (r.get("content") or "").strip()
+                    if content:
+                        snippets.append(f"  - {content[:250]}")
+            except asyncio.TimeoutError:
+                logger.warning("[research] Tavily timeout on '%s'", q)
+            except Exception as e:
+                logger.warning("[research] Tavily error on '%s': %s", q, e)
+    finally:
+        if own_client:
+            await client.aclose()
+
+    if not snippets:
+        return ""
+
+    summary = "\n\n".join(snippets)[:1500]
+    logger.info(
+        "[research] Gathered %d snippets (%d chars) for %s",
+        len(snippets), len(summary), country,
+    )
+    return summary
+
+
+# ──────────────────────────────────────────────
+# STEP 2 — Semantic item role (computed from existing fields)
+# ──────────────────────────────────────────────
+
+ITEM_ROLES = {
+    "landmark",           # iconic destination-defining place
+    "attraction",         # notable but not necessarily iconic
+    "neighborhood",       # a district to walk/explore
+    "museum_cultural",    # museum, gallery, cultural space
+    "beach_island",       # beach, island, coastal spot
+    "viewpoint_nature",   # viewpoint, park, nature spot
+    "food_market",        # food market, street food area
+    "nightlife_venue",    # bar, club, live music
+    "experience_activity",# tango show, cooking class, tour
+    "transport_leg",      # transfer day content
+    "day_trip_destination", # the destination of a day trip
+}
+
+
+def _compute_item_role(item: dict) -> str | None:
+    """Derive a semantic role from existing fields (activity_model,
+    category, vibe_tags, name). Runs cost-free and keeps STEP 2's spec
+    intent (every item is semantically classified before use) without
+    requiring a Sonnet-emitted field or DB migration.
+
+    Returns one of ITEM_ROLES, or None if the signal is too weak to
+    commit to a role.
+    """
+    amodel = item.get("activity_model")
+    category = (item.get("category") or "").lower()
+    vibes = set((item.get("vibe_tags") or []))
+    name = (item.get("name") or "").lower()
+
+    # activity_model gives us strong signals first.
+    if amodel == "transfer":
+        return "transport_leg"
+    if amodel == "day_trip":
+        return "day_trip_destination"
+    if amodel in ("guided_excursion", "route_cluster"):
+        return "experience_activity"
+    if amodel == "anchored_experience":
+        return "experience_activity"
+
+    # Vibe-tag signals override noisy category.
+    if "experiencia" in vibes or "cultural" in vibes and category == "activity":
+        return "experience_activity"
+    if "vista_panoramica" in vibes:
+        return "viewpoint_nature"
+    if "ao_ar_livre" in vibes and category != "restaurant":
+        return "viewpoint_nature"
+
+    # Category fallback.
+    if category == "nightlife":
+        return "nightlife_venue"
+    if category in {"restaurant", "cafe"}:
+        # Treat food markets (have "mercado" or "market" in name) specially.
+        if "mercado" in name or "market" in name or "feira" in name:
+            return "food_market"
+        return None  # ordinary restaurant/cafe — no special role
+    if category == "shopping":
+        if "mercado" in name or "market" in name:
+            return "food_market"
+        return "attraction"
+    if category == "attraction":
+        # Heuristic: museums/galleries/temples
+        for hint in ("museu", "museum", "galeria", "gallery", "templo", "temple", "church", "igreja", "catedral", "cathedral"):
+            if hint in name:
+                return "museum_cultural"
+        # Beaches/islands
+        for hint in ("praia", "beach", "island", "ilha"):
+            if hint in name:
+                return "beach_island"
+        # Viewpoints/parks
+        for hint in ("mirante", "viewpoint", "parque", "park", "jardim", "garden", "observatory", "observatório"):
+            if hint in name:
+                return "viewpoint_nature"
+        return "attraction"
+    if category == "activity":
+        return "experience_activity"
+    return None
+
+
 async def _assign_day_rigidity(
     trip: dict,
     day_plans: list[dict],
@@ -5582,6 +5937,29 @@ async def _build_itinerary_eco(
     place_list, validation_report = _validate_and_repair_itinerary(
         place_list, trip, day_plans, day_rigidity=day_rigidity,
     )
+
+    # STEP 3 — auto-repair thin days with a targeted Sonnet call. Only
+    # runs if the validator flagged any; a typical clean build skips this
+    # entirely. Budget 50s, fail-open: if it times out we keep the flag.
+    if validation_report.get("thin_days"):
+        logger.info(
+            "[thin-repair] %d thin days detected — running targeted Sonnet repair",
+            len(validation_report["thin_days"]),
+        )
+        place_list = await _repair_thin_days(
+            validation_report["thin_days"], place_list, trip, day_plans, cost,
+        )
+        # Re-run the validator so the report reflects what survived repair.
+        place_list, validation_report = _validate_and_repair_itinerary(
+            place_list, trip, day_plans, day_rigidity=day_rigidity,
+        )
+        logger.info(
+            "[thin-repair] Post-repair — dropped=%d thin=%d transfers=%d",
+            len(validation_report["dropped_destination_as_activity"]),
+            len(validation_report["thin_days"]),
+            len(validation_report["injected_transfers"]),
+        )
+
     # Persist the report on the profile so the frontend can surface any
     # non-fatal issues (thin days, etc.) as a banner. Best-effort; a
     # failure here doesn't block the build.

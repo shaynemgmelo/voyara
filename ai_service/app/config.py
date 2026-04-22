@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     whatsapp_access_token: str = ""
     whatsapp_phone_number_id: str = ""
     whatsapp_verify_token: str = "mapass-webhook-verify"
+    # Tavily web search — used for STEP 4 of the planning spec (external
+    # itinerary research when destination is tour_driven or multi_base).
+    # Optional: if unset, the research step is skipped gracefully and we
+    # fall back to Sonnet's internal knowledge.
+    tavily_api_key: str = ""
 
 
 settings = Settings()

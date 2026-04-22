@@ -16,6 +16,21 @@ class ItineraryItem < ApplicationRecord
     transfer
   ].freeze
   VISIT_MODES = %w[self_guided guided book_separately operator_based].freeze
+  # STEP 2 of the travel-planning spec — semantic role layer, computed by
+  # the orchestrator from category + activity_model + name heuristics.
+  ITEM_ROLES = %w[
+    landmark
+    attraction
+    neighborhood
+    museum_cultural
+    beach_island
+    viewpoint_nature
+    food_market
+    nightlife_venue
+    experience_activity
+    transport_leg
+    day_trip_destination
+  ].freeze
 
   # Legacy mapping — the old `source` column is kept around for one release
   # so callers that haven't migrated yet still work.
@@ -36,6 +51,7 @@ class ItineraryItem < ApplicationRecord
   validates :extraction_method, inclusion: { in: EXTRACTION_METHODS }, allow_nil: true
   validates :activity_model, inclusion: { in: ACTIVITY_MODELS }, allow_nil: true
   validates :visit_mode, inclusion: { in: VISIT_MODES }, allow_nil: true
+  validates :item_role, inclusion: { in: ITEM_ROLES }, allow_nil: true
 
   before_validation :sync_legacy_source
   before_save       :backfill_best_turn
