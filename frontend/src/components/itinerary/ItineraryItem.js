@@ -200,6 +200,52 @@ export default function ItineraryItem({
                   🎭 {pt ? "Experiência" : "Experience"}
                 </span>
               )}
+              {/* Camada 4 — activity_model badge. Tells the user what
+                    KIND of day this is: a walkable pin vs a full-day
+                    guided tour vs a day trip to another city. Helps
+                    set expectations (and makes the app honest about
+                    tour-driven destinations). */}
+              {(() => {
+                const am = item.activity_model;
+                if (!am || am === "direct_place") return null;
+                const labels = {
+                  anchored_experience: { emoji: "📍", pt: "Experiência ancorada", en: "Anchored experience", cls: "bg-sky-100 text-sky-700" },
+                  guided_excursion:    { emoji: "🚐", pt: "Passeio guiado",       en: "Guided excursion",     cls: "bg-orange-100 text-orange-700" },
+                  route_cluster:       { emoji: "🗺️", pt: "Circuito regional",    en: "Regional circuit",     cls: "bg-teal-100 text-teal-700" },
+                  day_trip:            { emoji: "🚗", pt: "Bate-volta",           en: "Day trip",             cls: "bg-emerald-100 text-emerald-700" },
+                  transfer:            { emoji: "✈️", pt: "Dia de transferência", en: "Transfer day",         cls: "bg-gray-100 text-gray-600" },
+                };
+                const label = labels[am];
+                if (!label) return null;
+                return (
+                  <span
+                    className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${label.cls}`}
+                    title={pt ? label.pt : label.en}
+                  >
+                    {label.emoji} {pt ? label.pt : label.en}
+                  </span>
+                );
+              })()}
+              {/* Camada 4 — visit_mode badge for items that require
+                    booking or operator arrangement. Skipped for
+                    self-guided (the default) to avoid badge clutter. */}
+              {item.visit_mode && item.visit_mode !== "self_guided" && (() => {
+                const modes = {
+                  guided:          { emoji: "🧑‍🏫", pt: "Com guia",       en: "With guide" },
+                  book_separately: { emoji: "🎟️", pt: "Reserve antes",    en: "Book ahead" },
+                  operator_based:  { emoji: "🧾", pt: "Agência/operador", en: "Via operator" },
+                };
+                const m = modes[item.visit_mode];
+                if (!m) return null;
+                return (
+                  <span
+                    className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-100"
+                    title={pt ? m.pt : m.en}
+                  >
+                    {m.emoji} {pt ? m.pt : m.en}
+                  </span>
+                );
+              })()}
               {item.duration_minutes && (
                 <span className="text-[10px] text-gray-400">
                   ⏱ {formatDuration(item.duration_minutes)}

@@ -197,6 +197,8 @@ class Api::V1::ItineraryItemsController < Api::V1::BaseController
       # New provenance + editability fields (Phase 1 of the reform).
       :origin, :source_video_url, :source_video_creator, :extraction_method,
       :priority, :item_status, :best_turn, :region,
+      # Camada 4 — planning model per item.
+      :activity_model, :visit_mode,
       operating_hours: {}, photos: [], vibe_tags: [], alerts: []
     )
   end

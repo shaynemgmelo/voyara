@@ -39,6 +39,9 @@ class ItineraryItemSerializer
       item_status: @item.item_status,
       best_turn: @item.best_turn,
       region: @item.region,
+      # Camada 4 — planning model per item.
+      activity_model: @item.activity_model,
+      visit_mode: @item.visit_mode,
       personal_notes: @item.personal_notes,
       vibe_tags: @item.vibe_tags,
       alerts: @item.alerts,

@@ -2338,6 +2338,21 @@ async def _validate_and_create_items(
         else:
             item_source_url = None
 
+        # Camada 4 — validate the two new enum fields before Rails sees them.
+        # Rails will reject anything outside ACTIVITY_MODELS/VISIT_MODES so
+        # we default rather than blow up the whole build.
+        VALID_AMODELS = {
+            "direct_place", "anchored_experience", "guided_excursion",
+            "route_cluster", "day_trip", "transfer",
+        }
+        VALID_VMODES = {"self_guided", "guided", "book_separately", "operator_based"}
+        amodel = place.get("activity_model")
+        if amodel not in VALID_AMODELS:
+            amodel = None  # let Rails store NULL; UI treats missing as direct_place
+        vmode = place.get("visit_mode")
+        if vmode not in VALID_VMODES:
+            vmode = None
+
         item_data = {
             "name": place.get("name", "Unknown"),
             "category": category,
@@ -2362,6 +2377,9 @@ async def _validate_and_create_items(
             "position": pos,
             "source": place_source,
             "source_url": item_source_url,
+            # Camada 4 — new planning-model fields.
+            "activity_model": amodel,
+            "visit_mode": vmode,
         }
         item_data = {k: v for k, v in item_data.items() if v is not None}
         create_tasks.append((trip_id, day_plan_id, item_data, place.get("name")))
@@ -2449,6 +2467,79 @@ TRAVELER PROFILE (personalize recommendations):
 Prioritize places matching their interests while still creating a complete trip experience.
 {cat_rules}
 """
+
+    # ── Camada 2/3 — destination-type planning hints ─────────────────────
+    # The destination classifier tagged this trip with a planning model.
+    # Inject tailored instructions so Sonnet doesn't treat Thailand like
+    # Paris. Without this block the prompt defaults to "walkable city with
+    # pins," which fails tour-driven and multi-base destinations badly.
+    dest_section = ""
+    dest_classification = profile.get("destination_classification") or {}
+    dest_type = dest_classification.get("destination_type")
+    base_cities = dest_classification.get("base_cities") or []
+    planning_notes = dest_classification.get("planning_notes") or []
+    tour_dominant = bool(dest_classification.get("tour_dominant"))
+
+    # Per-type instructions. These are the HEART of Camada 3 — destination
+    # patterns the AI otherwise has to infer from scratch for every trip.
+    type_playbooks = {
+        "walkable_urban": (
+            "PLANNING MODEL: WALKABLE URBAN\n"
+            "- Group items by NEIGHBORHOOD; a day should flow as a walking route.\n"
+            "- Adjacent attractions within 30 min walk cluster on the same day.\n"
+            "- Prioritize iconic landmarks on early days (Eiffel before Montmartre).\n"
+            "- Most items are direct map pins (museums, plazas, cafés, viewpoints)."
+        ),
+        "urban_excursion": (
+            "PLANNING MODEL: URBAN + DAY TRIPS\n"
+            "- Days 1-N cover the base city using walkable urban logic.\n"
+            "- 1-2 days are DEDICATED DAY TRIPS to a secondary destination\n"
+            "  (e.g., Tigre from Buenos Aires, Sintra from Lisbon). Label them\n"
+            "  clearly and do NOT pad them with unrelated city items.\n"
+            "- Return transfer back to base is implicit — don't schedule dinner\n"
+            "   3 hours away from the hotel on a day trip night."
+        ),
+        "tour_driven": (
+            "PLANNING MODEL: TOUR-DRIVEN DESTINATION\n"
+            "- This destination is BUILT AROUND OPERATOR-LED EXCURSIONS. Do not\n"
+            "  pretend every day is a walking tour.\n"
+            "- Many activities fill a WHOLE day: island-hopping boat tours,\n"
+            "  desert excursions, safari, lagoon circuits. Use duration_minutes\n"
+            "  360-540 for these and only ADD a dinner spot — don't stack 4\n"
+            "  attractions on a day that's already an 8-hour tour.\n"
+            "- When the user's content mentions 'Maya Bay', 'Phi Phi', 'El Tatio',\n"
+            "  'Jeri dunes', etc., model these as FULL-DAY guided trips, not\n"
+            "  single map pins. Anchor the pin to the departure/main area and\n"
+            "  include 'passeio de barco / tour' in the description.\n"
+            "- Factor in typical pickup schedules (05:00-08:00 starts for tours)\n"
+            "  when setting time_slot."
+        ),
+        "multi_base": (
+            f"PLANNING MODEL: MULTI-BASE TRIP\n"
+            f"- This trip uses MULTIPLE base cities: {', '.join(base_cities) if base_cities else 'see planning_notes'}.\n"
+            "- Structure FIRST by base (days 1-3 Bangkok, 4-5 transfer to\n"
+            "  Chiang Mai, 6-9 Chiang Mai, 10 transfer to Phuket, 11-15 Phuket).\n"
+            "- Every base gets its own internal walkable/tour logic.\n"
+            "- TRANSFER DAYS should contain a morning city activity + travel +\n"
+            "  arrival check-in, NOT 5 attractions.\n"
+            "- Respect the day_plan `city` field when it's set — it already\n"
+            "  tells you which base each day belongs to.\n"
+            "- NEVER mix items from two different bases on the same day."
+        ),
+    }
+
+    if dest_type and dest_type in type_playbooks:
+        dest_section = "\n" + type_playbooks[dest_type] + "\n"
+        if tour_dominant and dest_type != "tour_driven":
+            dest_section += (
+                "- HEADS UP: this destination has significant tour-dominant\n"
+                "  segments even though its primary model is {type}. Flag\n"
+                "  operator-booked days clearly.\n"
+            ).format(type=dest_type)
+        if planning_notes:
+            dest_section += "\nDESTINATION-SPECIFIC NOTES (from the classifier):\n"
+            for note in planning_notes[:6]:
+                dest_section += f"  - {note}\n"
 
     # Source URLs for traceability
     sources_info = ""
@@ -2737,6 +2828,7 @@ If the video only shows one neighborhood, you STILL include the must-see attract
 The traveler expects a COMPLETE trip, not a copy of one video.
 {existing_info}
 {profile_section}
+{dest_section}
 {city_section}
 {sources_info}
 {places_section}
@@ -2787,7 +2879,23 @@ RULES RECAP (in order of priority):
 - Top landmarks of {destination} MUST be present even if the video didn't mention them.
 
 Return ONLY a JSON array with {total_slots} places across ALL {num_days} days (about 5 per day). Each object:
-{{"day": <1-{num_days}>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "10:00", "duration_minutes": 90, "description": "What makes this special + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert text in Portuguese"], "alternative_group": null, "source": "link|ai"}}
+{{"day": <1-{num_days}>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "10:00", "duration_minutes": 90, "description": "What makes this special + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert text in Portuguese"], "alternative_group": null, "source": "link|ai", "activity_model": "direct_place|anchored_experience|guided_excursion|route_cluster|day_trip|transfer", "visit_mode": "self_guided|guided|book_separately|operator_based"}}
+
+ACTIVITY_MODEL rules (MANDATORY — Camada 4 of the planning spec):
+- "direct_place" — a walkable pin (museum, café, plaza, viewpoint, restaurant). Most urban items.
+- "anchored_experience" — the experience has a clear map anchor but is more than just a visit (e.g. Maya Bay, Floating Market). duration 120-240 min typically.
+- "guided_excursion" — a full-day OPERATOR-LED trip (island hopping, desert tour, safari). duration 360-540. Usually one per day.
+- "route_cluster" — a REGIONAL CIRCUIT of places traveled together (e.g. east-side Atacama tour). Anchor to the starting area.
+- "day_trip" — a day dedicated to a SECONDARY city (Tigre from BA, Sintra from Lisbon). Signals to the UI that it's a bate-volta.
+- "transfer" — a travel day between base cities (e.g. Bangkok→Chiang Mai). Duration reflects the trip time. 1-2 short activities max.
+
+VISIT_MODE rules:
+- "self_guided" — traveler just shows up (walks, parks, most attractions, restaurants).
+- "guided" — typically done with a tour guide but not an operator package (free walking tour, museum audioguide).
+- "book_separately" — requires advance booking (popular restaurants, shows, some experiences).
+- "operator_based" — must book through a tour operator (all guided_excursion items).
+
+These two new fields are REQUIRED for every item. Get them right especially for tour_driven and multi_base destinations — it's what makes the cards honest about what the traveler is actually doing.
 
 PORTUGUESE LANGUAGE RULES (MANDATORY — apply to ALL text fields: description, notes, alerts):
 - Write in PERFECT Brazilian Portuguese (pt-BR) with FLAWLESS grammar.
@@ -3704,6 +3812,150 @@ async def _call_claude_for_itinerary(
 
 
 # ──────────────────────────────────────────────
+# CAMADA 2 — Destination-type classifier
+# ──────────────────────────────────────────────
+
+DESTINATION_TYPES = {
+    "walkable_urban",     # Paris, Rome, Madrid — neighborhood-based walkable cities
+    "urban_excursion",    # Buenos Aires+Tigre, Lisbon+Sintra — city + day trips
+    "tour_driven",        # Atacama, Jericoacoara, parts of Thailand — built around operator tours
+    "multi_base",         # Thailand 15d, Italy multi-city, Japan — multiple bases with transfers
+}
+
+
+async def _classify_destination(
+    country: str,
+    cities: list[str],
+    num_days: int,
+    content_sample: str,
+    cost: CostTracker,
+) -> dict | None:
+    """Classify the destination's planning model via one Haiku call.
+
+    Returns a dict like::
+
+        {
+          "destination_type": "multi_base",
+          "reasoning": "Thailand for 15 days is almost always multi-base...",
+          "base_cities": ["Bangkok", "Chiang Mai", "Phuket"],
+          "tour_dominant": true,
+          "planning_notes": [
+            "Island hopping days are operator boat tours, not single pins",
+            "Allow transfer days between bases",
+            ...
+          ]
+        }
+
+    The result is stored in `traveler_profile.destination_classification`
+    and read by `_build_itinerary_prompt` to pick the right planning model.
+
+    Failure is non-fatal — we fall back to `walkable_urban` so the build
+    still works, just without destination-aware tuning.
+    """
+    if not country and not cities:
+        logger.info("[dest-type] Skipping — no country or cities available")
+        return None
+
+    sample = (content_sample or "")[:1500]
+    cities_str = ", ".join(cities) if cities else "unknown"
+
+    prompt = f"""You are an expert travel planner. Classify this destination's PLANNING MODEL so a downstream itinerary engine knows how to structure the trip.
+
+Destination:
+  country: {country or "unknown"}
+  cities mentioned: {cities_str}
+  trip length: {num_days} days
+
+Sample of the user's source content:
+{sample}
+
+Classify into EXACTLY ONE of:
+
+  1. walkable_urban — compact city where most attractions are walkable pins in neighborhoods.
+     Examples: Paris, Rome, Madrid, Barcelona, Lisbon, Amsterdam, Prague.
+
+  2. urban_excursion — base city plus ONE or TWO prominent day trips.
+     Examples: Buenos Aires + Tigre, Lisbon + Sintra, Santiago + Valparaíso,
+     Florence + Tuscany villages.
+
+  3. tour_driven — destination built around OPERATOR-LED tours (boat, desert,
+     island hopping, safari, excursion packages). Attractions aren't free-
+     walkable pins; most days are a booked excursion.
+     Examples: Atacama, Jericoacoara, Maldives, Galápagos, many Thai island
+     segments, Egypt Nile cruise, safari in Kenya.
+
+  4. multi_base — trip uses MULTIPLE base cities, each with its own logic,
+     connected by transfer days.
+     Examples: Thailand 10-15d (Bangkok + Chiang Mai + Phuket), Italy
+     multi-city (Rome + Florence + Venice), Japan (Tokyo + Kyoto + Osaka).
+
+Rules:
+  - A 15-day Thailand trip is ALMOST ALWAYS multi_base (even if only Bangkok
+    is mentioned — the user needs help splitting those days).
+  - A single-city trip under 7 days is almost never multi_base.
+  - If the content explicitly mentions boat tours, island hopping, desert
+    excursions, safari, or operator-booked days, lean tour_driven.
+  - Urban + 1-2 day trips = urban_excursion. Urban + 3+ bases = multi_base.
+
+Return ONLY a JSON object:
+{{
+  "destination_type": "walkable_urban" | "urban_excursion" | "tour_driven" | "multi_base",
+  "reasoning": "one-sentence why (English)",
+  "base_cities": ["City1", "City2"],
+  "tour_dominant": true | false,
+  "planning_notes": [
+    "short actionable planning hint 1",
+    "short actionable planning hint 2",
+    "..."
+  ]
+}}
+
+planning_notes should be 3-6 concrete hints specific to THIS destination and trip length — things the itinerary engine should remember (e.g., "Phi Phi + Maya Bay are typically done as a single full-day boat tour from Phuket or Krabi", "reserve transfer days between Bangkok and Chiang Mai"). They'll be injected into the generation prompt."""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
+
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1200,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=15.0,
+                )
+            ),
+            timeout=20.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "{}"
+    except asyncio.TimeoutError:
+        logger.warning("[dest-type] Classifier timed out — defaulting to walkable_urban")
+        return None
+    except Exception as e:
+        logger.warning("[dest-type] Classifier failed: %s", e)
+        return None
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, dict):
+        logger.warning("[dest-type] Parse failed (%s...)", raw[:200])
+        return None
+
+    dtype = parsed.get("destination_type")
+    if dtype not in DESTINATION_TYPES:
+        logger.warning("[dest-type] Unknown type %r, coercing to walkable_urban", dtype)
+        parsed["destination_type"] = "walkable_urban"
+
+    logger.info(
+        "[dest-type] %s — %s (bases=%s, tour_dominant=%s)",
+        parsed["destination_type"],
+        (parsed.get("reasoning") or "")[:100],
+        parsed.get("base_cities"),
+        parsed.get("tour_dominant"),
+    )
+    return parsed
+
+
+# ──────────────────────────────────────────────
 # PHASE 0: Extract content (shared by eco + pro)
 # ──────────────────────────────────────────────
 
@@ -3825,6 +4077,45 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
         _mark("profile auto-confirmed")
     except Exception as e:
         logger.warning("[combined] Failed to auto-confirm profile: %s", e)
+
+    # ─── Camada 2: classify destination planning model ─────────────────────
+    # One cheap Haiku call that decides walkable_urban / urban_excursion /
+    # tour_driven / multi_base. Result is persisted on the profile and read
+    # by _build_itinerary_prompt to pick the right planning approach. Skipped
+    # in manual mode (no Sonnet build anyway).
+    if ai_mode != "manual":
+        try:
+            refreshed = await rails.get_trip(trip_id)
+            refreshed_profile = refreshed.get("traveler_profile") or {}
+            country = (refreshed_profile.get("country_detected") or "").strip()
+            cities = refreshed_profile.get("cities_detected") or []
+            num_days = int(refreshed.get("num_days") or 0)
+            # Build a small content sample from the links so the classifier
+            # has something to ground on. Cap at 1500 chars to keep Haiku fast.
+            sample_parts: list[str] = []
+            for l in (refreshed.get("links") or []):
+                ct = ((l.get("extracted_data") or {}).get("content_text") or "")[:600]
+                if ct:
+                    sample_parts.append(ct)
+                if sum(len(p) for p in sample_parts) > 1500:
+                    break
+            content_sample = "\n".join(sample_parts)
+            classify_cost = CostTracker(link_id=0)
+            classification = await _classify_destination(
+                country=country,
+                cities=cities,
+                num_days=num_days,
+                content_sample=content_sample,
+                cost=classify_cost,
+            )
+            if classification:
+                refreshed_profile["destination_classification"] = classification
+                await rails.update_trip(
+                    trip_id, {"traveler_profile": refreshed_profile},
+                )
+                _mark(f"destination classified as {classification.get('destination_type')}")
+        except Exception:
+            logger.exception("[combined] destination classifier failed (non-fatal)")
 
     # ─── Phase 2: build itinerary (skip in manual mode) ────────────────────
     if ai_mode == "manual":

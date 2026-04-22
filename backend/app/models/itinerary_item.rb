@@ -4,6 +4,18 @@ class ItineraryItem < ApplicationRecord
   ITEM_STATUSES       = %w[fixed suggested editable].freeze
   BEST_TURNS          = %w[manha tarde noite flexivel].freeze
   EXTRACTION_METHODS  = %w[caption transcript on_screen_ocr manual].freeze
+  # Camada 4 — planning model per item. Tells the UI (and future pipeline
+  # passes) whether this card is a normal map pin or a full-day guided
+  # tour that shouldn't be treated as a 90-minute attraction.
+  ACTIVITY_MODELS = %w[
+    direct_place
+    anchored_experience
+    guided_excursion
+    route_cluster
+    day_trip
+    transfer
+  ].freeze
+  VISIT_MODES = %w[self_guided guided book_separately operator_based].freeze
 
   # Legacy mapping — the old `source` column is kept around for one release
   # so callers that haven't migrated yet still work.
@@ -22,6 +34,8 @@ class ItineraryItem < ApplicationRecord
   validates :item_status, inclusion: { in: ITEM_STATUSES }
   validates :best_turn, inclusion: { in: BEST_TURNS }, allow_nil: true
   validates :extraction_method, inclusion: { in: EXTRACTION_METHODS }, allow_nil: true
+  validates :activity_model, inclusion: { in: ACTIVITY_MODELS }, allow_nil: true
+  validates :visit_mode, inclusion: { in: VISIT_MODES }, allow_nil: true
 
   before_validation :sync_legacy_source
   before_save       :backfill_best_turn
