@@ -19,6 +19,9 @@ Rails.application.routes.draw do
         member do
           post :share
           delete :unshare
+          # Combined extract + profile + build pipeline (replaces the old
+          # auto-fired callbacks on link create + analyze-trip + resume).
+          post :build
         end
         # Phase 4 — conflict alerts accumulated on day_plans during refine
         # or landmark-audit steps. The frontend lists pending ones and posts

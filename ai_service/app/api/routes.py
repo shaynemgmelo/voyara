@@ -27,6 +27,7 @@ from app.services.orchestrator import (
     resume_processing,
     analyze_trip,
     build_trip_itinerary,
+    extract_profile_and_build,
     refine_itinerary,
     optimize_trip_routing,
     enrich_trip_with_experiences,
@@ -487,6 +488,143 @@ async def _build_itinerary_background(trip_id: int):
     logger.info(
         "[build trip=%d] EXIT: items=%d err=%s elapsed=%.1fs",
         trip_id, places_created, build_err, _t.time() - start,
+    )
+
+
+# ──────────────────────────────────────────────
+# COMBINED PIPELINE — extract + profile + build in one shot
+# Triggered when the user clicks "Generate" on the trip-create form.
+# Replaces the old split between /process-link (per-link, fired by Rails
+# on link create) and /resume-processing (fired after profile confirm).
+# ──────────────────────────────────────────────
+
+
+@router.post("/extract-and-build/{trip_id}", response_model=ProcessLinkResponse, status_code=202)
+async def handle_extract_and_build(trip_id: int, background_tasks: BackgroundTasks):
+    """Single entry point for the new flow. Runs extraction → profile →
+    build sequentially in one background task. Replaces the old multi-step
+    Rails-callback chain so failure handling lives in one place and the
+    user only stares at one progress modal.
+    """
+    existing = active_builds.get(trip_id)
+    if existing:
+        age = time.time() - existing.get("started_at", 0)
+        if age < 350:  # matches the new combined budget below
+            logger.info(
+                "[extract-and-build] trip=%d already running (stage=%s, %ds old) — no-op",
+                trip_id, existing.get("stage", "?"), int(age),
+            )
+            return ProcessLinkResponse(
+                status="already_running",
+                message=f"Build already running for trip {trip_id} ({int(age)}s)",
+            )
+        logger.warning(
+            "[extract-and-build] trip=%d STALE entry (%ds) — clearing + restarting",
+            trip_id, int(age),
+        )
+        active_builds.pop(trip_id, None)
+
+    logger.info("[extract-and-build] trip=%d — scheduling combined pipeline", trip_id)
+    background_tasks.add_task(_extract_and_build_background, trip_id)
+    return ProcessLinkResponse(
+        status="accepted",
+        message=f"Extracting + building trip {trip_id}",
+    )
+
+
+async def _extract_and_build_background(trip_id: int):
+    """Wrapper around extract_profile_and_build with the same defensive
+    error-persistence as _build_itinerary_background. Two outcomes:
+
+      1. Real itinerary produced → done. Stale build_error cleared.
+      2. Anything fails or times out → persist build_error on the trip's
+         profile so the UI shows a clean failure modal with retry.
+
+    Manual mode is treated as success when extraction completes (zero
+    items expected — the UI shows the extracted-places panel instead).
+    """
+    import asyncio as _aio
+    import time as _t
+    from app.services.orchestrator import RailsClient
+
+    # Worst-case math at 350s budget:
+    #   extract 3 fresh links (sequential) ~150s + profile 35s + build 165s
+    # Median (cached content): ~90-120s. The cap is the absolute ceiling
+    # — anything past it is killed and the failure modal fires.
+    TOTAL_BUDGET_S = 350.0
+    start = _t.time()
+    active_builds[trip_id] = {
+        "started_at": start,
+        "stage": "starting (combined)",
+        "last_log_at": start,
+    }
+    logger.info(
+        "[extract-and-build trip=%d] SCHEDULED, budget=%ds",
+        trip_id, int(TOTAL_BUDGET_S),
+    )
+
+    places_created = 0
+    build_err: str | None = None
+    is_manual = False
+
+    try:
+        result = await _aio.wait_for(
+            extract_profile_and_build(trip_id), timeout=TOTAL_BUDGET_S,
+        )
+        places_created = int(result.get("places_created", 0) or 0)
+        is_manual = result.get("status") == "manual_extracted"
+        if result.get("error") and places_created == 0 and not is_manual:
+            build_err = str(result["error"])
+        logger.info(
+            "[extract-and-build trip=%d] done: %d places in %.1fs (manual=%s err=%s)",
+            trip_id, places_created, _t.time() - start, is_manual, build_err,
+        )
+    except _aio.TimeoutError:
+        build_err = f"A geração passou do limite de {int(TOTAL_BUDGET_S)}s."
+        logger.error(
+            "[extract-and-build trip=%d] TIMED OUT after %ds",
+            trip_id, int(TOTAL_BUDGET_S),
+        )
+    except Exception as e:
+        build_err = f"Erro inesperado: {type(e).__name__}: {str(e)[:200]}"
+        logger.exception("[extract-and-build trip=%d] EXCEPTION", trip_id)
+
+    # Persist build_error if we have neither items nor a manual-mode success.
+    if places_created == 0 and not is_manual and build_err:
+        try:
+            rails = RailsClient()
+            trip = await rails.get_trip(trip_id)
+            profile = (trip.get("traveler_profile") or {})
+            profile["build_error"] = {
+                "message": build_err,
+                "at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                "budget_exceeded": "limite" in build_err,
+            }
+            await rails.update_trip(trip_id, {"traveler_profile": profile})
+            logger.info(
+                "[extract-and-build trip=%d] Persisted build_error: %s",
+                trip_id, build_err,
+            )
+        except Exception:
+            logger.exception(
+                "[extract-and-build trip=%d] Could not persist build_error", trip_id,
+            )
+    elif places_created > 0 or is_manual:
+        # Wipe stale build_error from previous failed runs.
+        try:
+            rails = RailsClient()
+            trip = await rails.get_trip(trip_id)
+            profile = trip.get("traveler_profile") or {}
+            if profile.get("build_error"):
+                profile.pop("build_error", None)
+                await rails.update_trip(trip_id, {"traveler_profile": profile})
+        except Exception:
+            pass
+
+    active_builds.pop(trip_id, None)
+    logger.info(
+        "[extract-and-build trip=%d] EXIT: items=%d manual=%s err=%s elapsed=%.1fs",
+        trip_id, places_created, is_manual, build_err, _t.time() - start,
     )
 
 

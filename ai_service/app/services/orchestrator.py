@@ -3643,6 +3643,110 @@ async def _extract_link(
     return {"status": "extracted", "places_created": 0}
 
 
+async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
+    """Combined pipeline that runs all three phases in sequence:
+
+      1. Extract content from every link on the trip (Whisper + Vision + scrape).
+         Sequential per-link to respect Render's 512 MB memory limit.
+      2. Profile analysis (Sonnet) → populates traveler_profile, cities_detected,
+         places_mentioned. Auto-confirms — there's no user gate any more.
+      3. Itinerary build (eco pipeline) — only if `ai_mode != "manual"`.
+
+    This replaces the old split between Rails-triggered /api/process-link
+    callbacks and /api/resume-processing. The whole flow runs in ONE
+    background task scheduled from /api/extract-and-build, so failure
+    handling lives in one place and the user only waits once.
+
+    Returns a result dict with `places_created` (0 for manual mode or
+    extraction-only failures) and optional `error`.
+    """
+    import time as _t
+    rails = RailsClient(client=http_client)
+    pipeline_start = _t.time()
+
+    def _mark(stage: str) -> None:
+        logger.info("[combined t=%.1fs trip=%d] %s", _t.time() - pipeline_start, trip_id, stage)
+
+    # ─── Phase 0: extract content for every link that hasn't been done ─────
+    _mark("fetching trip + links")
+    try:
+        trip = await rails.get_trip(trip_id)
+    except Exception as e:
+        logger.error("[combined] Failed to fetch trip %d: %s", trip_id, e)
+        return {"error": f"fetch trip: {e}", "places_created": 0}
+
+    ai_mode = trip.get("ai_mode", "eco")
+    links = trip.get("links") or []
+    if not links:
+        try:
+            links = await rails.get_links(trip_id)
+        except Exception:
+            links = []
+
+    pending_links = [
+        l for l in links
+        if l.get("status") not in ("extracted", "processed")
+    ]
+    _mark(f"need to extract {len(pending_links)}/{len(links)} link(s) (ai_mode={ai_mode})")
+
+    # Sequential — one link at a time to keep memory under Render's 512 MB.
+    # Each link has its own internal 240s timeout (deep extraction).
+    for link in pending_links:
+        link_id = link.get("id")
+        url = link.get("url", "")
+        platform = link.get("platform") or "other"
+        if not link_id or not url:
+            continue
+        try:
+            await _extract_link(link_id, trip_id, url, platform, http_client=http_client)
+            _mark(f"extracted link {link_id}")
+        except Exception as e:
+            logger.warning("[combined] Link %d extraction failed (continuing): %s", link_id, e)
+
+    # ─── Phase 1: profile analysis (no user gate) ──────────────────────────
+    _mark("analyzing profile")
+    try:
+        profile_result = await analyze_trip(trip_id, http_client=http_client)
+        if profile_result.get("error"):
+            logger.warning(
+                "[combined] Profile analysis returned error (continuing): %s",
+                profile_result["error"],
+            )
+    except Exception as e:
+        logger.exception("[combined] Profile analysis raised; continuing without profile")
+
+    # Auto-confirm so the build doesn't expect a user click.
+    try:
+        await rails.update_trip(trip_id, {"profile_status": "confirmed"})
+        _mark("profile auto-confirmed")
+    except Exception as e:
+        logger.warning("[combined] Failed to auto-confirm profile: %s", e)
+
+    # ─── Phase 2: build itinerary (skip in manual mode) ────────────────────
+    if ai_mode == "manual":
+        _mark("manual mode — skipping itinerary build")
+        return {
+            "status": "manual_extracted",
+            "places_created": 0,
+            "elapsed_s": round(_t.time() - pipeline_start, 1),
+        }
+
+    _mark("building itinerary")
+    try:
+        build_result = await build_trip_itinerary(trip_id, http_client=http_client)
+        elapsed = _t.time() - pipeline_start
+        _mark(f"DONE in {elapsed:.1f}s — {build_result.get('places_created', 0)} places")
+        build_result["elapsed_s"] = round(elapsed, 1)
+        return build_result
+    except Exception as e:
+        logger.exception("[combined] Build raised")
+        return {
+            "error": f"build: {type(e).__name__}: {str(e)[:200]}",
+            "places_created": 0,
+            "elapsed_s": round(_t.time() - pipeline_start, 1),
+        }
+
+
 async def analyze_trip(trip_id: int, http_client=None) -> dict:
     """Phase 1: Aggregate ALL extracted content → ONE Haiku call for profile + cities.
 

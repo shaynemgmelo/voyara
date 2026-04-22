@@ -1,6 +1,9 @@
 class Trip < ApplicationRecord
   STATUS_OPTIONS = %w[draft active completed archived].freeze
-  AI_MODE_OPTIONS = %w[eco pro].freeze
+  # `manual` = user wants to assemble the itinerary themselves; the AI service
+  # still runs link extraction so the user gets a "places we found" panel to
+  # drag from, but it skips the profile→Sonnet→Google-Places build pipeline.
+  AI_MODE_OPTIONS = %w[eco pro manual].freeze
 
   has_many :day_plans, -> { order(:day_number) }, dependent: :destroy
   has_many :links, dependent: :destroy
