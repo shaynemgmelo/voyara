@@ -38,6 +38,11 @@ export function detectPhase(trip) {
   const needsDestination =
     trip?.traveler_profile?.needs_destination === true
     && !(trip?.destination || "").trim();
+  // Multi-base pause — classifier detected 2+ base cities and is waiting
+  // for the user to confirm the day distribution via CityDistributionModal.
+  const cityDistribution = trip?.traveler_profile?.city_distribution;
+  const awaitingCityDistribution =
+    cityDistribution?.status === "awaiting" && !hasItems;
 
   let phase = null;
   if (hasActiveLinks) {
@@ -49,6 +54,10 @@ export function detectPhase(trip) {
     profileStatus !== "rejected"
   ) {
     phase = "analyzing";
+  } else if (profileStatus === "confirmed" && awaitingCityDistribution) {
+    // Pipeline paused waiting for the user to confirm how to split days
+    // across the detected base cities. CityDistributionModal handles it.
+    phase = "awaiting_city_distribution";
   } else if (profileStatus === "confirmed" && needsDestination) {
     // Phase 4 — pipeline paused waiting for the user to give a city.
     // The AskDestinationModal handles the transition.
@@ -64,7 +73,15 @@ export function detectPhase(trip) {
     phase = "generating";
   }
 
-  return { phase, totalLinks, extractedCount, buildError, needsDestination };
+  return {
+    phase,
+    totalLinks,
+    extractedCount,
+    buildError,
+    needsDestination,
+    awaitingCityDistribution,
+    cityDistribution,
+  };
 }
 
 export default function ProcessingStatus({ trip }) {

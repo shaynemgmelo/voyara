@@ -18,8 +18,9 @@ import CityTabs from "../components/itinerary/CityTabs";
 import ProcessingStatus, { detectPhase } from "../components/trips/ProcessingStatus";
 import GenerationProgressModal from "../components/modals/GenerationProgressModal";
 import AskDestinationModal from "../components/modals/AskDestinationModal";
+import CityDistributionModal from "../components/modals/CityDistributionModal";
 import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
-import { updateTrip, triggerBuild } from "../api/trips";
+import { updateTrip, triggerBuild, confirmCityDistribution } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -272,6 +273,18 @@ export default function TripDetail() {
     }
   };
 
+  const handleCityDistributionSubmit = async (selectedCities, dayDistribution) => {
+    try {
+      await confirmCityDistribution(trip.id, selectedCities, dayDistribution);
+      // Backend flips city_distribution.status to "confirmed" and resumes
+      // extract_profile_and_build. Polling will pick up the phase change.
+      await fetchTrip();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[trip] city distribution confirmation failed:", e);
+    }
+  };
+
   // Phase 5.5 — heavy pipeline phases open a full-screen progress modal
   // instead of a tiny inline pulse. Shared phase detection with
   // ProcessingStatus so extracting stays inline and the modal only covers
@@ -295,6 +308,11 @@ export default function TripDetail() {
   // no city was inferred AND the trip has no destination set. Pauses
   // everything until the user types a city.
   const needsDestination = effectivePhase === "needs_destination";
+  // Multi-base pause — classifier detected 2+ base cities, build is paused
+  // server-side until the user confirms day distribution via the modal.
+  const awaitingCityDistribution =
+    effectivePhase === "awaiting_city_distribution";
+  const cityDistribution = trip?.traveler_profile?.city_distribution;
   const isManualMode = trip?.ai_mode === "manual";
 
   return (
@@ -304,6 +322,21 @@ export default function TripDetail() {
           phase={pipelinePhase}
           trip={trip}
           onRetry={retryBuild}
+        />
+      )}
+      {awaitingCityDistribution && cityDistribution && (
+        <CityDistributionModal
+          baseCities={cityDistribution.base_cities || []}
+          numDays={
+            cityDistribution.num_days
+            || trip?.num_days
+            || (trip?.day_plans?.length ?? 0)
+          }
+          initialSelectedCities={
+            cityDistribution.selected_cities || cityDistribution.base_cities || []
+          }
+          initialDistribution={cityDistribution.day_distribution || {}}
+          onSubmit={handleCityDistributionSubmit}
         />
       )}
       {needsDestination && (

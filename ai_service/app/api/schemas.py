@@ -34,6 +34,12 @@ class RefineItineraryRequest(BaseModel):
     day_plan_id: int | None = None  # required when scope="day"
 
 
+class ConfirmCityDistributionRequest(BaseModel):
+    trip_id: int
+    selected_cities: list[str]
+    day_distribution: dict[str, int]
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str

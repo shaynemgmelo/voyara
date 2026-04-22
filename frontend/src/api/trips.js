@@ -62,3 +62,20 @@ export async function refineItinerary(tripId, feedback, scope = "trip", dayPlanI
   });
   return resp.json();
 }
+
+// User-confirmed multi-base distribution. Resumes the paused extract-and-build
+// pipeline on the AI service — backend sets city_distribution.status="confirmed"
+// and re-enters extract_profile_and_build, which now skips the pause and runs
+// Tavily research + build with only the selected cities.
+export async function confirmCityDistribution(tripId, selectedCities, dayDistribution) {
+  const resp = await fetch(`${AI_URL}/confirm-city-distribution`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      trip_id: tripId,
+      selected_cities: selectedCities,
+      day_distribution: dayDistribution,
+    }),
+  });
+  return resp.json();
+}

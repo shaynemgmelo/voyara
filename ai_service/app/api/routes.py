@@ -13,6 +13,7 @@ from app.api.schemas import (
     AnalyzeUrlResponse,
     ChatRequest,
     ChatResponse,
+    ConfirmCityDistributionRequest,
     HealthResponse,
     LinkStatusResponse,
     ProcessLinkRequest,
@@ -399,6 +400,65 @@ async def handle_refine_itinerary(
     )
 
 
+# Lock against concurrent confirm-city-distribution calls for the same trip —
+# double-clicking "Continuar" in the modal would otherwise schedule two
+# background tasks both trying to resume the pipeline.
+_confirm_distribution_inflight: set[int] = set()
+
+
+@router.post("/confirm-city-distribution", response_model=ProcessLinkResponse, status_code=202)
+async def handle_confirm_city_distribution(
+    request: ConfirmCityDistributionRequest, background_tasks: BackgroundTasks,
+):
+    """User-confirmed city distribution for a paused multi_base trip.
+
+    Persists the selection to traveler_profile.city_distribution with
+    status="confirmed", then resumes the extract-profile-and-build pipeline.
+    The pipeline's pause check sees status="confirmed" and skips the pause
+    on the second run, letting Tavily research + build proceed.
+    """
+    trip_id = request.trip_id
+
+    if not request.selected_cities:
+        raise HTTPException(400, "selected_cities cannot be empty")
+    if set(request.day_distribution.keys()) != set(request.selected_cities):
+        raise HTTPException(400, "day_distribution keys must match selected_cities")
+    if any(int(v) < 0 for v in request.day_distribution.values()):
+        raise HTTPException(400, "day_distribution values must be non-negative")
+
+    if trip_id in _confirm_distribution_inflight:
+        logger.info("[confirm-dist] trip=%d already in flight — skipping", trip_id)
+        return ProcessLinkResponse(
+            status="already_running",
+            message=f"Distribution confirmation already in flight for trip {trip_id}",
+        )
+
+    # Dedup against a running build (same pattern as /resume-processing).
+    existing = active_builds.get(trip_id)
+    if existing and (time.time() - existing.get("started_at", 0)) < 240:
+        logger.info(
+            "[confirm-dist] trip=%d build already running (stage=%s) — no-op",
+            trip_id, existing.get("stage", "?"),
+        )
+        return ProcessLinkResponse(
+            status="already_running",
+            message=f"Build already running for trip {trip_id}",
+        )
+
+    total = sum(int(v) for v in request.day_distribution.values())
+    background_tasks.add_task(
+        _confirm_city_distribution_background,
+        trip_id,
+        request.selected_cities,
+        request.day_distribution,
+        total,
+    )
+    return ProcessLinkResponse(
+        status="accepted",
+        message=f"Confirming distribution for trip {trip_id}",
+    )
+
+
 async def _refine_itinerary_background(
     trip_id: int, feedback: str, scope: str, day_plan_id: int | None
 ):
@@ -410,6 +470,56 @@ async def _refine_itinerary_background(
         )
     except Exception as e:
         logger.exception("Failed to refine itinerary for trip %d", trip_id)
+
+
+async def _confirm_city_distribution_background(
+    trip_id: int,
+    selected_cities: list[str],
+    day_distribution: dict[str, int],
+    total: int,
+):
+    from app.services.rails_client import RailsClient  # local to match module style
+    _confirm_distribution_inflight.add(trip_id)
+    try:
+        rails = RailsClient()
+        trip = await rails.get_trip(trip_id)
+        num_days = int(trip.get("num_days") or 0)
+        if num_days > 0 and total != num_days:
+            logger.warning(
+                "[confirm-dist] trip=%d sum mismatch: %d != %d — aborting",
+                trip_id, total, num_days,
+            )
+            return
+
+        profile = trip.get("traveler_profile") or {}
+        cd = profile.get("city_distribution") or {}
+        if cd.get("status") == "confirmed":
+            logger.info(
+                "[confirm-dist] trip=%d already confirmed — skipping resume",
+                trip_id,
+            )
+            return
+
+        cd.update({
+            "status": "confirmed",
+            "selected_cities": selected_cities,
+            "day_distribution": day_distribution,
+            "confirmed_at": int(time.time()),
+        })
+        profile["city_distribution"] = cd
+        await rails.update_trip(trip_id, {"traveler_profile": profile})
+        logger.info(
+            "[confirm-dist] trip=%d confirmed: %s",
+            trip_id, day_distribution,
+        )
+
+        # Resume the pipeline. The pause check sees status="confirmed"
+        # and falls through to Tavily research + build.
+        await extract_profile_and_build(trip_id)
+    except Exception:
+        logger.exception("[confirm-dist] Failed for trip %d", trip_id)
+    finally:
+        _confirm_distribution_inflight.discard(trip_id)
 
 
 async def _analyze_trip_background(trip_id: int):

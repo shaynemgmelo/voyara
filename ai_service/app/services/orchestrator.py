@@ -1289,6 +1289,22 @@ def _enrich_weak_profile(parsed: dict, destination: str) -> None:
     parsed.setdefault("places_mentioned", [])
 
 
+def _proportional_distribution(num_days: int, cities: list[str]) -> dict[str, int]:
+    """Split num_days across cities proportionally; remainder goes to earlier ones.
+
+    15 days / 4 cities → {c0: 4, c1: 4, c2: 4, c3: 3}. Preserves city order.
+    Used as the initial distribution when a multi_base trip is detected, and
+    as the legacy fallback in _assign_day_rigidity when the user hasn't yet
+    confirmed a custom distribution.
+    """
+    valid = [c for c in cities if c and str(c).strip()]
+    if not valid or num_days <= 0:
+        return {}
+    base = num_days // len(valid)
+    rem = num_days % len(valid)
+    return {c: base + (1 if i < rem else 0) for i, c in enumerate(valid)}
+
+
 async def _assign_cities_to_days(
     rails: RailsClient, trip_id: int, day_plans: list[dict],
     day_distribution: dict[str, int],
@@ -4397,15 +4413,65 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
             )
             if classification:
                 refreshed_profile["destination_classification"] = classification
-                # STEP 4 — external research only when the destination type
-                # actually benefits from it (tour_driven / multi_base). Stored
-                # in the profile so _build_itinerary_prompt can inject it.
                 dtype = classification.get("destination_type")
+                base_cities = [
+                    str(c).strip()
+                    for c in (classification.get("base_cities") or [])
+                    if c and str(c).strip()
+                ]
+
+                # STEP 4a — multi_base pause. When the classifier splits the
+                # trip across 2+ base cities, ask the user to confirm which
+                # cities and how many days each BEFORE we spend Tavily tokens
+                # or kick off the Sonnet build. The UI's CityDistributionModal
+                # posts to /confirm-city-distribution which flips
+                # city_distribution.status to "confirmed" and re-enters this
+                # function — the pause check below sees status="confirmed"
+                # and falls through to research + build.
+                if dtype == "multi_base" and len(base_cities) >= 2:
+                    existing_cd = refreshed_profile.get("city_distribution") or {}
+                    if existing_cd.get("status") != "confirmed":
+                        if not existing_cd:
+                            refreshed_profile["city_distribution"] = {
+                                "status": "awaiting",
+                                "base_cities": base_cities,
+                                "selected_cities": list(base_cities),
+                                "day_distribution": _proportional_distribution(
+                                    num_days, base_cities,
+                                ),
+                                "num_days": num_days,
+                                "created_at": int(_t.time()),
+                            }
+                        await rails.update_trip(
+                            trip_id, {"traveler_profile": refreshed_profile},
+                        )
+                        _mark(
+                            f"multi_base detected ({len(base_cities)} cities) — "
+                            "pausing for user distribution"
+                        )
+                        return {
+                            "status": "awaiting_city_distribution",
+                            "places_created": 0,
+                            "elapsed_s": round(_t.time() - pipeline_start, 1),
+                        }
+
+                # STEP 4b — external research only when the destination type
+                # actually benefits from it (tour_driven / multi_base). Stored
+                # in the profile so _build_itinerary_prompt can inject it. For
+                # multi_base this runs AFTER the pause, using only the cities
+                # the user confirmed (saves Tavily tokens if they unchecked
+                # some of the detected cities).
                 if dtype in ("tour_driven", "multi_base") and settings.tavily_api_key:
+                    research_cities = cities
+                    if dtype == "multi_base":
+                        cd = refreshed_profile.get("city_distribution") or {}
+                        selected = cd.get("selected_cities") or []
+                        if selected:
+                            research_cities = selected
                     try:
                         research = await _research_itinerary_patterns(
                             country=country,
-                            cities=cities,
+                            cities=research_cities,
                             num_days=num_days,
                             destination_type=dtype,
                         )
@@ -6055,44 +6121,60 @@ async def _assign_day_rigidity(
     # ── Multi-base city distribution ─────────────────────────────────
     # When the destination classifier detected a multi_base trip (e.g. 15-day
     # Thailand across Bangkok + Chiang Mai + Phuket + Koh Lipe), distribute
-    # the flexible days proportionally across base_cities. Without this, the
-    # fallback `base_city` (singular) from the video classifier gets applied
-    # to ALL days → every day goes to Bangkok → Google Places rejects places
-    # 700km away → user sees Phuket content forced into Bangkok cards.
+    # the flexible days across base_cities. Without this, the fallback
+    # `base_city` (singular) from the video classifier gets applied to ALL
+    # days → every day goes to Bangkok → Google Places rejects places 700km
+    # away → user sees Phuket content forced into Bangkok cards.
     #
-    # Distribution is proportional: 15 days ÷ 4 cities = ~3-4 days each,
-    # with larger shares going to earlier bases (main city typically gets
-    # more days). Days covered by canonical_days (from structured video)
-    # take priority — their region_hint wins over this heuristic.
+    # Two sources, in priority order:
+    #   1. User-confirmed distribution via CityDistributionModal — stored at
+    #      traveler_profile.city_distribution with status="confirmed". The
+    #      user picked which cities to include and how many days each.
+    #   2. Legacy proportional fallback — 15 days ÷ 4 cities = ~3-4 days each,
+    #      remainder distributed to earlier bases so 15/4 = [4, 4, 4, 3]. Used
+    #      for trips that predate the modal or never paused (edge cases).
+    #
+    # Days covered by canonical_days (from structured video) take priority
+    # over either source — their region_hint wins.
     profile_for_multi = trip.get("traveler_profile") or {}
     dest_classification = profile_for_multi.get("destination_classification") or {}
-    multi_base_cities: list[str] = []
-    if dest_classification.get("destination_type") == "multi_base":
-        raw_bases = dest_classification.get("base_cities") or []
-        multi_base_cities = [
-            str(c).strip() for c in raw_bases if c and str(c).strip()
-        ]
+    city_distribution = profile_for_multi.get("city_distribution") or {}
     day_num_list = sorted(
         [dp["day_number"] for dp in day_plans if isinstance(dp.get("day_number"), int)]
     )
     day_to_base_city: dict[int, str] = {}
-    if multi_base_cities and len(multi_base_cities) >= 2 and day_num_list:
-        n_days = len(day_num_list)
-        n_cities = len(multi_base_cities)
-        # Proportional split with remainder distributed to earlier bases,
-        # so a 15/4 split gives [4, 4, 4, 3] instead of [3, 3, 3, 6].
-        base_share = n_days // n_cities
-        remainder = n_days % n_cities
+
+    if city_distribution.get("status") == "confirmed" and day_num_list:
+        selected = [
+            str(c).strip() for c in (city_distribution.get("selected_cities") or [])
+            if c and str(c).strip()
+        ]
+        day_dist = city_distribution.get("day_distribution") or {}
         cursor = 0
-        for i, city in enumerate(multi_base_cities):
-            share = base_share + (1 if i < remainder else 0)
+        for city in selected:
+            share = int(day_dist.get(city, 0))
             for dnum in day_num_list[cursor:cursor + share]:
                 day_to_base_city[dnum] = city
             cursor += share
         logger.info(
-            "[rigidity] Multi-base distribution: %s",
-            {c: sum(1 for v in day_to_base_city.values() if v == c) for c in multi_base_cities},
+            "[rigidity] User-confirmed multi-base distribution: %s", day_dist,
         )
+    elif dest_classification.get("destination_type") == "multi_base" and day_num_list:
+        raw_bases = [
+            str(c).strip() for c in (dest_classification.get("base_cities") or [])
+            if c and str(c).strip()
+        ]
+        if len(raw_bases) >= 2:
+            day_dist_legacy = _proportional_distribution(len(day_num_list), raw_bases)
+            cursor = 0
+            for city, share in day_dist_legacy.items():
+                for dnum in day_num_list[cursor:cursor + share]:
+                    day_to_base_city[dnum] = city
+                cursor += share
+            logger.info(
+                "[rigidity] Legacy multi-base proportional distribution: %s",
+                day_dist_legacy,
+            )
 
     # Build every patch payload first, compute day_rigidity synchronously.
     pending_patches: list[tuple[int, int, dict]] = []  # (day_num, dp_id, patch)
