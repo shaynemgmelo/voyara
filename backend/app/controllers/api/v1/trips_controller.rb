@@ -58,9 +58,34 @@ class Api::V1::TripsController < ApplicationController
 
   # POST /api/v1/trips/:id/build
   # Single entry point for the new deferred-extraction flow. Fired when the
-  # user clicks "Generate" on the trip-create form. Triggers the AI service's
-  # combined extract → profile → build pipeline as one background task.
+  # user clicks "Generate" on the trip-create form.
+  #
+  # Accepts an optional `links: [url, ...]` array — those get persisted as
+  # Link records via insert_all (which BYPASSES after_create_commit so the
+  # OLD per-link extraction callback doesn't fire and race the new pipeline).
+  # The combined extract→profile→build pipeline on the AI service then runs
+  # against every link on the trip in one background task.
   def build
+    urls = Array(params[:links]).map(&:to_s).reject(&:blank?).uniq
+    if urls.any?
+      now = Time.current
+      rows = urls.map do |url|
+        platform = detect_platform_for(url)
+        {
+          trip_id: @trip.id,
+          url: url,
+          platform: platform,
+          status: "pending",
+          created_at: now,
+          updated_at: now
+        }
+      end
+      # insert_all skips callbacks → no per-link extraction race with the
+      # combined pipeline below. Returns gracefully on duplicates if there's
+      # a unique index (currently none, but harmless).
+      Link.insert_all(rows) if rows.any?
+    end
+
     ai_service_url = ENV.fetch("AI_SERVICE_URL", "http://localhost:8000")
     response = HTTParty.post(
       "#{ai_service_url}/api/extract-and-build/#{@trip.id}",
@@ -99,5 +124,20 @@ class Api::V1::TripsController < ApplicationController
     trip.num_days.times do |i|
       trip.day_plans.create!(day_number: i + 1)
     end
+  end
+
+  # Mirrors the Link model's :detect_platform callback. Used by the build
+  # action when bulk-inserting links via insert_all (which bypasses the
+  # before_validation callback). Keep the regex set in sync with the model.
+  def detect_platform_for(url)
+    host = URI.parse(url).host.to_s.downcase
+    case host
+    when /instagram/ then "instagram"
+    when /youtube|youtu\.be/ then "youtube"
+    when /tiktok/ then "tiktok"
+    else "other"
+    end
+  rescue URI::InvalidURIError
+    "other"
   end
 end
