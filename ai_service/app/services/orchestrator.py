@@ -3038,6 +3038,46 @@ ACTIVITY_MODEL rules (MANDATORY — Camada 4 of the planning spec):
   with real places — this is the entire point of the service.
 
 ═══════════════════════════════════════════════════════════════
+  NO GENERIC CATEGORY ITEMS — ALWAYS A NAMED VENUE (HARD RULE)
+═══════════════════════════════════════════════════════════════
+This is where the #1 user complaint comes from. When the video mentions
+a type of place ("rooftop", "street food", "floating market") you MUST
+output a SPECIFIC named venue, never the category as the item name.
+
+✗ FORBIDDEN ITEM NAMES (these destroy the itinerary):
+  "rooftop bars"             → pick a SPECIFIC rooftop (Mahanakhon SkyWalk)
+  "city exploration"         → break into actual attractions
+  "explorar a cidade"        → same
+  "relaxar na praia"         → pick a SPECIFIC beach (Railay Beach West)
+  "beach day"                → same
+  "cultural immersion"       → pick a SPECIFIC museum or cultural site
+  "food tour"                → pick a SPECIFIC market/street/restaurant
+  "mercados locais"          → pick SPECIFIC markets by name
+  "templos budistas"         → pick SPECIFIC temples by name
+  "vida noturna"             → pick a SPECIFIC club/bar
+  "descansar"                → break into 2-3 specific activities
+  "passeio de ilhas"         → name the SPECIFIC tour (Similan Islands
+                                day tour, Phi Phi Islands boat tour, etc.)
+
+✓ CORRECT BEHAVIOR when the video says "rooftop ou shopping":
+  Emit TWO separate items, both with source="link":
+    • {{"name": "Mahanakhon SkyWalk", "category": "attraction", "alternative_group": "day3_evening"}}
+    • {{"name": "Iconsiam", "category": "shopping", "alternative_group": "day3_evening"}}
+  The alternative_group signals to the UI: these are mutually exclusive.
+
+✓ CORRECT BEHAVIOR when the video says "relaxar na praia" for 3 days:
+  That's THREE SEPARATE beaches / activities, not "relax" × 3:
+    Day 12: {{"name": "Patong Beach", "description": "Praia icônica com vida noturna"}}
+            {{"name": "Patong night market", "description": "Compras e comida à noite"}}
+    Day 13: {{"name": "Similan Islands day tour", "activity_model": "guided_excursion"}}
+    Day 14: {{"name": "Big Buddha Phuket"}}
+            {{"name": "Kata Beach", "description": "Praia tranquila no sul"}}
+
+Rule of thumb: if your proposed item name would fit 50 different
+destinations ("rooftop bars" fits any city with rooftops), it's too
+generic. Make it a REAL venue name.
+
+═══════════════════════════════════════════════════════════════
   DAY COMPLETENESS (HARD RULE, STEP 6)
 ═══════════════════════════════════════════════════════════════
 - Every day must contain EITHER:
@@ -5244,6 +5284,71 @@ def _is_destination_as_activity(
     return any(nname == c for c in candidates if c)
 
 
+# Generic category names that destroy the itinerary when used as item
+# names. The user's #1 complaint: Sonnet emits "city exploration" with
+# the real places buried in the notes as "Onde fazer: X, Y". We detect
+# these and drop them so thin-day repair can replace with specific
+# venues. Plain lowercase keys; comparison is done on _normalize_for_compare.
+_GENERIC_CATEGORY_NAMES = {
+    # Bars / rooftops
+    "rooftop", "rooftop bar", "rooftop bars", "rooftops", "bars", "bar",
+    # City exploration
+    "city exploration", "explorar a cidade", "exploracao da cidade",
+    "explore the city", "passeio pela cidade",
+    # Beach relaxation
+    "relaxar na praia", "relax na praia", "beach day", "beach relaxation",
+    "praia", "praias", "beach", "descansar", "descanso", "chill",
+    # Food / markets generic
+    "food tour", "street food", "comida de rua", "mercados", "mercados locais",
+    "comida local", "food experience",
+    # Cultural generic
+    "cultural immersion", "imersao cultural", "cultura local",
+    "templos", "templos budistas", "temples",
+    # Nightlife generic
+    "vida noturna", "nightlife", "night out", "festa",
+    # Shopping generic
+    "shopping", "compras", "mercado", "market",
+    # Generic activities
+    "passeio", "passeios", "tour", "tours", "atividade", "atividades",
+    "city tour", "walking tour",  # unless named (e.g. "Free Walking Tour Rome")
+}
+
+
+def _is_generic_category_name(item_name: str) -> bool:
+    """True if the item's name is a bare category ("rooftop bars",
+    "city exploration") rather than a specific venue. These items
+    destroy the itinerary by burying real places in their notes field.
+    See _GENERIC_CATEGORY_NAMES.
+
+    Returns False for names that contain a SPECIFIC marker (a proper
+    noun, a number, or a quoted title) even if a generic keyword is
+    also present. E.g. "Rooftop Mahanakhon SkyWalk" → False.
+    """
+    nname = _normalize_for_compare(item_name)
+    if not nname:
+        return False
+    # Exact match — the most reliable signal.
+    if nname in _GENERIC_CATEGORY_NAMES:
+        return True
+    # "Onde fazer em X" style → still generic.
+    if nname.startswith("onde fazer") or nname.startswith("o que fazer"):
+        return True
+    # Short generic + a city doesn't redeem it ("rooftop bars bangkok" is
+    # still generic). But a name with multiple proper-noun tokens is fine.
+    # Heuristic: if every token is in the generic set or < 4 chars, flag.
+    tokens = nname.split()
+    if len(tokens) <= 3:
+        non_generic_tokens = [
+            t for t in tokens
+            if t not in _GENERIC_CATEGORY_NAMES
+            and len(t) >= 4
+            and t not in {"the", "and", "com", "para", "das", "dos"}
+        ]
+        if not non_generic_tokens:
+            return True
+    return False
+
+
 def _validate_and_repair_itinerary(
     place_list: list[dict],
     trip: dict,
@@ -5279,6 +5384,7 @@ def _validate_and_repair_itinerary(
 
     report: dict = {
         "dropped_destination_as_activity": [],
+        "dropped_generic_category": [],  # NEW — "rooftop bars", "city exploration"
         "thin_days": [],
         "injected_transfers": [],
         "total_violations": 0,
@@ -5295,6 +5401,22 @@ def _validate_and_repair_itinerary(
             })
             logger.warning(
                 "[validate] Dropping '%s' on day %s — bare destination, not an activity",
+                name, p.get("day"),
+            )
+            continue
+        # NEW — reject generic category names ("rooftop bars",
+        # "city exploration", "relaxar na praia"). These are the items
+        # where Sonnet buries real places in the notes field. We drop
+        # them so thin-day repair fires with specific venues instead.
+        if _is_generic_category_name(name):
+            report["dropped_generic_category"].append({
+                "name": name,
+                "day": p.get("day"),
+                "notes_preview": (p.get("notes") or "")[:120],
+            })
+            logger.warning(
+                "[validate] Dropping '%s' on day %s — generic category, "
+                "not a specific venue",
                 name, p.get("day"),
             )
             continue
@@ -5358,16 +5480,26 @@ def _validate_and_repair_itinerary(
             prev_city = city
 
     # ── STEP 6: day completeness ──────────────────────────────────────
+    # Track names per day for the post-pass repeated-generic detection.
+    day_item_names: dict[int, list[str]] = {
+        d: [(it.get("name") or "") for it in by_day.get(d, [])]
+        for d in range(1, num_days + 1)
+    }
+
     for d in range(1, num_days + 1):
         day_items = by_day.get(d, [])
         if len(day_items) >= 2:
             continue
-        # Single-item days are OK if it's a genuine full-day activity.
+        # Single-item days are OK if it's a genuine full-day activity
+        # AND the name isn't generic ("relaxar na praia" × 600min still
+        # sucks — it's a placeholder, not a plan).
         if len(day_items) == 1:
             solo = day_items[0]
             dur = solo.get("duration_minutes") or 0
             amodel = solo.get("activity_model") or ""
-            if dur >= 360 or amodel in ("guided_excursion", "day_trip", "transfer"):
+            solo_name = solo.get("name") or ""
+            if (dur >= 360 or amodel in ("guided_excursion", "day_trip", "transfer")) \
+               and not _is_generic_category_name(solo_name):
                 continue
         # Locked days are treated as-is — user/video said so.
         if day_rigidity.get(d) == "locked":
@@ -5375,16 +5507,49 @@ def _validate_and_repair_itinerary(
         report["thin_days"].append({
             "day": d,
             "item_count": len(day_items),
-            "reason": "empty" if len(day_items) == 0 else "short_items_only",
+            "reason": "empty" if len(day_items) == 0 else "short_or_generic",
         })
         logger.warning(
             "[validate] Day %d is thin — %d item(s), no full-day activity",
             d, len(day_items),
         )
 
+    # NEW — detect runs of days with repeated / near-identical items
+    # (e.g., "relaxar na praia" on days 12, 13, 14). Even if each day has
+    # ≥2 items, if the names are all generic AND repeat, the day needs
+    # to be broken up into specific activities.
+    seen_repeat: set[int] = set()
+    for d in range(1, num_days - 1):
+        names_d   = [n for n in day_item_names.get(d, [])     if n]
+        names_d1  = [n for n in day_item_names.get(d + 1, []) if n]
+        if not names_d or not names_d1:
+            continue
+        if d in seen_repeat:
+            continue
+        # If EVERY name on consecutive days is generic → flag both.
+        all_generic_d  = all(_is_generic_category_name(n) for n in names_d)
+        all_generic_d1 = all(_is_generic_category_name(n) for n in names_d1)
+        if all_generic_d and all_generic_d1:
+            for td in (d, d + 1):
+                if td in seen_repeat:
+                    continue
+                seen_repeat.add(td)
+                # Only add if not already flagged above.
+                if not any(t.get("day") == td for t in report["thin_days"]):
+                    report["thin_days"].append({
+                        "day": td,
+                        "item_count": len(day_item_names.get(td, [])),
+                        "reason": "generic_run",
+                    })
+                    logger.warning(
+                        "[validate] Day %d flagged — generic-only names "
+                        "repeat across consecutive days", td,
+                    )
+
     # Rollup
     report["total_violations"] = (
         len(report["dropped_destination_as_activity"])
+        + len(report.get("dropped_generic_category", []))
         + len(report["thin_days"])
         + len(report["injected_transfers"])
     )
@@ -5769,14 +5934,29 @@ async def _assign_day_rigidity(
             patch["origin"] = "from_video"
             patch["source_video_url"] = entry.get("source_url")
             patch["source_creator_handle"] = creators_by_day.get(day_num) or entry.get("creator")
-            if entry.get("region_hint"):
-                patch["primary_region"] = entry["region_hint"]
+            # Persist the base city for this day so the UI groups days by
+            # city (CityTabs). Prefer region_hint; fall back to the global
+            # base_city from the classifier consolidation.
+            city_for_day = (
+                entry.get("region_hint")
+                or content_classification.get("base_city")
+                or ""
+            )
+            if city_for_day:
+                patch["primary_region"] = city_for_day
+                patch["city"] = city_for_day  # drives CityTabs grouping
             patch["day_type"] = "day_trip" if entry.get("is_day_trip") else "urban"
         else:
             rigidity = "flexible"
             patch["rigidity"] = "flexible"
             patch["origin"] = "ai_created"
             patch["day_type"] = "urban"
+            # Even for flexible days, assign a city if there's a base_city
+            # from the classifier (keeps consecutive flexible days in the
+            # same city tab rather than "unassigned").
+            base_city = content_classification.get("base_city") or ""
+            if base_city:
+                patch["city"] = base_city
 
         if pace:
             patch["estimated_pace"] = pace
