@@ -547,11 +547,23 @@ async def _extract_and_build_background(trip_id: int):
     import time as _t
     from app.services.orchestrator import RailsClient
 
-    # Worst-case math at 350s budget:
-    #   extract 3 fresh links (sequential) ~150s + profile 35s + build 165s
-    # Median (cached content): ~90-120s. The cap is the absolute ceiling
-    # — anything past it is killed and the failure modal fires.
-    TOTAL_BUDGET_S = 350.0
+    # Dynamic budget — scales with trip size. Sonnet alone takes
+    # 60s + 7s/day (see _call_claude_for_itinerary), so a 15-day trip
+    # needs 165s JUST for generation, plus extraction + profile +
+    # classification + Google Places + item creation overhead.
+    #   5-day trip:  extract 40 + profile 30 + build 90 + create 40 ≈ 200s
+    #  15-day trip:  extract 50 + profile 30 + build 180 + create 80 ≈ 340s
+    # We read num_days from the trip record right below; if we can't,
+    # default to a safe 240s.
+    TOTAL_BUDGET_S = 240.0  # fallback — overridden below once we fetch trip
+    try:
+        from app.services.orchestrator import RailsClient as _RC
+        _probe = _RC()
+        _probe_trip = await _probe.get_trip(trip_id)
+        _nd = int(_probe_trip.get("num_days") or 5)
+        TOTAL_BUDGET_S = float(min(420, max(180, 160 + 15 * _nd)))
+    except Exception:
+        pass  # fall back to default
     start = _t.time()
     active_builds[trip_id] = {
         "started_at": start,

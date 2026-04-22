@@ -3981,14 +3981,23 @@ async def _call_claude_for_itinerary(
       - fewer than 60% of expected_items returned, OR
       - fewer than all days are covered (user asked for N days, got <N).
     """
-    # Single Sonnet attempt with a 95s hard timeout. NO retries — one call is
-    # all we can afford inside the 180s total build budget. In practice:
-    #   - 3-day trip (~15 items): 18-30s
-    #   - 5-day trip (~25 items): 30-50s
-    #   - 7-day trip (~35 items): 50-80s  ← why 65s was too tight
-    #   - 10-day trip (~50 items): 70-110s
-    # We accept any non-empty result. A retry-after-timeout would fire a
-    # SECOND 95s wait, which is how the old "stuck at 95 %" pile-up happened.
+    # Dynamic timeout scales with trip length. Sonnet emits ~50 tokens/sec
+    # and each day with 5 items ≈ 750 output tokens. Measured timings:
+    #   - 3-day trip (~15 items)  → ~15k tokens total → 30s
+    #   - 5-day trip (~25 items)  → ~20k tokens total → 45s
+    #   - 7-day trip (~35 items)  → ~28k tokens total → 65s
+    #   - 10-day trip (~50 items) → ~38k tokens total → 90s
+    #   - 15-day trip (~75 items) → ~55k tokens total → 150s+
+    # A fixed 95s timeout choked 15-day trips. Instead: base 60s + 7s/day,
+    # clamped to [60s, 240s]. max_tokens also scales so we're not emitting
+    # placeholder JSON past the useful mark on short trips.
+    effective_days = max(1, num_days or 5)
+    asyncio_timeout = min(240.0, 60.0 + 7.0 * effective_days)
+    httpx_timeout = asyncio_timeout - 5.0  # SDK-level timeout 5s under outer
+    # max_tokens sized per trip; keep headroom for pt-BR verbosity.
+    per_day_tokens = 900  # ~5 items/day × 180 tokens each in pt-BR
+    scaled_max_tokens = max(6000, min(24000, 2000 + effective_days * per_day_tokens))
+
     # max_retries=0 disables the SDK's built-in exponential-backoff retries
     # on 429/5xx/network blips. Those retries compound silently and can eat
     # our entire outer budget — we saw them fire twice in production logs
@@ -3997,22 +4006,30 @@ async def _call_claude_for_itinerary(
     # (which clears caches anyway) than have hidden retries pile up.
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
 
+    logger.info(
+        "[eco] Sonnet call starting — num_days=%d asyncio_timeout=%.0fs max_tokens=%d",
+        effective_days, asyncio_timeout, scaled_max_tokens,
+    )
+
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: client.messages.create(
                     model="claude-sonnet-4-20250514",
-                    max_tokens=16000,
+                    max_tokens=scaled_max_tokens,
                     messages=[{"role": "user", "content": prompt}],
-                    timeout=90.0,  # httpx-level timeout inside the SDK
+                    timeout=httpx_timeout,
                 )
             ),
-            timeout=95.0,  # asyncio-level belt-and-suspenders
+            timeout=asyncio_timeout,
         )
         cost.record_usage(response.usage)
         raw = response.content[0].text if response.content else "[]"
     except asyncio.TimeoutError:
-        logger.error("[eco] Sonnet itinerary call TIMED OUT after 95s — no retry, failing build")
+        logger.error(
+            "[eco] Sonnet itinerary call TIMED OUT after %.0fs (num_days=%d) — "
+            "no retry, failing build", asyncio_timeout, effective_days,
+        )
         return None
     except Exception as e:
         logger.error("[eco] Claude itinerary call failed: %s", e)
