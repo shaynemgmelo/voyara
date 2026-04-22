@@ -2032,6 +2032,16 @@ async def _validate_and_create_items(
     """
     day_rigidity = day_rigidity or {}
     dp_by_number = {dp["day_number"]: dp["id"] for dp in day_plans}
+    # day_num → city map, built from _assign_day_rigidity's in-memory
+    # mutations. Propagated onto each place BEFORE Google Places search so
+    # a Phuket place on day 10 searches "... Phuket, Thailand" instead of
+    # "... Bangkok, Thailand" and geolocates within 120km of Phuket, not
+    # 700km outside the Bangkok fence.
+    city_by_day: dict[int, str] = {
+        dp["day_number"]: dp["city"]
+        for dp in day_plans
+        if dp.get("day_number") is not None and dp.get("city")
+    }
     destination = trip.get("destination", "")
     source_url = ", ".join(source_urls) if source_urls else ""
 
@@ -2101,11 +2111,36 @@ async def _validate_and_create_items(
         c = dp.get("city")
         if c:
             cities_in_plans.add(c)
-    max_distance_km = 300 if len(cities_in_plans) > 1 else 120
+    # Multi-base trips legitimately span cities 800+ km apart (e.g. Thailand
+    # with Bangkok + Phuket + Koh Lipe 819km away, or Italy Rome → Milan).
+    # Per-day cluster tightening (15km diameter in _tighten_day_clusters)
+    # handles the tight grouping — the fence only needs to prevent
+    # cross-country false matches (Thailand → Miami's "Wat Pho" restaurant).
+    # Thresholds tuned to real archetypes:
+    #   - 1 city      → 120km (walkable + day trips to Tigre/Sintra/etc)
+    #   - 2 cities    → 500km (Rome-Florence, BA-Rio de Janeiro)
+    #   - 3+ cities   → 1500km (Thailand, Japan Tokyo→Osaka→Kyoto, etc)
+    if len(cities_in_plans) >= 3:
+        max_distance_km = 1500
+    elif len(cities_in_plans) == 2:
+        max_distance_km = 500
+    else:
+        max_distance_km = 120
     # Country-only fallback fence is looser — a country like Thailand is
     # ~1600km wide. Keep it sane but bigger than a city fence.
     if dest_coords and not (destination or "").strip():
         max_distance_km = 1500
+    # Also widen the fence whenever the profile says multi_base, even if
+    # day_plans haven't yet propagated city names (defensive — covers the
+    # race where cities_in_plans is empty but we know it's a multi-city trip).
+    _profile_dc = (trip.get("traveler_profile") or {}).get("destination_classification") or {}
+    if _profile_dc.get("destination_type") == "multi_base" and max_distance_km < 1500:
+        max_distance_km = 1500
+    logger.info(
+        "[geo] max_distance_km=%d (cities_in_plans=%d, dest_type=%s)",
+        max_distance_km, len(cities_in_plans),
+        _profile_dc.get("destination_type") or "-",
+    )
 
     semaphore = asyncio.Semaphore(10)
 
@@ -2245,6 +2280,17 @@ async def _validate_and_create_items(
             place.pop("_is_experience", None)
             place.pop("_out_of_fence", None)
             return place
+
+        # Propagate day_plan.city onto the place so multi_base trips
+        # search the CORRECT city (Phuket/Koh Lipe/Chiang Mai, not the
+        # trip's primary destination which may be a different city).
+        day_num_hint = place.get("day")
+        if (
+            (not place.get("city"))
+            and isinstance(day_num_hint, int)
+            and city_by_day.get(day_num_hint)
+        ):
+            place["city"] = city_by_day[day_num_hint]
 
         search_city = place.get("city") or destination
         async with semaphore:
@@ -5979,6 +6025,48 @@ async def _assign_day_rigidity(
         except (TypeError, ValueError):
             continue
 
+    # ── Multi-base city distribution ─────────────────────────────────
+    # When the destination classifier detected a multi_base trip (e.g. 15-day
+    # Thailand across Bangkok + Chiang Mai + Phuket + Koh Lipe), distribute
+    # the flexible days proportionally across base_cities. Without this, the
+    # fallback `base_city` (singular) from the video classifier gets applied
+    # to ALL days → every day goes to Bangkok → Google Places rejects places
+    # 700km away → user sees Phuket content forced into Bangkok cards.
+    #
+    # Distribution is proportional: 15 days ÷ 4 cities = ~3-4 days each,
+    # with larger shares going to earlier bases (main city typically gets
+    # more days). Days covered by canonical_days (from structured video)
+    # take priority — their region_hint wins over this heuristic.
+    profile_for_multi = trip.get("traveler_profile") or {}
+    dest_classification = profile_for_multi.get("destination_classification") or {}
+    multi_base_cities: list[str] = []
+    if dest_classification.get("destination_type") == "multi_base":
+        raw_bases = dest_classification.get("base_cities") or []
+        multi_base_cities = [
+            str(c).strip() for c in raw_bases if c and str(c).strip()
+        ]
+    day_num_list = sorted(
+        [dp["day_number"] for dp in day_plans if isinstance(dp.get("day_number"), int)]
+    )
+    day_to_base_city: dict[int, str] = {}
+    if multi_base_cities and len(multi_base_cities) >= 2 and day_num_list:
+        n_days = len(day_num_list)
+        n_cities = len(multi_base_cities)
+        # Proportional split with remainder distributed to earlier bases,
+        # so a 15/4 split gives [4, 4, 4, 3] instead of [3, 3, 3, 6].
+        base_share = n_days // n_cities
+        remainder = n_days % n_cities
+        cursor = 0
+        for i, city in enumerate(multi_base_cities):
+            share = base_share + (1 if i < remainder else 0)
+            for dnum in day_num_list[cursor:cursor + share]:
+                day_to_base_city[dnum] = city
+            cursor += share
+        logger.info(
+            "[rigidity] Multi-base distribution: %s",
+            {c: sum(1 for v in day_to_base_city.values() if v == c) for c in multi_base_cities},
+        )
+
     # Build every patch payload first, compute day_rigidity synchronously.
     pending_patches: list[tuple[int, int, dict]] = []  # (day_num, dp_id, patch)
     pace = (content_classification.get("pace_signals") or {}).get("pace")
@@ -6000,11 +6088,13 @@ async def _assign_day_rigidity(
             creator = creators_by_day.get(day_num) or entry.get("creator")
             if creator:
                 patch["source_creator_handle"] = creator
-            # Persist the base city for this day so the UI groups days by
-            # city (CityTabs). Prefer region_hint; fall back to the global
-            # base_city from the classifier consolidation.
+            # Persist the base city for this day. Priority order:
+            # 1. region_hint from classifier (most specific — video said so)
+            # 2. multi_base distribution (structured destination knowledge)
+            # 3. singular base_city fallback (single-destination trips)
             city_for_day = (
                 entry.get("region_hint")
+                or day_to_base_city.get(day_num)
                 or content_classification.get("base_city")
                 or ""
             )
@@ -6017,12 +6107,16 @@ async def _assign_day_rigidity(
             patch["rigidity"] = "flexible"
             patch["origin"] = "ai_created"
             patch["day_type"] = "urban"
-            # Even for flexible days, assign a city if there's a base_city
-            # from the classifier (keeps consecutive flexible days in the
-            # same city tab rather than "unassigned").
-            base_city = content_classification.get("base_city") or ""
-            if isinstance(base_city, str) and base_city.strip():
-                patch["city"] = base_city.strip()
+            # For flexible days in a multi_base trip, use the distribution
+            # map so consecutive days share a base. For single-base trips,
+            # fall back to the singular `base_city` from the classifier.
+            city_for_day = (
+                day_to_base_city.get(day_num)
+                or content_classification.get("base_city")
+                or ""
+            )
+            if isinstance(city_for_day, str) and city_for_day.strip():
+                patch["city"] = city_for_day.strip()
 
         # Only include `estimated_pace` when it matches the Rails enum —
         # Haiku sometimes returns English or misspelled variants ("medium",
@@ -6065,6 +6159,22 @@ async def _assign_day_rigidity(
         day_rigidity[day_num] = rigidity
         pending_patches.append((day_num, dp["id"], patch))
 
+        # CRITICAL: mutate the in-memory dp dict too. Downstream functions
+        # (_validate_and_create_items, cluster tightening, multi-city fence
+        # detection) read `dp["city"]` directly from this list — the Rails
+        # PATCH alone doesn't help because the list isn't refetched before
+        # those functions run.
+        if patch.get("city"):
+            dp["city"] = patch["city"]
+        if patch.get("primary_region"):
+            dp["primary_region"] = patch["primary_region"]
+        if patch.get("day_type"):
+            dp["day_type"] = patch["day_type"]
+        if patch.get("rigidity"):
+            dp["rigidity"] = patch["rigidity"]
+        if patch.get("origin"):
+            dp["origin"] = patch["origin"]
+
     # Now fire every PATCH in parallel — before this change a 10-day trip
     # did 10 sequential round-trips to Rails, which on Render's free tier
     # (with spin-up latency) could take 5+ seconds by itself.
@@ -6072,8 +6182,9 @@ async def _assign_day_rigidity(
         try:
             await rails.update_day_plan(trip["id"], dp_id, patch)
             logger.info(
-                "[rigidity] Day %d → %s (origin=%s day_type=%s)",
-                day_num, patch.get("rigidity"), patch.get("origin"), patch.get("day_type"),
+                "[rigidity] Day %d → %s (origin=%s day_type=%s city=%s)",
+                day_num, patch.get("rigidity"), patch.get("origin"),
+                patch.get("day_type"), patch.get("city") or "-",
             )
         except Exception as e:
             logger.warning("[rigidity] Failed to persist day %d: %s", day_num, e)
