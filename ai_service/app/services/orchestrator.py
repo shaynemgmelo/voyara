@@ -5978,8 +5978,11 @@ async def _assign_day_rigidity(
             rigidity = "locked" if confidence >= 0.8 else "partially_flexible"
             patch["rigidity"] = rigidity
             patch["origin"] = "from_video"
-            patch["source_video_url"] = entry.get("source_url")
-            patch["source_creator_handle"] = creators_by_day.get(day_num) or entry.get("creator")
+            if entry.get("source_url"):
+                patch["source_video_url"] = entry["source_url"]
+            creator = creators_by_day.get(day_num) or entry.get("creator")
+            if creator:
+                patch["source_creator_handle"] = creator
             # Persist the base city for this day so the UI groups days by
             # city (CityTabs). Prefer region_hint; fall back to the global
             # base_city from the classifier consolidation.
@@ -5988,9 +5991,9 @@ async def _assign_day_rigidity(
                 or content_classification.get("base_city")
                 or ""
             )
-            if city_for_day:
-                patch["primary_region"] = city_for_day
-                patch["city"] = city_for_day  # drives CityTabs grouping
+            if isinstance(city_for_day, str) and city_for_day.strip():
+                patch["primary_region"] = city_for_day.strip()
+                patch["city"] = city_for_day.strip()
             patch["day_type"] = "day_trip" if entry.get("is_day_trip") else "urban"
         else:
             rigidity = "flexible"
@@ -6001,11 +6004,46 @@ async def _assign_day_rigidity(
             # from the classifier (keeps consecutive flexible days in the
             # same city tab rather than "unassigned").
             base_city = content_classification.get("base_city") or ""
-            if base_city:
-                patch["city"] = base_city
+            if isinstance(base_city, str) and base_city.strip():
+                patch["city"] = base_city.strip()
 
+        # Only include `estimated_pace` when it matches the Rails enum —
+        # Haiku sometimes returns English or misspelled variants ("medium",
+        # "slow", "leve.") which would 422 the whole PATCH, failing ALL the
+        # other valid fields on the day. Normalize and validate here.
+        VALID_PACES = {"leve", "moderado", "acelerado"}
         if pace:
-            patch["estimated_pace"] = pace
+            normalized_pace = str(pace).strip().lower()
+            # Common translation fallback.
+            pace_aliases = {
+                "slow": "leve", "light": "leve", "relaxed": "leve",
+                "medium": "moderado", "moderate": "moderado",
+                "fast": "acelerado", "intense": "acelerado", "packed": "acelerado",
+            }
+            normalized_pace = pace_aliases.get(normalized_pace, normalized_pace)
+            if normalized_pace in VALID_PACES:
+                patch["estimated_pace"] = normalized_pace
+            else:
+                logger.warning(
+                    "[rigidity] Ignoring invalid pace=%r for day %d (not in %s)",
+                    pace, day_num, VALID_PACES,
+                )
+
+        # Hard-enforce every enum against Rails' whitelist so a bad classifier
+        # response can't 422 the whole day. We drop the field instead of
+        # sending an invalid value.
+        VALID_RIGIDITIES = {"locked", "partially_flexible", "flexible"}
+        VALID_ORIGINS = {"from_video", "ai_created", "user_edited"}
+        VALID_DAY_TYPES = {"urban", "day_trip", "transfer"}
+        if patch.get("rigidity") not in VALID_RIGIDITIES:
+            logger.warning("[rigidity] Invalid rigidity=%r → flexible", patch.get("rigidity"))
+            patch["rigidity"] = "flexible"
+        if patch.get("origin") not in VALID_ORIGINS:
+            logger.warning("[rigidity] Invalid origin=%r → ai_created", patch.get("origin"))
+            patch["origin"] = "ai_created"
+        if patch.get("day_type") not in VALID_DAY_TYPES:
+            logger.warning("[rigidity] Invalid day_type=%r → urban", patch.get("day_type"))
+            patch["day_type"] = "urban"
 
         day_rigidity[day_num] = rigidity
         pending_patches.append((day_num, dp["id"], patch))

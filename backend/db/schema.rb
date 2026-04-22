@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_04_20_233708) do
+ActiveRecord::Schema[8.0].define(version: 2026_04_22_184500) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -93,10 +93,15 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_20_233708) do
     t.string "item_status", default: "suggested", null: false
     t.string "best_turn"
     t.string "region"
+    t.string "activity_model"
+    t.string "visit_mode"
+    t.string "item_role"
+    t.index ["activity_model"], name: "index_itinerary_items_on_activity_model"
     t.index ["alternative_group"], name: "index_itinerary_items_on_alternative_group"
     t.index ["day_plan_id", "position"], name: "index_itinerary_items_on_day_plan_id_and_position"
     t.index ["day_plan_id"], name: "index_itinerary_items_on_day_plan_id"
     t.index ["google_place_id"], name: "index_itinerary_items_on_google_place_id"
+    t.index ["item_role"], name: "index_itinerary_items_on_item_role"
     t.index ["item_status"], name: "index_itinerary_items_on_item_status"
     t.index ["origin"], name: "index_itinerary_items_on_origin"
     t.index ["vibe_tags"], name: "index_itinerary_items_on_vibe_tags", using: :gin

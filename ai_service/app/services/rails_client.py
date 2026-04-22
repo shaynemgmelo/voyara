@@ -29,12 +29,20 @@ class RailsClient:
         self,
         trip_id: int,
         link_id: int,
-        status: str,
+        status: str | None = None,
         extracted_data: dict | None = None,
     ) -> dict:
-        body: dict = {"link": {"status": status}}
+        """PATCH a link. Both `status` and `extracted_data` are optional —
+        callers often want to refresh just the extracted content without
+        touching the status flag. Omitted fields don't appear in the body.
+        """
+        body: dict = {"link": {}}
+        if status is not None:
+            body["link"]["status"] = status
         if extracted_data is not None:
             body["link"]["extracted_data"] = extracted_data
+        if not body["link"]:
+            return {}  # nothing to patch
         resp = await self._request(
             "PATCH", f"/trips/{trip_id}/links/{link_id}", json=body
         )
@@ -118,18 +126,41 @@ class RailsClient:
                 if resp.status_code == 204:
                     return {}
                 return resp.json()
-            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                # 4xx = client error; retrying won't help. Log the response
+                # body (Rails 422 puts `{"errors": [...]}` here) so we can
+                # actually see WHY the validation failed instead of the
+                # generic "Client error '422 Unprocessable Content'".
+                body_preview = ""
+                try:
+                    body_preview = e.response.text[:500]
+                except Exception:
+                    pass
+                if 400 <= e.response.status_code < 500:
+                    logger.warning(
+                        "%s %s → %d %s — giving up (client error). Body: %s",
+                        method, path, e.response.status_code,
+                        e.response.reason_phrase, body_preview,
+                    )
+                    raise
+                # 5xx — retry with backoff.
+                if attempt < retries - 1:
+                    import asyncio
+                    await asyncio.sleep(2**attempt)
+                    logger.warning(
+                        "Retrying %s %s (attempt %d): %d — body: %s",
+                        method, path, attempt + 2,
+                        e.response.status_code, body_preview,
+                    )
+            except httpx.RequestError as e:
                 last_error = e
                 if attempt < retries - 1:
                     import asyncio
-
                     await asyncio.sleep(2**attempt)
                     logger.warning(
                         "Retrying %s %s (attempt %d): %s",
-                        method,
-                        path,
-                        attempt + 2,
-                        str(e),
+                        method, path, attempt + 2, str(e),
                     )
 
         raise last_error  # type: ignore
