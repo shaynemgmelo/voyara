@@ -34,7 +34,12 @@ services:
     name: mapass-ai
     runtime: python
     rootDir: ai_service
-    buildCommand: pip install .
+    # Two-step install: the package itself, then `--upgrade yt-dlp` to
+    # always pull the latest extraction patches. TikTok/Instagram change
+    # their internal video formats every few weeks and yt-dlp patches
+    # within hours — without this upgrade line the deployed yt-dlp slowly
+    # ages out and extraction silently degrades to caption-only.
+    buildCommand: pip install . && pip install --upgrade yt-dlp
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY

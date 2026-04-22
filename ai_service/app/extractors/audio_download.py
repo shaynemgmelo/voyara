@@ -29,6 +29,48 @@ _CACHE_TTL_SECONDS = 60 * 60 * 6  # 6 hours
 MAX_DURATION_SECONDS = 600  # 10 min hard cap
 
 
+# ── Extraction health tracker ────────────────────────────────────────
+# Counts successes/failures over the last 10 minutes. When failure rate
+# goes above 50% we log a CRITICAL so production ops see the degradation
+# before users report it. Most common cause: yt-dlp aged out after
+# TikTok/IG changed their video signing.
+_EXTRACTION_WINDOW: list[tuple[float, bool, str]] = []  # (ts, ok, error)
+_WINDOW_SECONDS = 600
+_ALERT_THRESHOLD = 0.5
+_LAST_ALERT_AT = [0.0]  # mutable container for closure
+
+
+def _record_extraction_result(url: str, ok: bool, error: str = "") -> None:
+    """Track success/failure of yt-dlp extraction. Logs an alert when
+    the rolling 10-min failure rate crosses the threshold, so the Render
+    log has a clear 'EXTRACTION DEGRADED — upgrade yt-dlp' signal
+    instead of just scattered per-URL warnings."""
+    now = time.time()
+    _EXTRACTION_WINDOW.append((now, ok, error))
+    # Prune old entries.
+    cutoff = now - _WINDOW_SECONDS
+    while _EXTRACTION_WINDOW and _EXTRACTION_WINDOW[0][0] < cutoff:
+        _EXTRACTION_WINDOW.pop(0)
+    total = len(_EXTRACTION_WINDOW)
+    if total < 5:  # not enough signal yet
+        return
+    failures = sum(1 for _, o, _ in _EXTRACTION_WINDOW if not o)
+    rate = failures / total
+    if rate >= _ALERT_THRESHOLD and now - _LAST_ALERT_AT[0] > 300:  # throttle 5min
+        _LAST_ALERT_AT[0] = now
+        # Sample a representative error message for quick diagnosis.
+        sample_err = next(
+            (e for _, o, e in reversed(_EXTRACTION_WINDOW) if not o and e),
+            "",
+        )[:150]
+        logger.critical(
+            "[extraction-health] DEGRADED: %d/%d fails in last %ds (%.0f%%). "
+            "Most likely cause: yt-dlp outdated (TikTok/IG format changed). "
+            "Latest error: %s. Action: redeploy to pick up latest yt-dlp.",
+            failures, total, _WINDOW_SECONDS, rate * 100, sample_err,
+        )
+
+
 def _cache_key(url: str) -> str:
     """Cache key includes GROQ_API_KEY presence so empty transcripts
     cached before the key was configured are invalidated once it is."""
@@ -127,12 +169,15 @@ def _sync_download_and_transcribe(url: str) -> str:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info is None:
+                    _record_extraction_result(url, ok=False)
                     return ""
         except yt_dlp.utils.DownloadError as e:
             logger.warning("[transcribe] yt-dlp download error for %s: %s", url, e)
+            _record_extraction_result(url, ok=False, error=str(e)[:200])
             return ""
         except Exception as e:
             logger.warning("[transcribe] Unexpected download error for %s: %s", url, e)
+            _record_extraction_result(url, ok=False, error=str(e)[:200])
             return ""
 
         # Find the produced audio file
@@ -159,6 +204,7 @@ def _sync_download_and_transcribe(url: str) -> str:
             len(transcript),
             url,
         )
+        _record_extraction_result(url, ok=bool(transcript and transcript.strip()))
         return transcript
 
 

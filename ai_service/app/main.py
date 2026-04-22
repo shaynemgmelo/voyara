@@ -23,6 +23,41 @@ def get_http_client() -> httpx.AsyncClient:
     return http_client
 
 
+def _check_yt_dlp_freshness() -> None:
+    """Log a WARN if the installed yt-dlp is older than 30 days.
+
+    TikTok / Instagram change their video URL signing constantly and yt-dlp
+    patches within hours. An old yt-dlp silently degrades extraction to
+    caption-only (looks like a TikTok block to users but is just our lib
+    being stale). We surface this on startup so Render logs make the
+    staleness obvious before users report problems.
+    """
+    try:
+        import yt_dlp
+        import datetime as _dt
+        version = yt_dlp.version.__version__  # format "2025.09.26" or similar
+        parts = version.split(".")
+        if len(parts) >= 3:
+            try:
+                ver_date = _dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
+                age_days = (_dt.date.today() - ver_date).days
+                if age_days > 30:
+                    logger.warning(
+                        "[startup] yt-dlp is %d days old (v%s). TikTok/IG "
+                        "extraction may be degraded. Redeploy to refresh.",
+                        age_days, version,
+                    )
+                else:
+                    logger.info("[startup] yt-dlp v%s (%d days old) — fresh",
+                                version, age_days)
+            except ValueError:
+                logger.info("[startup] yt-dlp v%s", version)
+        else:
+            logger.info("[startup] yt-dlp v%s", version)
+    except Exception as e:
+        logger.warning("[startup] Could not check yt-dlp version: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
@@ -33,6 +68,7 @@ async def lifespan(app: FastAPI):
         len(settings.whatsapp_access_token),
         settings.whatsapp_phone_number_id,
     )
+    _check_yt_dlp_freshness()
     yield
     await http_client.aclose()
     logger.info("AI service shut down")
