@@ -1097,6 +1097,7 @@ Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
 "interests": ["AT LEAST 4 specific interests in Portuguese. 'cafés especiais' not 'café', 'street art em bairros alternativos' not 'arte'. Draw from what the content actually shows — if videos focus on food, list food-specific interests; if on architecture, list that."],
 "interests_en": ["same 4+ interests in English — matching 1:1 with the Portuguese list"],
 "pace": "leve|moderado|acelerado",
+"country_detected": "Single country name in English (e.g. 'Thailand', 'Argentina', 'Italy'). CRITICAL: must be the country where the trip actually happens, NOT a country that shares letters with the trip name. If the user wrote 'Tailandia' (pt-BR for Thailand), this must be 'Thailand'. If ambiguous, use your best guess from place names in the content. Never leave empty.",
 "cities_detected": ["City1", "City2"],
 "profile_description": "MINIMUM 40 WORDS in PERFECT Brazilian Portuguese (pt-BR) with flawless grammar — proper accents (á, é, ã, õ, ô, ç, à), punctuation, and cedilla. MUST reference 2-3 specific places by NAME from the content. Example tone: 'Viajante com olhar curioso para bairros autênticos — o interesse por Palermo Soho e as ruas históricas de San Telmo revela alguém que valoriza descobertas locais e atmosfera. O estilo é urbano e ritmado, com espaço para cafés especiais e experiências gastronômicas.' Not a generic line; a vivid mini-portrait.",
 "profile_description_en": "Same 40+ word portrait in English. Equally warm, specific, and rich.",
@@ -1979,15 +1980,86 @@ async def _validate_and_create_items(
     # The REAL logistic enforcement happens in _tighten_day_clusters:
     # a place can be 100km from city center, but it must be within 15km
     # of every other place ON THE SAME DAY.
-    dest_coords = await _get_destination_coords(destination, places)
+    #
+    # CRITICAL: the country is pulled from the AI-inferred profile
+    # (country_detected) because the user-facing `destination` field can
+    # be ambiguous or wrong (e.g., "Tailandia" is a town in Pará, Brazil
+    # — NOT Thailand). Every Google Places query gets anchored with this
+    # country name, and results from other countries are hard-rejected.
+    profile_for_geo = trip.get("traveler_profile") or {}
+    country_hint = (profile_for_geo.get("country_detected") or "").strip()
+    # If the country hint fails to come through, synthesize one from the
+    # destination field as a last-resort fallback.
+    if not country_hint and destination:
+        # Very rough heuristic — destinations usually end in ", Country"
+        if "," in destination:
+            country_hint = destination.split(",")[-1].strip()
+    logger.info(
+        "[geo] Using country='%s' for destination='%s'",
+        country_hint, destination,
+    )
+
+    # Lower-case country tokens used for address-based rejection. We use
+    # substring match on formatted_address because Google returns country
+    # as the last segment (e.g., "... , Thailand").
+    country_match_tokens: set[str] = set()
+    if country_hint:
+        country_match_tokens.add(country_hint.lower())
+        # Common pt-BR ↔ en aliases so queries and addresses align.
+        aliases = {
+            "thailand": {"tailandia", "tailândia"},
+            "italy": {"italia", "itália"},
+            "france": {"franca", "frança"},
+            "japan": {"japao", "japão"},
+            "germany": {"alemanha"},
+            "spain": {"espanha"},
+            "switzerland": {"suica", "suíça"},
+            "greece": {"grecia", "grécia"},
+            "egypt": {"egito"},
+            "morocco": {"marrocos"},
+            "netherlands": {"holanda"},
+            "united states": {"eua", "estados unidos", "usa"},
+            "united kingdom": {"reino unido", "uk"},
+        }
+        for canonical, variants in aliases.items():
+            if country_hint.lower() == canonical or country_hint.lower() in variants:
+                country_match_tokens.add(canonical)
+                country_match_tokens.update(variants)
+
+    # Resolve destination coords using country-anchored search so
+    # "Bangkok" disambiguates correctly from "Bangkok, Brazil" etc.
+    geo_query = f"{destination}, {country_hint}" if (destination and country_hint and country_hint.lower() not in destination.lower()) else destination
+    dest_coords = await _get_destination_coords(geo_query, places)
+    if not dest_coords and country_hint:
+        # Fall back to country-only geocoding so we at least know the
+        # hemisphere + can reject obvious cross-country matches.
+        dest_coords = await _get_destination_coords(country_hint, places)
+
     cities_in_plans = set()
     for dp in day_plans:
         c = dp.get("city")
         if c:
             cities_in_plans.add(c)
     max_distance_km = 300 if len(cities_in_plans) > 1 else 120
+    # Country-only fallback fence is looser — a country like Thailand is
+    # ~1600km wide. Keep it sane but bigger than a city fence.
+    if dest_coords and not (destination or "").strip():
+        max_distance_km = 1500
 
     semaphore = asyncio.Semaphore(10)
+
+    def _address_matches_country(address: str) -> bool:
+        """Return True if we're confident this address is in the target
+        country. Used to hard-reject wrong-country Google Places matches
+        (e.g., a Thailand 'Wat Pho' search returning a Miami restaurant).
+        If no country hint is available, we don't reject — just log.
+        """
+        if not country_match_tokens:
+            return True
+        if not address:
+            return False
+        low = address.lower()
+        return any(tok in low for tok in country_match_tokens)
 
     async def _enrich_from_result(place: dict, best: dict) -> dict:
         """Copy Google Places search result fields onto the place dict."""
@@ -2015,40 +2087,72 @@ async def _validate_and_create_items(
     async def _search_with_geo_check(
         place: dict, query: str, search_city: str
     ) -> dict | None:
-        """Run Google Places search and return best result that is within
-        max_distance_km of the trip destination. If Google's top result is
-        an out-of-city namesake, try the next candidates."""
+        """Run Google Places search and return best result that (a) sits
+        within max_distance_km of the trip's destination center AND (b) has
+        a formatted_address in the expected country. Falls through to the
+        next candidate when either check fails.
+
+        Every query is augmented with the country hint when available so
+        searching for 'Wat Pho' on a Thailand trip returns the Bangkok
+        temple, not a coincidentally-named business in Miami.
+        """
+        # Inject country into the query when not already there. Google
+        # accepts it as a disambiguation hint.
+        augmented_query = query
+        if country_hint and country_hint.lower() not in query.lower():
+            augmented_query = f"{query}, {country_hint}"
         try:
-            results = await places.search(query, search_city)
+            results = await places.search(augmented_query, search_city)
         except Exception as e:
-            logger.warning("[eco] search failed for %s: %s", query, e)
+            logger.warning("[eco] search failed for %s: %s", augmented_query, e)
             return None
         if not results:
             return None
 
-        if not dest_coords:
-            return await _enrich_from_result(place, results[0])
+        dest_lat, dest_lng = dest_coords if dest_coords else (None, None)
 
-        dest_lat, dest_lng = dest_coords
         for candidate in results[:5]:
             lat = candidate.get("latitude")
             lng = candidate.get("longitude")
+            address = candidate.get("address") or ""
+
+            # Country sanity check via address. This is cheap and catches
+            # the "Thailand → Miami" class of failure instantly.
+            if country_match_tokens and not _address_matches_country(address):
+                logger.warning(
+                    "[geo] Rejecting '%s' → '%s' (wrong country, expected %s)",
+                    place.get("name"), address[:80], country_hint,
+                )
+                continue
+
             if lat is None or lng is None:
                 continue
-            try:
-                dist = _haversine_km(dest_lat, dest_lng, float(lat), float(lng))
-            except (ValueError, TypeError):
-                continue
-            if dist <= max_distance_km:
+
+            # Distance fence (only if we have trip coords to compare against).
+            if dest_lat is not None and dest_lng is not None:
+                try:
+                    dist = _haversine_km(dest_lat, dest_lng, float(lat), float(lng))
+                except (ValueError, TypeError):
+                    continue
+                if dist > max_distance_km:
+                    logger.warning(
+                        "[geo] '%s' too far (%.0fkm > %dkm cap)",
+                        place.get("name"), dist, max_distance_km,
+                    )
+                    continue
                 if dist > 30:
                     logger.info(
                         "[geo] '%s' matched at %.0fkm — far but within fence",
-                        place.get("name"),
-                        dist,
+                        place.get("name"), dist,
                     )
-                return await _enrich_from_result(place, candidate)
 
-        # No candidate within fence
+            return await _enrich_from_result(place, candidate)
+
+        # No candidate passed both country + distance checks.
+        logger.warning(
+            "[geo] No valid match for '%s' after filtering %d candidates",
+            place.get("name"), len(results),
+        )
         return None
 
     async def validate_one(place: dict) -> dict | None:
@@ -3823,9 +3927,10 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
         # destination is also blank in this case (the user no longer types
         # it in the trip-create form).
         cities = profile.get("cities_detected") or []
+        country = (profile.get("country_detected") or "").strip()
         trip_destination = (trip.get("destination") or "").strip()
         profile["needs_destination"] = (
-            not cities and not trip_destination
+            not cities and not country and not trip_destination
         )
 
         try:
@@ -3836,18 +3941,25 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
                 "traveler_profile": profile,
                 "profile_status": "confirmed",
             }
-            # Auto-set trip.destination from the first inferred city so the
-            # build (and the trip header in the UI) has something to display.
-            if cities and not trip_destination:
-                updates["destination"] = cities[0]
+            # Auto-set trip.destination to "City, Country" so Google Places
+            # searches disambiguate correctly. A plain "Bangkok" can resolve
+            # to Bangkok IL, USA; "Bangkok, Thailand" can't. If we only have
+            # a country, use that (better than nothing).
+            if not trip_destination:
+                if cities and country:
+                    updates["destination"] = f"{cities[0]}, {country}"
+                elif cities:
+                    updates["destination"] = cities[0]
+                elif country:
+                    updates["destination"] = country
             await rails.update_trip(trip_id, updates)
         except Exception as e:
             logger.warning("[analyze] Failed to save profile: %s", e)
             return {"error": str(e)}
 
         logger.info(
-            "[analyze] Phase 1 complete — profile auto-confirmed, cities=%s needs_destination=%s",
-            cities, profile["needs_destination"],
+            "[analyze] Phase 1 complete — profile auto-confirmed, country=%s cities=%s needs_destination=%s",
+            country, cities, profile["needs_destination"],
         )
         return {
             "status": "confirmed",
