@@ -35,14 +35,15 @@ export default function useTripDetail(tripId) {
   // budget — 400s on the client gives a 50s grace window for polling delays
   // and the backend's build_error persistence step. Worst case the user
   // sees the failure modal at 400s with a "Tentar de novo" button.
-  // Scales with trip length. Backend budget is dynamic (160s + 15s/day,
-  // capped at 420s); client cap gives a ~60s grace window on top of that.
-  // For a 15-day trip: backend caps at 385s, client forces failure at 480s.
-  // For a 5-day trip: backend 235s, client ~300s.
+  // Scales with trip length. Backend budget is now 180s + 20s/day, clamped
+  // [240s, 500s] — it went up because the structured classifier feeds
+  // Sonnet a much richer prompt now. Client cap gives a ~60s grace window.
+  // For a 15-day trip: backend caps at 480s, client forces failure at 540s.
+  // For a 5-day trip: backend 280s, client ~340s.
   const tripDays = Math.max(1, trip?.num_days || 5);
   const CLIENT_FAILURE_AFTER_MS = Math.min(
-    500_000,
-    Math.max(200_000, (160 + 15 * tripDays + 60) * 1000),
+    560_000,
+    Math.max(240_000, (180 + 20 * tripDays + 60) * 1000),
   );
   // Browser-notification bookkeeping — we fire at most one "ready" push per
   // page-load so the user gets pinged even when the tab is in the background.

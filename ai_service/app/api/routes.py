@@ -547,21 +547,21 @@ async def _extract_and_build_background(trip_id: int):
     import time as _t
     from app.services.orchestrator import RailsClient
 
-    # Dynamic budget — scales with trip size. Sonnet alone takes
-    # 60s + 7s/day (see _call_claude_for_itinerary), so a 15-day trip
-    # needs 165s JUST for generation, plus extraction + profile +
-    # classification + Google Places + item creation overhead.
-    #   5-day trip:  extract 40 + profile 30 + build 90 + create 40 ≈ 200s
-    #  15-day trip:  extract 50 + profile 30 + build 180 + create 80 ≈ 340s
-    # We read num_days from the trip record right below; if we can't,
-    # default to a safe 240s.
-    TOTAL_BUDGET_S = 240.0  # fallback — overridden below once we fetch trip
+    # Dynamic budget — scales with trip size. With canonical_days landing
+    # from the classifier (D-category videos), Sonnet's prompt grows 2-3x
+    # and the call now takes 80s + 10s/day. Plus all the other work:
+    #   5-day trip:  extract 30 + profile 20 + dest 5 + classify 8 + build 130 + geo 30 + create 20 ≈ 240s
+    #  15-day trip: extract 50 + profile 20 + dest 5 + classify 10 + build 230 + geo 40 + create 20 ≈ 375s
+    # Previous 385s cap was too tight once the structured classifier
+    # started feeding Sonnet richer prompts. Raise to allow a real buffer
+    # for network/API variance.
+    TOTAL_BUDGET_S = 300.0  # fallback — overridden below once we fetch trip
     try:
         from app.services.orchestrator import RailsClient as _RC
         _probe = _RC()
         _probe_trip = await _probe.get_trip(trip_id)
         _nd = int(_probe_trip.get("num_days") or 5)
-        TOTAL_BUDGET_S = float(min(420, max(180, 160 + 15 * _nd)))
+        TOTAL_BUDGET_S = float(min(500, max(240, 180 + 20 * _nd)))
     except Exception:
         pass  # fall back to default
     start = _t.time()

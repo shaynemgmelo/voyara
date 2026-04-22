@@ -4034,11 +4034,14 @@ async def _call_claude_for_itinerary(
     #   - 7-day trip (~35 items)  → ~28k tokens total → 65s
     #   - 10-day trip (~50 items) → ~38k tokens total → 90s
     #   - 15-day trip (~75 items) → ~55k tokens total → 150s+
-    # A fixed 95s timeout choked 15-day trips. Instead: base 60s + 7s/day,
-    # clamped to [60s, 240s]. max_tokens also scales so we're not emitting
-    # placeholder JSON past the useful mark on short trips.
+    # With the classifier → canonical_days → activity_hints chain landing,
+    # the prompt is now 2-3x richer for structured D-category videos (multi-
+    # base trips with 15 locked days + hints per day). That extra context
+    # makes Sonnet think harder and take longer. Measured after that change:
+    #   - 15-day Thailand multi_base → ~200-230s
+    # So: base 80s + 10s/day, clamped to [60s, 300s]. max_tokens also scales.
     effective_days = max(1, num_days or 5)
-    asyncio_timeout = min(240.0, 60.0 + 7.0 * effective_days)
+    asyncio_timeout = min(300.0, 80.0 + 10.0 * effective_days)
     httpx_timeout = asyncio_timeout - 5.0  # SDK-level timeout 5s under outer
     # max_tokens sized per trip; keep headroom for pt-BR verbosity.
     per_day_tokens = 900  # ~5 items/day × 180 tokens each in pt-BR
