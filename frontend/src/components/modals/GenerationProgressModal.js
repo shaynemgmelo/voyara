@@ -61,13 +61,13 @@ function stageToPercent(stage, extractedCount, totalLinks, stageElapsed) {
         return Math.round(5 + ratio * 23);
       }
       if (keyword === "generating itinerary") {
-        // 65 → 88% over the first 60s of this stage. We stop interpolating
-        // at 60s on purpose: that's when the stuck-detection threshold
-        // fires. If we kept crawling past 60s the user would see a moving
-        // bar AND a "stuck" card at the same time — contradictory UX. The
-        // bar visibly freezes in sync with the stuck card instead.
-        const clamped = Math.min(stageElapsed, 60_000);
-        const t = clamped / 60_000;
+        // 65 → 88% over the first 120s of this stage. Sonnet legitimately
+        // takes 90-120s on 7-day builds with external research snippets.
+        // Interpolation AND stuck-detection both clamp at 120s so the bar
+        // visibly freezes at the exact moment the stuck card appears —
+        // no contradictory "still climbing" vs. "looks stuck" state.
+        const clamped = Math.min(stageElapsed, 120_000);
+        const t = clamped / 120_000;
         return Math.round(65 + t * 23);
       }
       return basePct;
@@ -197,12 +197,23 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
     return 0;
   }, [phase, backendStage, now, extractedCount, totalLinks, elapsedMs]);
 
-  // NEW stuck detection — backend stage hasn't changed for 60s.
-  // Fallback: if we have no backend stage at all after 120s, consider stuck.
+  // Stuck detection — per-stage thresholds. "generating itinerary" is the
+  // Sonnet call which legitimately takes 90-120s on 7-day builds, so a
+  // 60s threshold was crying wolf. Other stages (extraction, analysis,
+  // classification) are fast and stay at 60s. Thresholds match the
+  // interpolation clamps so the bar and the card freeze/appear together.
   const stageAge = Date.now() - stageChangedAtRef.current;
   const stuck = useMemo(() => {
-    if (backendStage && stageAge > 60_000) return true;
-    if (!backendStage && elapsedMs > 120_000) return true; // no status in 2min = something's off
+    if (backendStage) {
+      const low = backendStage.toLowerCase();
+      const threshold = low.includes("generating itinerary")
+        ? 120_000
+        : low.includes("validate") || low.includes("creating items")
+          ? 90_000
+          : 60_000;
+      return stageAge > threshold;
+    }
+    if (elapsedMs > 180_000) return true; // no status in 3min = something's off
     return false;
   }, [backendStage, stageAge, elapsedMs]);
 
