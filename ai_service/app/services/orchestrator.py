@@ -5834,50 +5834,13 @@ def _validate_and_repair_itinerary(
     num_days = len(day_plans)
     day_plan_by_number = {dp.get("day_number"): dp for dp in day_plans}
 
-    # ── STEP 8: multi-base transport enforcement ──────────────────────
-    # Group day_plans by city to detect base transitions.
-    prev_city: str | None = None
-    for d in range(1, num_days + 1):
-        dp = day_plan_by_number.get(d)
-        city = (dp.get("city") if dp else None) or ""
-        if prev_city and city and city != prev_city:
-            # Transition happened on this day. Check if the day's items
-            # include a transfer marker. If not, inject one.
-            day_items = by_day.get(d, [])
-            has_transfer = any(
-                (it.get("activity_model") == "transfer")
-                or "transfer" in (it.get("category") or "")
-                or "transport" in (it.get("category") or "")
-                for it in day_items
-            )
-            if not has_transfer:
-                injected = {
-                    "day": d,
-                    "name": f"Transfer: {prev_city} → {city}",
-                    "category": "transport",
-                    "activity_model": "transfer",
-                    "visit_mode": "self_guided",
-                    "time_slot": "09:00",
-                    "duration_minutes": 180,
-                    "description": (
-                        f"Dia de transferência entre {prev_city} e {city}. "
-                        f"Reserve a manhã/metade do dia para o deslocamento."
-                    ),
-                    "notes": "Confira horários de voo/trem/van e chegue com folga.",
-                    "source": "ai",
-                }
-                # Insert at the beginning of the day's items.
-                place_list.append(injected)
-                by_day.setdefault(d, []).insert(0, injected)
-                report["injected_transfers"].append({
-                    "day": d, "from": prev_city, "to": city,
-                })
-                logger.info(
-                    "[validate] Injected transfer on Day %d: %s → %s",
-                    d, prev_city, city,
-                )
-        if city:
-            prev_city = city
+    # ── STEP 8: multi-base transport — DISABLED ──────────────────────
+    # Previously this block injected a "Transfer: City A → City B" card
+    # as an itinerary_item (category=transport) on every day where the
+    # city changed. The cards polluted the day cards, pushed real items
+    # down, and added nothing the user didn't already know from seeing
+    # the city change between days. Removed per user feedback. The
+    # transition info lives implicitly in day_plan.city.
 
     # ── STEP 6: day completeness ──────────────────────────────────────
     # Track names per day for the post-pass repeated-generic detection.
