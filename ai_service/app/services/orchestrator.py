@@ -1622,30 +1622,85 @@ def _ensure_link_places_present(
     """After Claude returns, verify every link-mentioned place is actually in
     the itinerary. If any are missing, inject them on an appropriate day.
 
-    This is the safety net that enforces 'user's link places are mandatory'.
+    Match strategy (strictest first): exact-normalized match → high-similarity
+    ratio (>=0.85) → token-overlap ≥ 75%. The old "substring either direction"
+    check caused false positives ("Parque" matching "Parque de la Costa" and
+    hiding a real drop), so it's been removed. False positives here = silently
+    dropped places; false negatives = duplicate injection (caught by later
+    dedup). Prefer false negatives.
+
+    Logs every drop + every match decision so audits can verify "fidelidade
+    ao vídeo é obrigatória" is actually holding.
     """
     if not places_mentioned:
         return place_list
 
-    # Names currently present in the itinerary (normalized)
-    present = {_normalize_place_name(it.get("name", "")) for it in place_list}
+    present_items: list[tuple[str, str]] = [
+        (_normalize_place_name(it.get("name", "")), it.get("name", ""))
+        for it in place_list
+        if it.get("name")
+    ]
+    present_norms = {norm for norm, _ in present_items if norm}
+
+    def _matches_existing(norm: str) -> str | None:
+        """Return the name of a present item that matches, or None."""
+        if not norm:
+            return None
+        if norm in present_norms:
+            return norm
+        # High-similarity fallback. 0.85 catches "Cemitério de la Recoleta"
+        # vs "Cemitério da Recoleta" but rejects "Parque" vs "Parque de la
+        # Costa" (ratio ~0.40).
+        best_ratio = 0.0
+        best_name: str | None = None
+        for other_norm, other_name in present_items:
+            if not other_norm:
+                continue
+            ratio = SequenceMatcher(None, norm, other_norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_name = other_name
+        if best_ratio >= 0.85:
+            return best_name
+        # Token-overlap floor: handles reordered words like
+        # "Museu de Arte Decorativa" vs "Arte Decorativa Museu".
+        tokens_a = set(norm.split())
+        if tokens_a:
+            for other_norm, other_name in present_items:
+                if not other_norm:
+                    continue
+                tokens_b = set(other_norm.split())
+                if not tokens_b:
+                    continue
+                overlap = len(tokens_a & tokens_b) / max(
+                    len(tokens_a), len(tokens_b),
+                )
+                if overlap >= 0.75:
+                    return other_name
+        return None
 
     missing: list[dict] = []
+    matched: list[tuple[str, str]] = []
     for p in places_mentioned:
         name = (p.get("name") or "").strip()
         if not name:
             continue
         norm = _normalize_place_name(name)
-        if norm and norm not in present and not any(
-            norm in pn or pn in norm for pn in present if pn
-        ):
+        match = _matches_existing(norm)
+        if match is None:
             missing.append(p)
+        else:
+            matched.append((name, match))
 
+    logger.info(
+        "[link-coverage] matched=%d dropped=%d total_mentioned=%d",
+        len(matched), len(missing), len(places_mentioned),
+    )
     if not missing:
         return place_list
 
     logger.warning(
-        "[link-coverage] Claude dropped %d link place(s): %s",
+        "[link-coverage] Claude DROPPED %d link place(s): %s — auto-injecting",
         len(missing),
         [p.get("name") for p in missing],
     )
@@ -2717,51 +2772,57 @@ Prioritize places matching their interests while still creating a complete trip 
 
     # Structured places from user links (extracted in Phase 1)
     places_section = ""
-    total_slots = min(num_days * 5, 50)  # 5 items/day, up to 10-day trips at full capacity
+    num_link_places = len(places_mentioned) if places_mentioned else 0
+    # Slots must always accommodate every video-extracted place. The old
+    # cap of min(num_days*5, 50) could force Sonnet to drop places (e.g.
+    # a 7-day trip with 30 video places hit 35 slots with 80% ceiling = 28,
+    # so 2 places were silently cut). Policy: fidelidade ao vídeo é
+    # obrigatória — better a denser day (6-7 items) than a dropped place.
+    base_daily = num_days * 5
+    total_slots = max(base_daily, num_link_places)
     if places_mentioned:
         place_lines = []
         for p in places_mentioned:
             src = p.get("source_url", "link")
             place_lines.append(f"- {p['name']} (from: {src})")
 
-        num_link_places = len(places_mentioned)
-        # Link places are the BASE of the itinerary. Reserve at least 20%
-        # of slots for AI to add mandatory landmarks + fill gaps with
-        # geographically-sensible companions. Only cap link places if
-        # they would exceed 80% of total slots (huge vlog with 30+ places).
-        max_link_places = max(num_link_places, int(total_slots * 0.8))
-        if num_link_places <= int(total_slots * 0.8):
-            # Normal case: include ALL link places as the base
-            places_section = f"""
+        # Single unified instruction — ALL link places are always mandatory.
+        # No "else" branch that tells Sonnet to choose the most iconic and
+        # drop the rest. If places_mentioned outnumber the usual 5/day
+        # pattern, Sonnet packs days denser rather than dropping.
+        ai_companions_target = max(0, base_daily - num_link_places)
+        packing_hint = (
+            f"Adicione cerca de {ai_companions_target} lugares seus "
+            f"(source: \"ai\") para completar {total_slots} vagas totais."
+            if ai_companions_target > 0
+            else (
+                f"O vídeo tem {num_link_places} lugares — mais que a média "
+                f"de {base_daily} vagas ({num_days} dias × 5). NÃO CORTE "
+                "nenhum. Empacote dias mais densos (6-7 items/dia se "
+                "precisar) em vez de descartar. Você ainda pode adicionar "
+                "poucos complementos \"ai\" apenas para refeições essenciais "
+                "se fizerem sentido geográfico."
+            )
+        )
+        places_section = f"""
 ╔═══════════════════════════════════════════════════════════════╗
 ║  BASE DO ROTEIRO — LUGARES DOS LINKS DO USUÁRIO               ║
-║  ESTES SÃO OBRIGATÓRIOS E DEVEM SER OS PRINCIPAIS DO ROTEIRO  ║
+║  TODOS SÃO OBRIGATÓRIOS — NENHUM PODE SER DESCARTADO          ║
 ╚═══════════════════════════════════════════════════════════════╝
 {chr(10).join(place_lines)}
 
 REGRAS DURAS SOBRE ESTES LUGARES (NÃO NEGOCIÁVEIS):
 1. TODOS os {num_link_places} lugares acima DEVEM aparecer no roteiro final.
+   Zero exceções. Se um lugar parece duplicado de outro, mantenha os dois
+   (o dedupe é feito por etapa separada, não por você).
 2. TODOS devem ter "source": "link" — use exatamente o NOME da lista acima.
 3. ELES SÃO OS PROTAGONISTAS — distribua-os ao longo dos {num_days} dias de forma geograficamente coerente.
 4. O roteiro é CONSTRUÍDO AO REDOR deles. Os lugares adicionais da sua expertise (source: "ai") existem para:
    a) Incluir marcos obrigatórios da cidade que o vídeo não mencionou (landmarks imperdíveis).
    b) Agrupar por proximidade geográfica — se um lugar do link fica no bairro X, complete esse dia com outros lugares do bairro X.
    c) Preencher refeições, viewpoints no pôr-do-sol, cafés — completar os dias sem deslocamento longo.
-5. Adicione cerca de {total_slots - num_link_places} lugares seus (source: "ai") para completar {total_slots} vagas totais.
-6. Se algum lugar do link não fizer sentido geográfico com os outros, agrupe-o com outros do mesmo bairro (mesmo que você precise adicionar companheiros AI).
-"""
-        else:
-            # Huge vlog — too many places to fit. Cap at 80% but still MANDATORY for chosen ones.
-            places_section = f"""
-╔═══════════════════════════════════════════════════════════════╗
-║  BASE DO ROTEIRO — LUGARES DOS LINKS DO USUÁRIO               ║
-╚═══════════════════════════════════════════════════════════════╝
-{chr(10).join(place_lines)}
-
-O usuário salvou {num_link_places} lugares dos links dele. O roteiro tem {total_slots} vagas ({num_days} dias × ~5 por dia).
-DEVE ESCOLHER os {max_link_places} lugares MAIS ICÔNICOS desta lista e incluí-los obrigatoriamente como "source": "link".
-Estes lugares são a BASE do roteiro — os adicionais "source": "ai" existem apenas para agrupar geograficamente e incluir landmarks imperdíveis que o vídeo não mencionou.
-Adicione cerca de {total_slots - max_link_places} lugares seus (source: "ai") para completar as vagas.
+5. {packing_hint}
+6. Se algum lugar do link não fizer sentido geográfico com os outros, agrupe-o com outros do mesmo bairro (mesmo que você precise adicionar companheiros AI) — NUNCA descarte.
 """
 
     # Pre-planned day structure from links (e.g., "Day 1: X, Y, Z" from a travel video)
