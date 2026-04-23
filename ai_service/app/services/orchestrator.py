@@ -1200,6 +1200,29 @@ Content from multiple sources:
             # Fill in any missing pieces with content-aware defaults — never
             # the generic one-liners the old fallback produced.
             _enrich_weak_profile(parsed, destination)
+            # Dedup places_mentioned at source — sometimes Haiku emits the
+            # same place twice (once per video, or once from transcript +
+            # once from on-screen text). Downstream safety-net and
+            # deduplicate_places work, but it's cleaner to kill duplicates
+            # here before they propagate into the prompt and post-processing.
+            raw_places = parsed.get("places_mentioned") or []
+            seen_norms: set[str] = set()
+            deduped: list[dict] = []
+            for p in raw_places:
+                name = (p.get("name") or "").strip() if isinstance(p, dict) else ""
+                if not name:
+                    continue
+                norm = _normalize_place_name(name)
+                if not norm or norm in seen_norms:
+                    continue
+                seen_norms.add(norm)
+                deduped.append(p)
+            if len(deduped) != len(raw_places):
+                logger.info(
+                    "[profile] places_mentioned dedup: %d → %d",
+                    len(raw_places), len(deduped),
+                )
+            parsed["places_mentioned"] = deduped
             logger.info(
                 "[profile] Profile parsed successfully with %d places mentioned",
                 len(parsed.get("places_mentioned", [])),
@@ -1506,6 +1529,225 @@ def _semantic_deduplicate(place_list: list[dict]) -> list[dict]:
             alias_removed, geo_removed, total_removed,
         )
     return final
+
+
+def _final_itinerary_dedup(place_list: list[dict]) -> list[dict]:
+    """Final dedup pass — runs AFTER Google Places validation when every
+    surviving item has place_id + lat/lng. Catches collisions that the
+    earlier name-based passes missed because they ran before coords
+    existed (e.g. Sonnet output + safety-net injection both emitting
+    "Casa Rosada" and both resolving to the same Place ID).
+
+    Keys, in strictness order:
+      1. google_place_id — strongest signal. Same place = same place.
+      2. Normalized name within the same day.
+      3. Lat/lng within 100m + similar name (ratio ≥ 0.7).
+
+    When a collision is found, prefer source="link" over source="ai";
+    when both are same source, keep the earlier item (stable order).
+    """
+    if not place_list:
+        return place_list
+
+    def _key_id(it: dict) -> str | None:
+        pid = it.get("google_place_id") or it.get("place_id") or ""
+        return pid.strip() or None
+
+    # Pass A — dedup by google_place_id (globally across all days).
+    by_id: dict[str, dict] = {}
+    order: list[dict] = []
+    removed_id = 0
+    for item in place_list:
+        pid = _key_id(item)
+        if not pid:
+            order.append(item)
+            continue
+        existing = by_id.get(pid)
+        if existing is None:
+            by_id[pid] = item
+            order.append(item)
+            continue
+        # Collision — link beats ai; else keep the earlier one.
+        if item.get("source") == "link" and existing.get("source") != "link":
+            idx = order.index(existing)
+            order[idx] = item
+            by_id[pid] = item
+        removed_id += 1
+
+    # Pass B — dedup by (day, normalized_name).
+    by_day_name: dict[tuple[int, str], dict] = {}
+    filtered: list[dict] = []
+    removed_name = 0
+    for item in order:
+        day = item.get("day")
+        name = (item.get("name") or "").strip()
+        if not name or not isinstance(day, int):
+            filtered.append(item)
+            continue
+        norm = _normalize_place_name(name)
+        if not norm:
+            filtered.append(item)
+            continue
+        key = (day, norm)
+        existing = by_day_name.get(key)
+        if existing is None:
+            by_day_name[key] = item
+            filtered.append(item)
+            continue
+        if item.get("source") == "link" and existing.get("source") != "link":
+            idx = filtered.index(existing)
+            filtered[idx] = item
+            by_day_name[key] = item
+        removed_name += 1
+
+    # Pass C — geographic collapse within the same day (100m + name ratio ≥0.7).
+    final: list[dict] = []
+    removed_geo = 0
+    by_day_items: dict[int, list[dict]] = {}
+    for item in filtered:
+        day = item.get("day")
+        if isinstance(day, int):
+            by_day_items.setdefault(day, []).append(item)
+        else:
+            final.append(item)
+
+    for day, items in by_day_items.items():
+        kept: list[dict] = []
+        for item in items:
+            lat = item.get("latitude")
+            lng = item.get("longitude")
+            name = _normalize_place_name((item.get("name") or "").strip())
+            if lat is None or lng is None or not name:
+                kept.append(item)
+                continue
+            is_dup = False
+            for k in kept:
+                klat, klng = k.get("latitude"), k.get("longitude")
+                kname = _normalize_place_name((k.get("name") or "").strip())
+                if klat is None or klng is None or not kname:
+                    continue
+                try:
+                    d_m = _haversine_km(float(lat), float(lng), float(klat), float(klng)) * 1000
+                except (TypeError, ValueError):
+                    continue
+                if d_m > 100:
+                    continue
+                sim = SequenceMatcher(None, name, kname).ratio()
+                if sim < 0.7:
+                    continue
+                # Duplicate — link beats ai.
+                if item.get("source") == "link" and k.get("source") != "link":
+                    idx = kept.index(k)
+                    kept[idx] = item
+                is_dup = True
+                removed_geo += 1
+                break
+            if not is_dup:
+                kept.append(item)
+        final.extend(kept)
+
+    total_removed = removed_id + removed_name + removed_geo
+    if total_removed:
+        logger.info(
+            "[final-dedup] removed=%d (by_place_id=%d, by_name=%d, by_geo=%d)",
+            total_removed, removed_id, removed_name, removed_geo,
+        )
+    return final
+
+
+def _enforce_day_trip_isolation(place_list: list[dict]) -> list[dict]:
+    """If a day contains a day-trip destination (e.g. Tigre Delta ~1h away
+    from Buenos Aires), that day should NOT also have afternoon-Palermo
+    items. Real travel agents don't mix a 8-hour round trip with urban
+    city activities on the same day.
+
+    Rules:
+      - If ANY item on a day has item_role="day_trip_destination",
+        activity_model="day_trip", OR duration_minutes >= 300, the day
+        is marked as a day-trip day.
+      - On a day-trip day, keep only the day-trip item(s) + items whose
+        city matches the day-trip destination (e.g. a restaurant IN
+        Tigre is fine on a Tigre day).
+      - Everything else on that day is dropped (logged).
+
+    Runs after final dedup so we don't waste checks on duplicates.
+    """
+    if not place_list:
+        return place_list
+
+    def _is_day_trip(item: dict) -> bool:
+        role = str(item.get("item_role") or "").lower()
+        model = str(item.get("activity_model") or "").lower()
+        dur = item.get("duration_minutes") or 0
+        try:
+            dur = int(dur)
+        except (TypeError, ValueError):
+            dur = 0
+        return (
+            role == "day_trip_destination"
+            or model == "day_trip"
+            or dur >= 300
+        )
+
+    by_day: dict[int, list[dict]] = {}
+    for item in place_list:
+        d = item.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(item)
+
+    keep_ids: set[int] = set()
+    dropped_names: list[tuple[int, str]] = []
+    for day, items in by_day.items():
+        day_trip_items = [i for i in items if _is_day_trip(i)]
+        if not day_trip_items:
+            for i in items:
+                keep_ids.add(id(i))
+            continue
+        # This is a day-trip day. Figure out the destination city (the
+        # strongest signal on the day-trip item itself).
+        dt_city = ""
+        for dt in day_trip_items:
+            candidate = (
+                (dt.get("city") or "").strip()
+                or (dt.get("primary_region") or "").strip()
+            )
+            if candidate:
+                dt_city = candidate.lower()
+                break
+        # Also parse from address as last resort.
+        if not dt_city:
+            for dt in day_trip_items:
+                addr = (dt.get("address") or "").lower()
+                for token in ("tigre", "versailles", "versalhes", "sintra", "colonia"):
+                    if token in addr:
+                        dt_city = token
+                        break
+                if dt_city:
+                    break
+
+        for i in items:
+            if _is_day_trip(i):
+                keep_ids.add(id(i))
+                continue
+            # Same city as the day trip? Allow.
+            i_city = (
+                (i.get("city") or "").strip().lower()
+                or (i.get("primary_region") or "").strip().lower()
+            )
+            addr = (i.get("address") or "").lower()
+            if dt_city and (dt_city in i_city or dt_city in addr):
+                keep_ids.add(id(i))
+                continue
+            dropped_names.append((day, (i.get("name") or "?")))
+
+    if dropped_names:
+        logger.info(
+            "[day-trip-isolation] dropped %d item(s) from day-trip days: %s",
+            len(dropped_names),
+            [f"day{d}:{n}" for d, n in dropped_names[:8]],
+        )
+    # Keep the original order, just filter.
+    return [it for it in place_list if id(it) in keep_ids or not isinstance(it.get("day"), int)]
 
 
 def _tag_sources_from_links(place_list: list[dict], places_mentioned: list[dict]) -> list[dict]:
@@ -2484,6 +2726,22 @@ async def _validate_and_create_items(
     # Locked days retain the video's order (preserved by _optimize_day_proximity).
     validated = _optimize_day_proximity(validated, day_rigidity=day_rigidity)
 
+    # FINAL DEDUP — now that Google Places has populated place_id + lat/lng,
+    # run a stricter dedup pass. The earlier name-based dedup in
+    # _deduplicate_places / _semantic_deduplicate ran BEFORE validation so
+    # most items had no coords — that pass catches name-variants but misses
+    # the case where Sonnet emits "Casa Rosada" and safety-net injects
+    # "Casa Rosada" independently on a different day. Here we know the real
+    # Google Place and can collapse the two.
+    validated = _final_itinerary_dedup(validated)
+
+    # DAY-TRIP ISOLATION — a real travel agent would never mix a Tigre day
+    # trip (8h round-trip from Buenos Aires) with "afternoon Palermo
+    # bars". Any item marked as a day-trip destination (item_role, activity_model,
+    # or duration_minutes >= 300) takes over the full day; other items on
+    # that day are dropped (with a log so we can tune).
+    validated = _enforce_day_trip_isolation(validated)
+
     logger.info("[eco] Validated %d places, creating items", len(validated))
 
     # Create items in Rails (parallel for speed)
@@ -2862,6 +3120,53 @@ REGRAS OBRIGATÓRIAS (quebrar qualquer uma = falha do roteiro):
    por diante. Testar mentalmente antes de responder.
 """
 
+    # Quality rules that a real travel agent would never break.
+    # These are product invariants, not suggestions — if the output violates
+    # them the pipeline has extra post-processors that drop/dedupe items,
+    # but it's cheaper and produces better text if Sonnet gets them right
+    # the first time.
+    planner_rules_section = """
+╔═══════════════════════════════════════════════════════════════════╗
+║  REGRAS DE PLANEJADOR HUMANO (se quebrar, o roteiro é inútil)     ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+1. ZERO DUPLICAÇÃO ENTRE DIAS E DENTRO DO DIA.
+   Um mesmo lugar NUNCA aparece duas vezes — nem no mesmo dia, nem em
+   dias diferentes. Se "Casa Rosada" está no Dia 1, NÃO coloca de novo
+   no Dia 3. Se um lugar do vídeo faz sentido em vários dias, escolha
+   UM e ponto. Antes de fechar o JSON, reveja a lista e remova repetidos.
+
+2. DAY-TRIPS SÃO DIAS INTEIROS — NÃO MISTURE COM A CIDADE BASE.
+   Um day trip (Tigre, Versalhes, Sintra, Colonia del Sacramento, etc.)
+   toma o dia inteiro (ida + atividade + volta = 6-10h). No dia de um
+   day trip, você só pode incluir:
+     a) O destino do day trip em si (ex: Tigre Delta).
+     b) Atividades e refeições DENTRO da cidade do day trip (ex: almoço
+        EM Tigre, Parque de la Costa EM Tigre).
+   É PROIBIDO colocar no mesmo dia: Jardim Botânico de Buenos Aires,
+   jantar em Palermo, bares em Recoleta, ou qualquer coisa na cidade
+   base. O usuário está em Tigre o dia inteiro.
+
+3. UM BAIRRO = UM DIA (concentração por neighborhood).
+   Palermo inteiro vai num dia só. Recoleta inteira num dia. San Telmo
+   inteiro num dia. Não fragmente: "Palermo de dia no Dia 4 + bares
+   secretos de Palermo no Dia 3" é errado — tudo de Palermo vai junto.
+
+4. NUNCA MENCIONE LUGARES DE OUTROS DIAS NAS NOTAS.
+   A descrição / notes de um item do Dia 3 NUNCA pode dizer "depois
+   aproveite os bares de Palermo" se Palermo está no Dia 4. O usuário
+   lê as notes como instruções. Só escreva sobre lugares que estão
+   efetivamente naquele dia.
+
+5. CADA DIA PRECISA DE UM TEMA COERENTE.
+   Um dia flexible NÃO É uma salada aleatória de atrações. Escolha uma
+   lógica: bairro, vibe (tranquilo/intenso), ou half-day + half-day. Se
+   não consegue justificar por que esses 5 lugares estão juntos no mesmo
+   dia, refaça. Um planejador humano consegue responder "por que isso
+   foi pro Dia 4?" com 1 frase clara.
+
+"""
+
     # Multi-city awareness from day_plans
     city_section = ""
     cities_in_plans = {}
@@ -3125,6 +3430,7 @@ The traveler expects a COMPLETE trip, not a copy of one video.
 {sources_info}
 {places_section}
 {preplanned_section}
+{planner_rules_section}
 ╔═══════════════════════════════════════════════════════════════╗
 ║  WORKFLOW FOR THIS ITINERARY (FOLLOW IN ORDER)               ║
 ╚═══════════════════════════════════════════════════════════════╝
