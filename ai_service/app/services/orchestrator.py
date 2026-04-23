@@ -4505,49 +4505,49 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
                     except Exception:
                         logger.exception("[research] Non-fatal — continuing without external context")
 
-                # STEP 4c — flexible-day research. Runs for ALL destination
-                # types whenever the trip has ≥2 days to fill. The source
-                # videos rarely script every day; these Tavily snippets give
-                # Sonnet real blog/guide content to draw from when filling
-                # the unscripted days, instead of leaning only on its
-                # training-time knowledge (which produced thin days and
-                # made-up-feeling picks). Dedup against places_mentioned is
-                # enforced in the prompt, not the search itself.
-                if settings.tavily_api_key and num_days >= 2:
-                    try:
-                        research_cities_flex = cities
-                        if dtype == "multi_base":
-                            cd = refreshed_profile.get("city_distribution") or {}
-                            selected = cd.get("selected_cities") or []
-                            if selected:
-                                research_cities_flex = selected
-                        interests = (
-                            refreshed_profile.get("interests")
-                            or refreshed_profile.get("interests_en")
-                            or []
-                        )
-                        # Approximation — we don't know exact locked count
-                        # until _assign_day_rigidity runs inside the build,
-                        # but any trip with ≥2 days is worth researching.
-                        flex_approx = max(num_days - 1, 1)
-                        flex_research = await _research_flexible_day_places(
-                            country=country,
-                            cities=research_cities_flex,
-                            num_days=num_days,
-                            interests=interests,
-                            places_mentioned=refreshed_profile.get("places_mentioned") or [],
-                            flex_days_count=flex_approx,
-                        )
-                        if flex_research:
-                            refreshed_profile["external_research_flexible"] = flex_research
-                            _mark(f"flexible-day research gathered ({len(flex_research)} chars)")
-                    except Exception:
-                        logger.exception("[flex-research] Non-fatal — continuing")
+                # STEP 4c — flexible-day research. MANDATORY for any trip
+                # with ≥2 days. Policy: "nenhum risco de ir sem" — if
+                # Tavily fails (unconfigured, unreachable, all queries
+                # empty after retries) the build is blocked with a visible
+                # error so the user retries. We do NOT degrade silently
+                # to a LLM-only itinerary.
+                if num_days >= 2:
+                    research_cities_flex = cities
+                    if dtype == "multi_base":
+                        cd = refreshed_profile.get("city_distribution") or {}
+                        selected = cd.get("selected_cities") or []
+                        if selected:
+                            research_cities_flex = selected
+                    interests = (
+                        refreshed_profile.get("interests")
+                        or refreshed_profile.get("interests_en")
+                        or []
+                    )
+                    flex_approx = max(num_days - 1, 1)
+                    flex_research = await _research_flexible_day_places(
+                        country=country,
+                        cities=research_cities_flex,
+                        num_days=num_days,
+                        interests=interests,
+                        places_mentioned=refreshed_profile.get("places_mentioned") or [],
+                        flex_days_count=flex_approx,
+                    )
+                    # _research_flexible_day_places raises on hard failure,
+                    # so reaching here means we got non-empty content.
+                    refreshed_profile["external_research_flexible"] = flex_research
+                    _mark(f"flexible-day research gathered ({len(flex_research)} chars)")
 
                 await rails.update_trip(
                     trip_id, {"traveler_profile": refreshed_profile},
                 )
                 _mark(f"destination classified as {classification.get('destination_type')}")
+        except FlexibleResearchUnavailable:
+            # Mandatory flex research failed — do NOT swallow. This is the
+            # whole point of the "nenhum risco de ir sem" policy: the build
+            # must abort with a visible error rather than produce a thin
+            # LLM-only itinerary. Re-raise so the outer handler persists
+            # build_error on the trip and the frontend surfaces it.
+            raise
         except Exception:
             logger.exception("[combined] destination classifier failed (non-fatal)")
 
@@ -5977,6 +5977,18 @@ Output 2-3 items per thin day. Nothing else."""
 # STEP 4 — External itinerary research (Tavily)
 # ──────────────────────────────────────────────
 
+class FlexibleResearchUnavailable(Exception):
+    """Raised when mandatory flexible-day research cannot be produced.
+
+    This is a hard failure — per product policy ("nenhum risco de ir sem"),
+    a build must NOT proceed without external research when the trip has
+    flexible days to fill. Caller should surface this as a visible build
+    error so the user can retry, rather than silently producing a thin
+    itinerary from internal LLM knowledge alone.
+    """
+    pass
+
+
 async def _research_flexible_day_places(
     country: str,
     cities: list[str],
@@ -5988,29 +6000,36 @@ async def _research_flexible_day_places(
 ) -> str:
     """Query Tavily for real places to fill FLEXIBLE days — the ones the
     user's videos didn't already script. Fires any time there are 2+
-    flexible days, regardless of destination_type, because the Sonnet's
-    internal knowledge alone has produced thin days and made-up-feeling
-    suggestions.
+    flexible days, regardless of destination_type.
 
-    Returns a compact blob (≤ 2500 chars) that gets injected into the
-    Sonnet prompt telling it: "use these real suggestions for flexible
-    days, but don't duplicate anything already in places_mentioned."
+    Hard contract: returns a non-empty blob on success. Raises
+    FlexibleResearchUnavailable if Tavily is unconfigured or every query
+    failed after retries. The caller MUST let that exception propagate
+    — do not silently swallow it and continue, or the build degrades
+    into a LLM-knowledge-only itinerary which is exactly what this
+    function exists to prevent.
 
-    Fails open: no Tavily key, timeout, or junk response → empty string
-    and the build proceeds with internal knowledge only.
+    Retry strategy: each query is retried up to 3 times with exponential
+    backoff (1s, 2s, 4s) on network errors, timeouts, or HTTP 5xx. A 4xx
+    from Tavily (auth, bad query) is NOT retried — fail fast on config
+    bugs.
+
+    Returns ≤ 2500 chars on success.
     """
-    if not settings.tavily_api_key:
-        logger.info("[flex-research] Tavily not configured — skipping")
-        return ""
     if flex_days_count < 1 or not cities or not country:
+        # Not applicable — 1-day trip or missing geo context. Not a failure.
         return ""
+
+    if not settings.tavily_api_key:
+        raise FlexibleResearchUnavailable(
+            "TAVILY_API_KEY não configurado — build bloqueado porque política "
+            "do produto exige pesquisa externa para preencher dias flexible. "
+            "Configure a variável de ambiente TAVILY_API_KEY no serviço."
+        )
 
     import httpx as _httpx
 
     city = cities[0]
-    # Top 5 already-known places to hint Tavily away from duplicates. Not a
-    # guarantee (Tavily isn't semantic) — the hard dedup instruction lives
-    # in the Sonnet prompt.
     known_names = [
         (p.get("name") or "").strip()
         for p in (places_mentioned or [])[:5]
@@ -6022,9 +6041,6 @@ async def _research_flexible_day_places(
         f"top hidden gems and attractions in {city}, {country}{besides_clause}",
         f"best local restaurants and cafes in {city} travel blog",
     ]
-
-    # Interest-driven third query — picks whichever tag hits first. Keeps the
-    # total Tavily spend predictable (3 queries × ~$0.005 ≈ 1.5¢/build).
     lower_interests = [str(i).lower() for i in (interests or [])]
     def _has(*keys: str) -> bool:
         return any(k in t for t in lower_interests for k in keys)
@@ -6045,8 +6061,15 @@ async def _research_flexible_day_places(
     own_client = http_client is None
     client = http_client or _httpx.AsyncClient(timeout=15.0)
     snippets: list[str] = []
-    try:
-        for q in queries:
+    query_errors: list[str] = []
+
+    async def _run_query(q: str) -> list[str]:
+        """Run one query with retries. Returns snippets list (may be
+        empty if query succeeded but had no useful content). Raises on
+        exhaustion only if every attempt failed with a retryable error.
+        """
+        last_err: Exception | None = None
+        for attempt in range(3):
             try:
                 resp = await asyncio.wait_for(
                     client.post(
@@ -6060,32 +6083,64 @@ async def _research_flexible_day_places(
                         },
                         headers={"Content-Type": "application/json"},
                     ),
-                    timeout=10.0,
+                    timeout=12.0,
                 )
-                if resp.status_code != 200:
-                    logger.warning(
-                        "[flex-research] Tavily %d on '%s': %s",
-                        resp.status_code, q, resp.text[:200],
+                if 400 <= resp.status_code < 500:
+                    raise FlexibleResearchUnavailable(
+                        f"Tavily {resp.status_code} on '{q}': {resp.text[:200]} "
+                        "(config/auth issue — not retryable)"
                     )
+                if resp.status_code != 200:
+                    last_err = RuntimeError(
+                        f"Tavily {resp.status_code}: {resp.text[:200]}"
+                    )
+                    await asyncio.sleep(2 ** attempt)
                     continue
+
                 data = resp.json()
+                out: list[str] = []
                 answer = (data.get("answer") or "").strip()
                 if answer:
-                    snippets.append(f"[Q: {q}]\n{answer[:700]}")
+                    out.append(f"[Q: {q}]\n{answer[:700]}")
                 for r in (data.get("results") or [])[:3]:
                     content = (r.get("content") or "").strip()
                     if content:
-                        snippets.append(f"  - {content[:300]}")
-            except asyncio.TimeoutError:
-                logger.warning("[flex-research] Tavily timeout on '%s'", q)
+                        out.append(f"  - {content[:300]}")
+                return out
+            except FlexibleResearchUnavailable:
+                raise
+            except (asyncio.TimeoutError, _httpx.HTTPError, _httpx.NetworkError) as e:
+                last_err = e
+                logger.warning(
+                    "[flex-research] retryable error on '%s' (attempt %d): %s",
+                    q, attempt + 1, e,
+                )
+                await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.warning("[flex-research] Tavily error on '%s': %s", q, e)
+                last_err = e
+                logger.warning("[flex-research] error on '%s': %s", q, e)
+                break
+        raise FlexibleResearchUnavailable(
+            f"Tavily unreachable after 3 attempts for '{q}': {last_err}"
+        )
+
+    try:
+        for q in queries:
+            try:
+                out = await _run_query(q)
+                snippets.extend(out)
+            except FlexibleResearchUnavailable as e:
+                query_errors.append(f"{q}: {e}")
+                logger.error("[flex-research] query FAILED: %s", e)
     finally:
         if own_client:
             await client.aclose()
 
     if not snippets:
-        return ""
+        raise FlexibleResearchUnavailable(
+            "Nenhuma query Tavily retornou conteúdo após retries. "
+            f"Erros: {'; '.join(query_errors) if query_errors else 'respostas vazias'}"
+        )
 
     summary = "\n\n".join(snippets)[:2500]
     logger.info(

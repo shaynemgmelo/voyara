@@ -32,6 +32,7 @@ from app.services.orchestrator import (
     refine_itinerary,
     optimize_trip_routing,
     enrich_trip_with_experiences,
+    FlexibleResearchUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -516,6 +517,25 @@ async def _confirm_city_distribution_background(
         # Resume the pipeline. The pause check sees status="confirmed"
         # and falls through to Tavily research + build.
         await extract_profile_and_build(trip_id)
+    except FlexibleResearchUnavailable as e:
+        # Persist a visible build_error so the frontend shows the failure
+        # modal with a retry button instead of spinning forever.
+        logger.error("[confirm-dist] FLEX RESEARCH UNAVAILABLE trip=%d: %s", trip_id, e)
+        try:
+            rails_err = RailsClient()
+            trip_err = await rails_err.get_trip(trip_id)
+            profile_err = trip_err.get("traveler_profile") or {}
+            profile_err["build_error"] = {
+                "message": (
+                    "Pesquisa externa indisponível — tenta de novo em alguns "
+                    f"segundos. (detalhe: {str(e)[:180]})"
+                ),
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "budget_exceeded": False,
+            }
+            await rails_err.update_trip(trip_id, {"traveler_profile": profile_err})
+        except Exception:
+            logger.exception("[confirm-dist] Could not persist build_error for trip=%d", trip_id)
     except Exception:
         logger.exception("[confirm-dist] Failed for trip %d", trip_id)
     finally:
@@ -728,6 +748,19 @@ async def _extract_and_build_background(trip_id: int):
         logger.error(
             "[extract-and-build trip=%d] TIMED OUT after %ds",
             trip_id, int(TOTAL_BUDGET_S),
+        )
+    except FlexibleResearchUnavailable as e:
+        # Product policy: mandatory external research for flexible days
+        # couldn't be produced. Surface a clear pt-BR message so the user
+        # knows to retry (usually a transient Tavily hiccup).
+        build_err = (
+            "Pesquisa externa indisponível no momento — a gente só gera "
+            "o roteiro com fontes reais de blogs. Tenta de novo em alguns "
+            f"segundos. (detalhe técnico: {str(e)[:180]})"
+        )
+        logger.error(
+            "[extract-and-build trip=%d] FLEX RESEARCH UNAVAILABLE: %s",
+            trip_id, e,
         )
     except Exception as e:
         build_err = f"Erro inesperado: {type(e).__name__}: {str(e)[:200]}"
