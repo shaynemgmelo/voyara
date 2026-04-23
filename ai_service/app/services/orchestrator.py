@@ -2686,6 +2686,30 @@ Prioritize places matching their interests while still creating a complete trip 
             f"{external_research}\n"
         )
 
+    external_research_flex = profile.get("external_research_flexible")
+    if external_research_flex:
+        dest_section += (
+            "\n"
+            "╔═══════════════════════════════════════════════════════════════╗\n"
+            "║  PESQUISA EXTERNA — LUGARES PARA OS DIAS SEM ROTEIRO FECHADO  ║\n"
+            "║  (blogs e guias reais de viagem — use nos dias FLEXIBLE)      ║\n"
+            "╚═══════════════════════════════════════════════════════════════╝\n"
+            f"{external_research_flex}\n"
+            "\n"
+            "REGRAS PARA ESTA SEÇÃO (NÃO NEGOCIÁVEIS):\n"
+            "1. Use estes lugares PRIORITARIAMENTE para preencher os dias marcados como\n"
+            "   'flexible' na RIGIDITY TABLE — eles vêm de fontes reais externas, não do\n"
+            "   seu treinamento.\n"
+            "2. NUNCA duplique um lugar que já esteja em 'LUGARES DOS LINKS DO USUÁRIO'.\n"
+            "   Se o mesmo lugar aparecer nos dois, ele pertence aos links — use a\n"
+            "   pesquisa externa só para o que é NOVO.\n"
+            "3. Se um snippet mencionar algo duvidoso (endereço vago, nome genérico tipo\n"
+            "   'nice café near X'), prefira algo do seu conhecimento consolidado sobre\n"
+            "   a cidade. Qualidade > quantidade.\n"
+            "4. Dias locked do vídeo IGNORAM esta seção — eles já têm o conteúdo do\n"
+            "   usuário e a seção 'ESTRUTURA DE DIAS DO VÍDEO'.\n"
+        )
+
     # Source URLs for traceability
     sources_info = ""
     if source_urls:
@@ -4480,6 +4504,46 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
                             _mark(f"external research gathered ({len(research)} chars)")
                     except Exception:
                         logger.exception("[research] Non-fatal — continuing without external context")
+
+                # STEP 4c — flexible-day research. Runs for ALL destination
+                # types whenever the trip has ≥2 days to fill. The source
+                # videos rarely script every day; these Tavily snippets give
+                # Sonnet real blog/guide content to draw from when filling
+                # the unscripted days, instead of leaning only on its
+                # training-time knowledge (which produced thin days and
+                # made-up-feeling picks). Dedup against places_mentioned is
+                # enforced in the prompt, not the search itself.
+                if settings.tavily_api_key and num_days >= 2:
+                    try:
+                        research_cities_flex = cities
+                        if dtype == "multi_base":
+                            cd = refreshed_profile.get("city_distribution") or {}
+                            selected = cd.get("selected_cities") or []
+                            if selected:
+                                research_cities_flex = selected
+                        interests = (
+                            refreshed_profile.get("interests")
+                            or refreshed_profile.get("interests_en")
+                            or []
+                        )
+                        # Approximation — we don't know exact locked count
+                        # until _assign_day_rigidity runs inside the build,
+                        # but any trip with ≥2 days is worth researching.
+                        flex_approx = max(num_days - 1, 1)
+                        flex_research = await _research_flexible_day_places(
+                            country=country,
+                            cities=research_cities_flex,
+                            num_days=num_days,
+                            interests=interests,
+                            places_mentioned=refreshed_profile.get("places_mentioned") or [],
+                            flex_days_count=flex_approx,
+                        )
+                        if flex_research:
+                            refreshed_profile["external_research_flexible"] = flex_research
+                            _mark(f"flexible-day research gathered ({len(flex_research)} chars)")
+                    except Exception:
+                        logger.exception("[flex-research] Non-fatal — continuing")
+
                 await rails.update_trip(
                     trip_id, {"traveler_profile": refreshed_profile},
                 )
@@ -5912,6 +5976,124 @@ Output 2-3 items per thin day. Nothing else."""
 # ──────────────────────────────────────────────
 # STEP 4 — External itinerary research (Tavily)
 # ──────────────────────────────────────────────
+
+async def _research_flexible_day_places(
+    country: str,
+    cities: list[str],
+    num_days: int,
+    interests: list[str],
+    places_mentioned: list[dict],
+    flex_days_count: int,
+    http_client=None,
+) -> str:
+    """Query Tavily for real places to fill FLEXIBLE days — the ones the
+    user's videos didn't already script. Fires any time there are 2+
+    flexible days, regardless of destination_type, because the Sonnet's
+    internal knowledge alone has produced thin days and made-up-feeling
+    suggestions.
+
+    Returns a compact blob (≤ 2500 chars) that gets injected into the
+    Sonnet prompt telling it: "use these real suggestions for flexible
+    days, but don't duplicate anything already in places_mentioned."
+
+    Fails open: no Tavily key, timeout, or junk response → empty string
+    and the build proceeds with internal knowledge only.
+    """
+    if not settings.tavily_api_key:
+        logger.info("[flex-research] Tavily not configured — skipping")
+        return ""
+    if flex_days_count < 1 or not cities or not country:
+        return ""
+
+    import httpx as _httpx
+
+    city = cities[0]
+    # Top 5 already-known places to hint Tavily away from duplicates. Not a
+    # guarantee (Tavily isn't semantic) — the hard dedup instruction lives
+    # in the Sonnet prompt.
+    known_names = [
+        (p.get("name") or "").strip()
+        for p in (places_mentioned or [])[:5]
+        if (p.get("name") or "").strip()
+    ]
+    besides_clause = f" besides {', '.join(known_names)}" if known_names else ""
+
+    queries = [
+        f"top hidden gems and attractions in {city}, {country}{besides_clause}",
+        f"best local restaurants and cafes in {city} travel blog",
+    ]
+
+    # Interest-driven third query — picks whichever tag hits first. Keeps the
+    # total Tavily spend predictable (3 queries × ~$0.005 ≈ 1.5¢/build).
+    lower_interests = [str(i).lower() for i in (interests or [])]
+    def _has(*keys: str) -> bool:
+        return any(k in t for t in lower_interests for k in keys)
+    thematic = None
+    if _has("vida_noturna", "nightlife", "bar"):
+        thematic = f"best bars and nightlife in {city}"
+    elif _has("gastronom", "food", "restaurant"):
+        thematic = f"must-try restaurants and food spots in {city}"
+    elif _has("hidden", "hidden_gem", "local"):
+        thematic = f"off the beaten path things to do in {city}"
+    elif _has("cultural", "museum", "arte"):
+        thematic = f"best museums and cultural sites in {city}"
+    elif _has("ao_ar_livre", "nature", "outdoor", "parque"):
+        thematic = f"best parks and outdoor activities in {city}"
+    if thematic:
+        queries.append(thematic)
+
+    own_client = http_client is None
+    client = http_client or _httpx.AsyncClient(timeout=15.0)
+    snippets: list[str] = []
+    try:
+        for q in queries:
+            try:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": settings.tavily_api_key,
+                            "query": q,
+                            "search_depth": "basic",
+                            "include_answer": True,
+                            "max_results": 4,
+                        },
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[flex-research] Tavily %d on '%s': %s",
+                        resp.status_code, q, resp.text[:200],
+                    )
+                    continue
+                data = resp.json()
+                answer = (data.get("answer") or "").strip()
+                if answer:
+                    snippets.append(f"[Q: {q}]\n{answer[:700]}")
+                for r in (data.get("results") or [])[:3]:
+                    content = (r.get("content") or "").strip()
+                    if content:
+                        snippets.append(f"  - {content[:300]}")
+            except asyncio.TimeoutError:
+                logger.warning("[flex-research] Tavily timeout on '%s'", q)
+            except Exception as e:
+                logger.warning("[flex-research] Tavily error on '%s': %s", q, e)
+    finally:
+        if own_client:
+            await client.aclose()
+
+    if not snippets:
+        return ""
+
+    summary = "\n\n".join(snippets)[:2500]
+    logger.info(
+        "[flex-research] %d snippets (%d chars) for %s — %d flex days, %d known places",
+        len(snippets), len(summary), city, flex_days_count, len(known_names),
+    )
+    return summary
+
 
 async def _research_itinerary_patterns(
     country: str,
