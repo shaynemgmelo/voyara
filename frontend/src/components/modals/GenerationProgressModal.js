@@ -61,8 +61,13 @@ function stageToPercent(stage, extractedCount, totalLinks, stageElapsed) {
         return Math.round(5 + ratio * 23);
       }
       if (keyword === "generating itinerary") {
-        // 65 → 88% eased by stage elapsed (Sonnet usually 40-80s)
-        const t = Math.min(stageElapsed / 80_000, 1);
+        // 65 → 88% over the first 60s of this stage. We stop interpolating
+        // at 60s on purpose: that's when the stuck-detection threshold
+        // fires. If we kept crawling past 60s the user would see a moving
+        // bar AND a "stuck" card at the same time — contradictory UX. The
+        // bar visibly freezes in sync with the stuck card instead.
+        const clamped = Math.min(stageElapsed, 60_000);
+        const t = clamped / 60_000;
         return Math.round(65 + t * 23);
       }
       return basePct;
