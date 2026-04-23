@@ -3443,50 +3443,90 @@ def _optimize_day_proximity(
     # Regra #0; it just makes the walking path efficient). Time slots are
     # reassigned by position afterwards so morning stays morning even if
     # a different item now sits in position 0.
+    #
+    # NIGHTLIFE FIX: items categorized as nightlife/bar/club get pushed
+    # to the end of the day and pinned to evening slots (20:00+). An
+    # earlier version applied positional slots blindly and landed
+    # "Phi Phi Island Nightlife" at 14:30 — obviously wrong.
     default_time_slots = ["10:00", "12:30", "14:30", "16:30", "19:00"]
+    evening_slots = ["20:00", "21:30"]
+    NIGHTLIFE_CATEGORIES = {"nightlife", "bar", "club", "vida_noturna"}
+
+    def _is_nightlife(item: dict) -> bool:
+        cat = str(item.get("category") or "").lower()
+        if cat in NIGHTLIFE_CATEGORIES:
+            return True
+        # Heuristic fallback: name contains a nightlife keyword. Catches
+        # cases where the LLM mislabels ("attraction" for a rooftop bar).
+        name = str(item.get("name") or "").lower()
+        for kw in ("nightlife", "cocktail", "speakeasy", "rooftop bar", "wine bar"):
+            if kw in name:
+                return True
+        return False
+
     for d, items in by_day.items():
         geo_items = [i for i in items if i.get("latitude") and i.get("longitude")]
         if len(geo_items) < 2:
+            # Even for 1-item days, fix a nightlife item stuck at 10:00.
+            for it in items:
+                if _is_nightlife(it):
+                    it["time_slot"] = "20:00"
             continue
+
+        # Separate nightlife from daytime items BEFORE nearest-neighbor —
+        # we want night spots at the tail regardless of how close they
+        # are to the last daytime stop.
+        night_items = [i for i in geo_items if _is_nightlife(i)]
+        day_geo_items = [i for i in geo_items if not _is_nightlife(i)]
 
         # Save the original time_slot sequence BEFORE shuffling so we can
         # reassign them to the new positions.
         original_time_slots = [i.get("time_slot") for i in items]
 
-        # Start with the item that had the earliest time_slot (morning
-        # anchor). This mimics "start the day at Casa Rosada" even if a
-        # nearby café was technically the closest to the centroid.
-        def _slot_key(item: dict) -> str:
-            ts = item.get("time_slot") or "99:99"
-            return ts
-        start_item = min(geo_items, key=_slot_key)
-        ordered = [start_item]
-        remaining = [i for i in geo_items if i is not start_item]
+        if day_geo_items:
+            # Start with the item that had the earliest time_slot (morning
+            # anchor). This mimics "start the day at Casa Rosada" even if a
+            # nearby café was technically the closest to the centroid.
+            def _slot_key(item: dict) -> str:
+                ts = item.get("time_slot") or "99:99"
+                return ts
+            start_item = min(day_geo_items, key=_slot_key)
+            ordered = [start_item]
+            remaining = [i for i in day_geo_items if i is not start_item]
 
-        while remaining:
-            last = ordered[-1]
-            last_lat = float(last["latitude"])
-            last_lng = float(last["longitude"])
-            nearest_idx = 0
-            nearest_dist = float("inf")
-            for idx, candidate in enumerate(remaining):
-                dist = _haversine_km(
-                    last_lat, last_lng,
-                    float(candidate["latitude"]), float(candidate["longitude"]),
-                )
-                if dist < nearest_dist:
-                    nearest_dist = dist
-                    nearest_idx = idx
-            ordered.append(remaining.pop(nearest_idx))
+            while remaining:
+                last = ordered[-1]
+                last_lat = float(last["latitude"])
+                last_lng = float(last["longitude"])
+                nearest_idx = 0
+                nearest_dist = float("inf")
+                for idx, candidate in enumerate(remaining):
+                    dist = _haversine_km(
+                        last_lat, last_lng,
+                        float(candidate["latitude"]), float(candidate["longitude"]),
+                    )
+                    if dist < nearest_dist:
+                        nearest_dist = dist
+                        nearest_idx = idx
+                ordered.append(remaining.pop(nearest_idx))
+        else:
+            ordered = []
 
         non_geo = [i for i in items if not i.get("latitude") or not i.get("longitude")]
-        new_sequence = ordered + non_geo
+        # Final order: daytime route first, then nightlife, then unmapped.
+        new_sequence = ordered + night_items + non_geo
 
-        # Reassign time_slots by position so the rhythm stays 10:00/12:30/
-        # 14:30/16:30/19:00 regardless of which item is in which slot.
-        # Preserves original time_slots for positions beyond the defaults.
+        # Reassign time_slots by position — daytime items use the
+        # standard rhythm, nightlife items get pinned evening slots.
+        num_day = len(ordered)
         for idx, item in enumerate(new_sequence):
-            if idx < len(default_time_slots):
+            if _is_nightlife(item):
+                night_idx = idx - num_day
+                if 0 <= night_idx < len(evening_slots):
+                    item["time_slot"] = evening_slots[night_idx]
+                else:
+                    item["time_slot"] = "22:00"
+            elif idx < len(default_time_slots):
                 item["time_slot"] = default_time_slots[idx]
             elif idx < len(original_time_slots) and original_time_slots[idx]:
                 item["time_slot"] = original_time_slots[idx]
@@ -4285,11 +4325,25 @@ Rules:
     excursions, safari, or operator-booked days, lean tour_driven.
   - Urban + 1-2 day trips = urban_excursion. Urban + 3+ bases = multi_base.
 
+CRITICAL — base_cities MUST be specific, real, named cities:
+  ✅ GOOD: "Bangkok", "Chiang Mai", "Phuket", "Krabi", "Ko Samui"
+  ❌ BAD:  "Northern Thailand", "Southern Thailand", "Tailândia do Norte",
+           "Beach Region", "Mountain Area", "Highlands", "Coast"
+  - Never use regional or compass-direction labels. Pick the actual city
+    the traveler bases in (the town where they sleep and start each day).
+  - If the source content names a region without a city, pick the obvious
+    hub city for that region (e.g. "Northern Thailand" → "Chiang Mai"
+    unless content specifies otherwise; "Tuscany" → "Florence" or "Siena"
+    depending on what's mentioned).
+  - Names should be in the traveler's likely language (Portuguese speakers
+    see "Bangkok" not "Banguecoque"; English names are acceptable for
+    Thai/Japanese cities where no PT name is common).
+
 Return ONLY a JSON object:
 {{
   "destination_type": "walkable_urban" | "urban_excursion" | "tour_driven" | "multi_base",
   "reasoning": "one-sentence why (English)",
-  "base_cities": ["City1", "City2"],
+  "base_cities": ["SpecificCity1", "SpecificCity2"],
   "tour_dominant": true | false,
   "planning_notes": [
     "short actionable planning hint 1",
@@ -4960,6 +5014,17 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         by_day.setdefault(d, []).append(p)
 
     slot_by_position = ["10:00", "12:30", "14:30", "16:30", "19:00"]
+    _NIGHT_CATS = {"nightlife", "bar", "club", "vida_noturna"}
+
+    def _nightlife_slot_for(item: dict) -> str | None:
+        """Return an evening slot if item is nightlife/bar, else None."""
+        cat = str(item.get("category") or "").lower()
+        name = str(item.get("name") or "").lower()
+        is_night = cat in _NIGHT_CATS or any(
+            kw in name for kw in ("nightlife", "cocktail", "speakeasy", "rooftop bar", "wine bar")
+        )
+        return "20:00" if is_night else None
+
     patches: list[tuple[int, int, int, dict]] = []  # (item_id, new_dp_id, new_pos, data)
     for day_num in sorted(by_day.keys()):
         items = by_day[day_num]
@@ -4974,7 +5039,15 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
             if not orig:
                 continue
             orig_day, orig_pos = orig
-            new_slot = slot_by_position[pos] if pos < len(slot_by_position) else item.get("time_slot")
+            # Nightlife/bar overrides positional slots — no more "Phi Phi
+            # Nightlife @ 14:30". Evening items always get 20:00.
+            night_override = _nightlife_slot_for(item)
+            if night_override:
+                new_slot = night_override
+            elif pos < len(slot_by_position):
+                new_slot = slot_by_position[pos]
+            else:
+                new_slot = item.get("time_slot")
             changed_day = orig_day != day_num
             changed_pos = orig_pos != pos
             changed_slot = item.get("time_slot") != new_slot
@@ -6382,6 +6455,67 @@ def _compute_item_role(item: dict) -> str | None:
     return None
 
 
+def _is_generic_region(name: str) -> bool:
+    """Return True when the string looks like a regional label ("Northern
+    Thailand", "Tailândia do Norte", "Highlands", etc.) rather than a
+    specific city. Used as a defense-in-depth filter on top of the
+    classifier prompt — if the LLM still emits a region, we refuse to
+    copy it into day_plan.city.
+    """
+    if not name:
+        return True
+    n = name.strip().lower()
+    if not n:
+        return True
+    # Compass-direction prefixes. English + Portuguese + Spanish.
+    compass_prefixes = (
+        "northern ", "southern ", "eastern ", "western ",
+        "north ", "south ", "east ", "west ",
+        "norte ", "sul ", "leste ", "oeste ",
+        "norte de ", "sul de ", "leste de ", "oeste de ",
+        "norte do ", "sul do ", "leste do ", "oeste do ",
+        "norte da ", "sul da ", "leste da ", "oeste da ",
+        "north of ", "south of ", "east of ", "west of ",
+    )
+    for prefix in compass_prefixes:
+        if n.startswith(prefix):
+            return True
+    # Compass-direction suffixes (Portuguese "X do Norte / da Costa").
+    compass_suffixes = (
+        " do norte", " do sul", " do leste", " do oeste",
+        " da costa", " do interior",
+        " do nordeste", " do sudeste", " do noroeste", " do sudoeste",
+        " del norte", " del sur",
+        " north", " south", " east", " west",
+    )
+    for suffix in compass_suffixes:
+        if n.endswith(suffix):
+            return True
+    # Generic "region/area" tokens that, even as substrings, signal a
+    # non-city label.
+    generic_tokens = (
+        "region", "regiao", "região", "zona", "area", "área",
+        "highlands", "lowlands", "coast", "coastline", "litoral",
+        "interior", "outback", "countryside", "campo",
+    )
+    tokens = n.replace(",", " ").split()
+    if any(tok in generic_tokens for tok in tokens):
+        return True
+    # "Islands" at the end (not in the middle — "Phi Phi Islands" is OK
+    # but "Thai Islands" isn't). Heuristic: only the last token.
+    if tokens and tokens[-1] in {"islands", "ilhas", "islas"}:
+        # Allow well-known archipelago names where "islands" IS part of
+        # the proper noun (Phi Phi, Galápagos, Canary).
+        known_archipelagos = {
+            "phi phi", "galapagos", "galápagos", "canary", "canárias",
+            "balearic", "baleares",
+        }
+        joined = " ".join(tokens[:-1])
+        if joined not in known_archipelagos:
+            return True
+    return False
+
+
 async def _assign_day_rigidity(
     trip: dict,
     day_plans: list[dict],
@@ -6499,15 +6633,30 @@ async def _assign_day_rigidity(
             # 1. region_hint from classifier (most specific — video said so)
             # 2. multi_base distribution (structured destination knowledge)
             # 3. singular base_city fallback (single-destination trips)
-            city_for_day = (
-                entry.get("region_hint")
-                or day_to_base_city.get(day_num)
-                or content_classification.get("base_city")
-                or ""
+            # Each candidate is filtered through _is_generic_region — if
+            # region_hint is "Northern Thailand" we skip it and fall through
+            # to day_to_base_city, which should have been constrained to
+            # specific cities by the classifier prompt. Last-resort empty
+            # string is better than polluting day_plan.city with a region.
+            def _pick_city(*candidates: str) -> str:
+                for c in candidates:
+                    if isinstance(c, str) and c.strip() and not _is_generic_region(c):
+                        return c.strip()
+                for c in candidates:
+                    if isinstance(c, str) and c.strip():
+                        logger.warning(
+                            "[rigidity] rejecting generic region label '%s' for day %s",
+                            c, day_num,
+                        )
+                return ""
+            city_for_day = _pick_city(
+                entry.get("region_hint") or "",
+                day_to_base_city.get(day_num) or "",
+                content_classification.get("base_city") or "",
             )
-            if isinstance(city_for_day, str) and city_for_day.strip():
-                patch["primary_region"] = city_for_day.strip()
-                patch["city"] = city_for_day.strip()
+            if city_for_day:
+                patch["primary_region"] = city_for_day
+                patch["city"] = city_for_day
             patch["day_type"] = "day_trip" if entry.get("is_day_trip") else "urban"
         else:
             rigidity = "flexible"
@@ -6517,13 +6666,24 @@ async def _assign_day_rigidity(
             # For flexible days in a multi_base trip, use the distribution
             # map so consecutive days share a base. For single-base trips,
             # fall back to the singular `base_city` from the classifier.
-            city_for_day = (
-                day_to_base_city.get(day_num)
-                or content_classification.get("base_city")
-                or ""
-            )
-            if isinstance(city_for_day, str) and city_for_day.strip():
-                patch["city"] = city_for_day.strip()
+            candidates_flex = [
+                day_to_base_city.get(day_num) or "",
+                content_classification.get("base_city") or "",
+            ]
+            city_for_day = ""
+            for c in candidates_flex:
+                if isinstance(c, str) and c.strip() and not _is_generic_region(c):
+                    city_for_day = c.strip()
+                    break
+            if not city_for_day:
+                for c in candidates_flex:
+                    if isinstance(c, str) and c.strip():
+                        logger.warning(
+                            "[rigidity] rejecting generic region label '%s' for flex day %s",
+                            c, day_num,
+                        )
+            if city_for_day:
+                patch["city"] = city_for_day
 
         # Only include `estimated_pace` when it matches the Rails enum —
         # Haiku sometimes returns English or misspelled variants ("medium",

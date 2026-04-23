@@ -53,6 +53,20 @@ active_builds: dict[int, dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 60 * 15  # 15 minutes; old jobs get GC'd lazily
 
 
+def _truncate(text: str, max_len: int = 400) -> str:
+    """Truncate on word boundary so error messages don't end mid-word like
+    '... TAVILY_API_KEY no )'. Appends '…' when trimmed."""
+    if not text or len(text) <= max_len:
+        return text
+    cut = text[:max_len]
+    # Back up to the last whitespace within the last 40 chars so we don't
+    # lose a long tail unnecessarily.
+    space = cut.rfind(" ", max(0, max_len - 40))
+    if space > 0:
+        cut = cut[:space]
+    return cut.rstrip(" .,;:()") + "…"
+
+
 def _gc_old_jobs() -> None:
     now = time.time()
     dead = [
@@ -528,7 +542,7 @@ async def _confirm_city_distribution_background(
             profile_err["build_error"] = {
                 "message": (
                     "Pesquisa externa indisponível — tenta de novo em alguns "
-                    f"segundos. (detalhe: {str(e)[:180]})"
+                    f"segundos. (detalhe: {_truncate(str(e))})"
                 ),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "budget_exceeded": False,
@@ -603,7 +617,7 @@ async def _build_itinerary_background(trip_id: int):
         build_err = f"A geração passou do limite de {int(TOTAL_BUDGET_S)}s."
         logger.error("[build trip=%d] TIMED OUT after %ds", trip_id, int(TOTAL_BUDGET_S))
     except Exception as e:
-        build_err = f"Erro inesperado: {type(e).__name__}: {str(e)[:200]}"
+        build_err = f"Erro inesperado: {type(e).__name__}: {_truncate(str(e))}"
         logger.exception("[build trip=%d] EXCEPTION", trip_id)
 
     # No items created + a real error → persist it so the UI unblocks.
@@ -756,14 +770,14 @@ async def _extract_and_build_background(trip_id: int):
         build_err = (
             "Pesquisa externa indisponível no momento — a gente só gera "
             "o roteiro com fontes reais de blogs. Tenta de novo em alguns "
-            f"segundos. (detalhe técnico: {str(e)[:180]})"
+            f"segundos. (detalhe técnico: {_truncate(str(e))})"
         )
         logger.error(
             "[extract-and-build trip=%d] FLEX RESEARCH UNAVAILABLE: %s",
             trip_id, e,
         )
     except Exception as e:
-        build_err = f"Erro inesperado: {type(e).__name__}: {str(e)[:200]}"
+        build_err = f"Erro inesperado: {type(e).__name__}: {_truncate(str(e))}"
         logger.exception("[extract-and-build trip=%d] EXCEPTION", trip_id)
 
     # Persist build_error if we have neither items nor a manual-mode success.
