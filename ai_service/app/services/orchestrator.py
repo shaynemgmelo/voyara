@@ -2047,14 +2047,19 @@ def _cluster_diameter_km(places: list[dict]) -> float:
 
 def _tighten_day_clusters(
     place_list: list[dict],
-    max_diameter_km: float = 15.0,
+    max_diameter_km: float = 7.0,
     day_rigidity: dict[int, str] | None = None,
 ) -> list[dict]:
     """Enforce that every day's places sit within max_diameter_km of each
     other. If a day has an outlier, try to move it to another day whose
     cluster already contains nearby places. If no such day exists, drop it.
 
-    This handles both regular urban days (~10km diameter) AND day trips
+    Default 7km matches the "neighborhood-per-day" rule — wide enough to
+    cover two adjacent neighborhoods (Palermo + Recoleta ~3km, San Telmo
+    + Microcentro ~2km), tight enough to reject "Belgrano + La Boca" on
+    the same day (~18km, transit nightmare).
+
+    This handles both regular urban days (~5-7km diameter) AND day trips
     (all places clustered in the remote zone — Tigre, Campanópolis etc.).
     The rule is NOT 'stay close to city center' — it is 'stay close to the
     rest of YOUR day'.
@@ -2362,7 +2367,7 @@ async def _validate_and_create_items(
     # The fence here is the OUTER bound for "same trip" — day trips to
     # remote attractions (Tigre 30km, Campanópolis 50km) must fit.
     # The REAL logistic enforcement happens in _tighten_day_clusters:
-    # a place can be 100km from city center, but it must be within 15km
+    # a place can be 100km from city center, but it must be within 7km
     # of every other place ON THE SAME DAY.
     #
     # CRITICAL: the country is pulled from the AI-inferred profile
@@ -2426,7 +2431,7 @@ async def _validate_and_create_items(
             cities_in_plans.add(c)
     # Multi-base trips legitimately span cities 800+ km apart (e.g. Thailand
     # with Bangkok + Phuket + Koh Lipe 819km away, or Italy Rome → Milan).
-    # Per-day cluster tightening (15km diameter in _tighten_day_clusters)
+    # Per-day cluster tightening (7km diameter in _tighten_day_clusters)
     # handles the tight grouping — the fence only needs to prevent
     # cross-country false matches (Thailand → Miami's "Wat Pho" restaurant).
     # Thresholds tuned to real archetypes:
@@ -2673,11 +2678,11 @@ async def _validate_and_create_items(
         )
 
     # Per-day cluster tightening — enforce that every day's places sit
-    # within a 15km diameter of each other. Outliers are first tried on
-    # other days (to preserve day-trip places together), then dropped if
-    # no compatible day exists.
+    # within a 7km diameter of each other (neighborhood-per-day rule).
+    # Outliers are first tried on other days (to preserve day-trip places
+    # together), then dropped if no compatible day exists.
     validated = _tighten_day_clusters(
-        validated, max_diameter_km=15.0, day_rigidity=day_rigidity,
+        validated, max_diameter_km=7.0, day_rigidity=day_rigidity,
     )
 
     # Regra #1 — enforce Day 1 + Day 2 stay in the main destination city.
@@ -2741,6 +2746,20 @@ async def _validate_and_create_items(
     # or duration_minutes >= 300) takes over the full day; other items on
     # that day are dropped (with a log so we can tune).
     validated = _enforce_day_trip_isolation(validated)
+
+    # SECOND-PASS CLUSTER TIGHTENING — dedup + day-trip isolation can leave
+    # a flex day with a stranded outlier (e.g. its anchor was deduped, the
+    # remaining item is now 12km from everything else on that day). A real
+    # planner would re-route it. Run the same 7km tightener once more so
+    # the post-cleanup state matches the per-day neighborhood-rule.
+    validated = _tighten_day_clusters(
+        validated, max_diameter_km=7.0, day_rigidity=day_rigidity,
+    )
+
+    # PROXIMITY OPTIMIZATION (second pass) — re-sequence items inside each
+    # day after second-pass tightening + isolation may have shuffled
+    # composition. Same NN walk + nightlife-to-evening rule.
+    validated = _optimize_day_proximity(validated, day_rigidity=day_rigidity)
 
     # EMPTY-DAY GUARD — the geo-cluster tightening + final dedup + day-trip
     # isolation together can leave a flexible day with 0 items (e.g. day 4
@@ -3676,12 +3695,13 @@ def _optimize_day_proximity(
         by_day.setdefault(d, []).append(p)
 
     # Step 1: Swap outliers between days.
-    # New heuristic: swap if (a) >15km absolute from own centroid, OR
-    # (b) another day's centroid is at least 40% closer than own.
-    # Case (b) catches the "purple day's pin 1 is right next to red day's
-    # cluster but my own centroid is also nearby" scenario the user saw.
-    MAX_SWAP_DISTANCE = 15
-    SIGNIFICANT_RATIO = 0.6
+    # Heuristic: swap if (a) >8km absolute from own centroid, OR
+    # (b) another day's centroid is at least 50% closer than own.
+    # Both thresholds tightened in line with the 7km per-day diameter
+    # rule — catches the "this item is on the wrong day" case much more
+    # aggressively than the old 15km / 60% pair.
+    MAX_SWAP_DISTANCE = 8
+    SIGNIFICANT_RATIO = 0.5
 
     def _centroid(items):
         lats = [float(i["latitude"]) for i in items if i.get("latitude")]
