@@ -63,6 +63,18 @@ export async function refineItinerary(tripId, feedback, scope = "trip", dayPlanI
   return resp.json();
 }
 
+// Live day-trip suggestions for the AddDayTripModal. Backend hits Tavily
+// + extracts city names via Haiku, caches per (city, country) for 24h.
+// On any failure, returns {suggestions: [], source: "unavailable"} —
+// the modal falls back to its curated list.
+export async function fetchDayTripSuggestions(city, country = "") {
+  const params = new URLSearchParams({ city });
+  if (country) params.set("country", country);
+  const resp = await fetch(`${AI_URL}/day-trip-suggestions?${params}`);
+  if (!resp.ok) return { suggestions: [], source: "unavailable" };
+  return resp.json();
+}
+
 // User-confirmed multi-base distribution. Resumes the paused extract-and-build
 // pipeline on the AI service — backend sets city_distribution.status="confirmed"
 // and re-enters extract_profile_and_build, which now skips the pause and runs

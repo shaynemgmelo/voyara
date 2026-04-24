@@ -6809,6 +6809,161 @@ async def _research_flexible_day_places(
     return summary
 
 
+# In-memory cache for day-trip suggestions. Keyed by normalized
+# "city|country" — Tavily charges per query and same-city lookups
+# would burn money on repeat opens of the AddDayTripModal. 24h TTL is
+# generous; suggestions for "day trips from Buenos Aires" don't change
+# meaningfully day-to-day.
+_DAY_TRIP_SUGGESTIONS_CACHE: dict[str, tuple[list[str], float]] = {}
+_DAY_TRIP_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+async def suggest_day_trips(
+    main_city: str,
+    country: str = "",
+    *,
+    cache: bool = True,
+) -> list[str]:
+    """Return 4-6 day-trip destination names near `main_city`, fetched via
+    Tavily web search and extracted by Haiku. Cached per (city, country)
+    for 24h. Returns [] on any failure — the caller (frontend) falls
+    back to its curated list.
+
+    Why a separate helper: the existing _research_flexible_day_places
+    is meant to fill flexible days during a build (returns prose).
+    This one returns a structured list of city names suitable for the
+    AddDayTripModal's suggestion buttons.
+    """
+    if not main_city:
+        return []
+    main_city = main_city.strip()
+    country = (country or "").strip()
+    key = f"{main_city.lower()}|{country.lower()}"
+    now = _t.time()
+
+    if cache:
+        hit = _DAY_TRIP_SUGGESTIONS_CACHE.get(key)
+        if hit and hit[1] > now:
+            return list(hit[0])
+
+    if not settings.tavily_api_key:
+        return []
+
+    import httpx as _httpx
+
+    query = f"best popular day trips from {main_city}"
+    if country:
+        query += f", {country}"
+
+    snippets: list[str] = []
+    try:
+        async with _httpx.AsyncClient(timeout=15.0) as client:
+            resp = await asyncio.wait_for(
+                client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": settings.tavily_api_key,
+                        "query": query,
+                        "search_depth": "basic",
+                        "include_answer": True,
+                        "max_results": 5,
+                    },
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=12.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "[day-trip-suggest] Tavily %d for %r: %s",
+                    resp.status_code, main_city, resp.text[:200],
+                )
+                return []
+            data = resp.json()
+            answer = (data.get("answer") or "").strip()
+            if answer:
+                snippets.append(answer[:1000])
+            for r in (data.get("results") or [])[:4]:
+                content = (r.get("content") or "").strip()
+                if content:
+                    snippets.append(content[:400])
+    except Exception as e:
+        logger.warning("[day-trip-suggest] Tavily error for %r: %s", main_city, e)
+        return []
+
+    if not snippets:
+        logger.info("[day-trip-suggest] no snippets for %r", main_city)
+        return []
+
+    research_text = "\n\n".join(snippets)[:3000]
+    prompt = (
+        f"You are extracting day-trip destination names from travel "
+        f"search snippets.\n\n"
+        f"User's main destination: {main_city}"
+        f"{f', {country}' if country else ''}\n\n"
+        f"From these snippets, list 4-6 SHORT specific city/town names "
+        f"commonly cited as day-trip destinations from {main_city}.\n\n"
+        f"OUTPUT FORMAT — JSON only, no prose:\n"
+        f'["Name 1", "Name 2", "Name 3", "Name 4"]\n\n'
+        f"Rules:\n"
+        f"- Only the destination name (no explanation, no comma details).\n"
+        f"- DO NOT include {main_city} itself.\n"
+        f"- Skip generic regions (e.g. \"Buenos Aires Province\"); pick "
+        f"specific places (e.g. \"Tigre\").\n"
+        f"- If snippets are weak, return fewer rather than invent.\n\n"
+        f"SNIPPETS:\n{research_text}\n"
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=15.0,
+                )
+            ),
+            timeout=18.0,
+        )
+        raw = response.content[0].text if response.content else "[]"
+    except Exception as e:
+        logger.warning("[day-trip-suggest] Haiku failed for %r: %s", main_city, e)
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.warning(
+            "[day-trip-suggest] Haiku returned non-list for %r: %r",
+            main_city, raw[:120],
+        )
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    main_norm = main_city.lower()
+    for item in parsed:
+        if not isinstance(item, str):
+            continue
+        clean = item.strip().strip('"').strip("'")
+        if not clean or len(clean) > 50:
+            continue
+        if clean.lower() == main_norm or clean.lower() in seen:
+            continue
+        seen.add(clean.lower())
+        out.append(clean)
+        if len(out) >= 6:
+            break
+
+    if out:
+        _DAY_TRIP_SUGGESTIONS_CACHE[key] = (out, now + _DAY_TRIP_CACHE_TTL_SECONDS)
+    logger.info(
+        "[day-trip-suggest] %r → %d suggestions: %s",
+        main_city, len(out), out,
+    )
+    return out
+
+
 async def _research_itinerary_patterns(
     country: str,
     cities: list[str],

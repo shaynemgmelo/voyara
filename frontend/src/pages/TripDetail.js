@@ -375,6 +375,7 @@ export default function TripDetail() {
       {showAddDayTrip && (
         <AddDayTripModal
           mainCity={mainCityFromProfile}
+          mainCountry={trip?.traveler_profile?.main_destination?.country || ""}
           excludeCities={[
             mainCityFromProfile,
             ...new Set(

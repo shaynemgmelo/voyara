@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
 import { getDayTripSuggestions } from "../../data/dayTripSuggestions";
+import { fetchDayTripSuggestions } from "../../api/trips";
 
 // Modal opened from the CityTabs "+ day-trip" button. Shows curated
 // suggestions for the main city (e.g. Buenos Aires → Tigre / Colonia /
@@ -10,6 +11,7 @@ import { getDayTripSuggestions } from "../../data/dayTripSuggestions";
 // runs in surgical mode.
 export default function AddDayTripModal({
   mainCity,
+  mainCountry = "",
   excludeCities = [],
   onSubmit,
   onClose,
@@ -19,11 +21,43 @@ export default function AddDayTripModal({
 
   const [customCity, setCustomCity] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [liveSuggestions, setLiveSuggestions] = useState([]);
+  const [loadingLive, setLoadingLive] = useState(false);
+
+  useEffect(() => {
+    if (!mainCity) return;
+    let cancelled = false;
+    setLoadingLive(true);
+    fetchDayTripSuggestions(mainCity, mainCountry)
+      .then((res) => {
+        if (cancelled) return;
+        setLiveSuggestions(Array.isArray(res?.suggestions) ? res.suggestions : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLiveSuggestions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingLive(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mainCity, mainCountry]);
 
   const excluded = new Set(excludeCities.map((c) => (c || "").toLowerCase()));
-  const suggestions = getDayTripSuggestions(mainCity).filter(
-    (s) => !excluded.has(s.toLowerCase()),
-  );
+  // Merge: backend suggestions first (fresh, web-sourced), then curated
+  // fallback for anything new. Dedupe by lower-case name.
+  const merged = [];
+  const seen = new Set();
+  for (const name of [...liveSuggestions, ...getDayTripSuggestions(mainCity)]) {
+    const key = (name || "").toLowerCase().trim();
+    if (!key || seen.has(key) || excluded.has(key)) continue;
+    seen.add(key);
+    merged.push(name);
+    if (merged.length >= 6) break;
+  }
+  const suggestions = merged;
 
   const submit = async (cityName) => {
     if (submitting) return;
@@ -58,24 +92,40 @@ export default function AddDayTripModal({
           </p>
         </div>
 
-        {suggestions.length > 0 && (
+        {(loadingLive || suggestions.length > 0) && (
           <div className="space-y-2">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
               {pt ? "Sugestões populares" : "Popular picks"}
+              {loadingLive && (
+                <span className="text-gray-400 normal-case font-normal">
+                  {pt ? "buscando..." : "searching..."}
+                </span>
+              )}
             </p>
-            <div className="grid grid-cols-1 gap-2">
-              {suggestions.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => submit(s)}
-                  className="text-left bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 border border-emerald-200 rounded-lg px-4 py-2.5 text-sm font-medium text-emerald-800 transition-colors"
-                >
-                  🚶 {s}
-                </button>
-              ))}
-            </div>
+            {loadingLive && suggestions.length === 0 ? (
+              <div className="space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className="h-10 bg-emerald-50 border border-emerald-100 rounded-lg animate-pulse"
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-2">
+                {suggestions.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => submit(s)}
+                    className="text-left bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 border border-emerald-200 rounded-lg px-4 py-2.5 text-sm font-medium text-emerald-800 transition-colors"
+                  >
+                    🚶 {s}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

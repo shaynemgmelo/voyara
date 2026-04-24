@@ -32,6 +32,7 @@ from app.services.orchestrator import (
     refine_itinerary,
     optimize_trip_routing,
     enrich_trip_with_experiences,
+    suggest_day_trips,
     FlexibleResearchUnavailable,
 )
 
@@ -389,6 +390,30 @@ async def handle_resume_processing(
         status="accepted",
         message=f"Building itinerary for trip {trip_id}",
     )
+
+
+@router.get("/day-trip-suggestions")
+async def handle_day_trip_suggestions(city: str, country: str = ""):
+    """Return curated-via-Tavily day-trip destinations near `city`.
+
+    Used by the AddDayTripModal on the trip detail page. Cached server-
+    side for 24h per (city, country). On any failure (Tavily unavailable,
+    Haiku error, empty results) returns an empty list — the frontend
+    falls back to its hardcoded curated list.
+    """
+    if not city or not city.strip():
+        raise HTTPException(400, "city query param required")
+    try:
+        suggestions = await suggest_day_trips(city.strip(), country.strip())
+    except Exception:
+        logger.exception("[day-trip-suggestions] unexpected failure")
+        suggestions = []
+    return {
+        "city": city.strip(),
+        "country": country.strip(),
+        "suggestions": suggestions,
+        "source": "tavily" if suggestions else "unavailable",
+    }
 
 
 @router.post("/refine-itinerary", response_model=ProcessLinkResponse, status_code=202)
