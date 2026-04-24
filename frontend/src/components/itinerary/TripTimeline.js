@@ -228,16 +228,34 @@ function ItemCard({
             {item.end_time ? ` – ${item.end_time.slice(0, 5)}` : ""}
           </div>
         )}
-        {item.address && (
-          <div className="text-sm text-gray-600 mb-2 line-clamp-1">
-            📍 {item.address}
-          </div>
-        )}
-        {item.rating ? (
-          <div className="text-sm text-amber-600 font-semibold">
-            ★ {Number(item.rating).toFixed(1)}
-          </div>
-        ) : null}
+        {(() => {
+          const isExp =
+            (Array.isArray(item.vibe_tags) && item.vibe_tags.includes("experiencia"))
+            || item.activity_model === "guided_excursion"
+            || item.visit_mode === "operator_based";
+          if (isExp) {
+            const where = item.city || item.primary_region || "";
+            return (
+              <div className="text-sm text-violet-600 mb-2 line-clamp-1">
+                💡 {where ? `Sugestão de experiência em ${where}` : "Sugestão de experiência"}
+              </div>
+            );
+          }
+          return (
+            <>
+              {item.address && (
+                <div className="text-sm text-gray-600 mb-2 line-clamp-1">
+                  📍 {item.address}
+                </div>
+              )}
+              {item.rating ? (
+                <div className="text-sm text-amber-600 font-semibold">
+                  ★ {Number(item.rating).toFixed(1)}
+                </div>
+              ) : null}
+            </>
+          );
+        })()}
         {item.notes && (
           <p className="text-sm text-gray-600 mt-3 line-clamp-3">{item.notes}</p>
         )}

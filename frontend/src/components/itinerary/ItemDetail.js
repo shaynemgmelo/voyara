@@ -213,13 +213,33 @@ export default function ItemDetail({ item, tripId, onClose, onUpdate, onDelete, 
           </div>
         )}
 
-        {/* Address */}
-        {item.address && (
-          <div>
-            <h3 className="text-xs font-semibold text-gray-500 uppercase mb-1">{t("itemDetail.address")}</h3>
-            <p className="text-gray-700 text-sm">{item.address}</p>
-          </div>
-        )}
+        {/* Address — suppressed for experience items so the user doesn't
+            read a tour-operator street address as "go to this agency". */}
+        {(() => {
+          const isExp =
+            (Array.isArray(item.vibe_tags) && item.vibe_tags.includes("experiencia"))
+            || item.activity_model === "guided_excursion"
+            || item.visit_mode === "operator_based";
+          if (isExp) {
+            const where = item.city || item.primary_region || "";
+            return (
+              <div>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase mb-1">
+                  {t("itemDetail.experienceLabel") || "Tipo"}
+                </h3>
+                <p className="text-violet-700 text-sm">
+                  💡 {where ? `Sugestão de experiência em ${where}` : "Sugestão de experiência"}
+                </p>
+              </div>
+            );
+          }
+          return item.address ? (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase mb-1">{t("itemDetail.address")}</h3>
+              <p className="text-gray-700 text-sm">{item.address}</p>
+            </div>
+          ) : null;
+        })()}
 
         {/* Operating Hours */}
         {item.operating_hours && Object.keys(item.operating_hours).length > 0 && (

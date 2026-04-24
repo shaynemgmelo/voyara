@@ -2117,6 +2117,12 @@ def _tighten_day_clusters(
             for p in geocoded:
                 if p.get("_review_flagged"):
                     continue
+                # Items already snapped to a thematic day (e.g. Tigre boat
+                # tour pinned to the Tigre day) are sacred — never move
+                # them based on geo even if their agency address sits far
+                # from the day's centroid.
+                if p.get("_city_locked"):
+                    continue
                 try:
                     dist = _haversine_km(
                         c_lat, c_lng, float(p["latitude"]), float(p["longitude"])
@@ -2823,6 +2829,21 @@ async def _validate_and_create_items(
         vmode = place.get("visit_mode")
         if vmode not in VALID_VMODES:
             vmode = None
+
+        # Tag any guided_excursion / operator_based item as an "experiencia"
+        # so the frontend hides the specific agency address / rating and
+        # renders it as a sugestão card. The product rule: "passeio de
+        # barco" should never read like a bookable agency the user is
+        # being directed to — it's a suggestion of WHAT to do.
+        vibe_tags = list(place.get("vibe_tags") or [])
+        is_experience_like = (
+            amodel == "guided_excursion"
+            or vmode == "operator_based"
+            or _looks_like_experience(place.get("name") or "")
+        )
+        if is_experience_like and "experiencia" not in vibe_tags:
+            vibe_tags.append("experiencia")
+            place["vibe_tags"] = vibe_tags
 
         item_data = {
             "name": place.get("name", "Unknown"),
@@ -3734,6 +3755,12 @@ def _optimize_day_proximity(
             # NEVER move link-sourced items even between flexible days —
             # their day came from the video.
             if item.get("source") == "link" or item.get("origin") == "extracted_from_video":
+                i += 1
+                continue
+            # Thematically-snapped experiences (Tigre boat tour pinned to
+            # the Tigre day) must stay where the snap put them, regardless
+            # of how their agency address geocodes.
+            if item.get("_city_locked"):
                 i += 1
                 continue
 
@@ -7483,6 +7510,128 @@ def _looks_like_experience(name: str) -> bool:
     return any(k in low for k in _EXPERIENCE_KEYWORDS_PT)
 
 
+# Stopwords excluded when extracting destination tokens from item names.
+# Anything that would falsely "match" between two unrelated items.
+_TOKEN_STOPWORDS = {
+    "passeio", "tour", "tours", "show", "shows", "aula", "aulas",
+    "barco", "lancha", "delta", "city", "tickets", "ticket", "entrada",
+    "the", "and", "for", "from", "with", "via", "by",
+    "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas",
+    "a", "o", "os", "as", "um", "uma", "uns", "umas",
+    "para", "pra", "pelo", "pela", "ao", "à", "às", "aos",
+    "y", "el", "la", "los", "las", "del", "una", "una",
+    "tradicional", "típico", "tipico", "guiado", "guiada", "tradicional",
+    "experiencia", "experiência", "vivencia", "vivência",
+    "ferry", "balsa", "boat", "river", "rio", "delta",
+    "walking", "bike", "wine", "food",
+}
+
+
+def _extract_destination_tokens(name: str) -> set[str]:
+    """Pull capitalized / proper-noun tokens out of an item name. Used to
+    detect that 'Passeio de barco em Tigre' and 'Tigre Delta' share the
+    same theme. Lowercased for case-insensitive comparison; stopwords
+    stripped so 'passeio'/'tour'/'delta' don't cause false matches.
+    """
+    if not name:
+        return set()
+    import re
+    raw = re.findall(r"[A-Za-zÁ-ÿ]+", name)
+    out: set[str] = set()
+    for tok in raw:
+        low = tok.lower()
+        if len(low) < 4:
+            continue
+        if low in _TOKEN_STOPWORDS:
+            continue
+        out.add(low)
+    return out
+
+
+def _snap_experience_items_to_thematic_day(
+    place_list: list[dict],
+    day_rigidity: dict[int, str] | None = None,
+) -> list[dict]:
+    """When an experience item ('passeio de barco em Tigre', 'food tour in
+    Versailles') lands on day X but another day Y has 2+ items naming the
+    same destination, move the experience to day Y.
+
+    Catches the case where Sonnet correctly identified a day-trip activity
+    but split it from the day-trip itself — e.g. 'Tigre Delta' on day 5
+    + 'Passeio de barco no Tigre' on day 7. The boat tour belongs with
+    the rest of Tigre.
+
+    Locked days are sacred — never moves an item OUT of a locked day, and
+    never INTO one (the user / video assigned that day's content).
+    """
+    if not place_list:
+        return place_list
+    day_rigidity = day_rigidity or {}
+
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(p)
+
+    moves = 0
+    for item in place_list:
+        name = item.get("name") or ""
+        current_day = item.get("day")
+        if not isinstance(current_day, int):
+            continue
+        if not _looks_like_experience(name):
+            continue
+        if day_rigidity.get(current_day) == "locked":
+            continue
+
+        item_tokens = _extract_destination_tokens(name)
+        if not item_tokens:
+            continue
+
+        # Count token matches on every OTHER day. Threshold = 2 matching
+        # items required to consider the day "thematically about" this
+        # destination. 1 match is too noisy (could be coincidence).
+        best_day = current_day
+        best_score = 0
+        for other_day, others in by_day.items():
+            if other_day == current_day:
+                continue
+            if day_rigidity.get(other_day) == "locked":
+                continue
+            score = 0
+            for o in others:
+                if o is item:
+                    continue
+                o_tokens = _extract_destination_tokens(o.get("name") or "")
+                if item_tokens & o_tokens:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_day = other_day
+
+        if best_score >= 2 and best_day != current_day:
+            logger.info(
+                "[snap-thematic] Moving experience %r from day %d → day %d "
+                "(matched %d siblings)",
+                name, current_day, best_day, best_score,
+            )
+            item["day"] = best_day
+            item["_city_locked"] = True
+            # Also surface the experience badge to the frontend even if
+            # Sonnet didn't tag it explicitly. The card will then suppress
+            # the agency address/rating and render as a "Sugestão" card.
+            vibes = list(item.get("vibe_tags") or [])
+            if "experiencia" not in vibes:
+                vibes.append("experiencia")
+                item["vibe_tags"] = vibes
+            moves += 1
+
+    if moves:
+        logger.info("[snap-thematic] Snapped %d experience item(s) to thematic days", moves)
+    return place_list
+
+
 def _build_place_list_from_canonical_days(
     canonical_days: dict[int, dict], day_plans: list[dict],
 ) -> list[dict]:
@@ -7676,6 +7825,14 @@ async def _build_itinerary_eco(
         # (e.g. "Cristo Redentor" == "Christ the Redeemer", or two items with
         # different names but coordinates within 150m).
         place_list = _semantic_deduplicate(place_list)
+
+        # Phase 3.5 — thematic snap. If Sonnet placed 'Passeio de barco em
+        # Tigre' on day 7 but day 5 already has Tigre Delta + Mercado de
+        # Frutos, the boat tour belongs on day 5. Runs BEFORE rebalance
+        # so the rebalancer sees the corrected layout.
+        place_list = _snap_experience_items_to_thematic_day(
+            place_list, day_rigidity=day_rigidity,
+        )
 
         place_list = _rebalance_days(place_list, len(day_plans), day_rigidity=day_rigidity)
 

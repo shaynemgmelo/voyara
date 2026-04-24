@@ -35,6 +35,15 @@ export default function ItineraryItem({
 
   const catInfo = CATEGORY_LABELS[item.category] || CATEGORY_LABELS.other;
 
+  // Items that are sugestões de experiência (boat tour, walking tour,
+  // operator-based activity) shouldn't render like a bookable agency.
+  // Suppress the agency rating + a direct address; the user reads those
+  // as "go to THIS specific agency" rather than "do this kind of thing".
+  const isExperience =
+    (Array.isArray(item.vibe_tags) && item.vibe_tags.includes("experiencia"))
+    || item.activity_model === "guided_excursion"
+    || item.visit_mode === "operator_based";
+
   const handleSwapClick = async (e) => {
     e.stopPropagation();
     if (swapSuggestion) {
@@ -154,7 +163,7 @@ export default function ItineraryItem({
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${catInfo.color}`}>
                 {pt ? catInfo.pt : catInfo.en}
               </span>
-              {item.google_rating && (
+              {item.google_rating && !isExperience && (
                 <span className="flex items-center gap-0.5 text-[11px] text-gray-500">
                   <span className="text-yellow-500">★</span>
                   <span className="font-medium">{item.google_rating}</span>
