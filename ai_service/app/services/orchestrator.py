@@ -1703,26 +1703,58 @@ def _enforce_day_trip_isolation(place_list: list[dict]) -> list[dict]:
             for i in items:
                 keep_ids.add(id(i))
             continue
-        # This is a day-trip day. Figure out the destination city (the
-        # strongest signal on the day-trip item itself).
+        # This is a day-trip day. Figure out the destination city.
+        # PRIORITY ORDER MATTERS: parse the address FIRST, because
+        # _validate_and_create_items propagates the day_plan's base city
+        # onto every place via city_by_day (so a Versailles day-trip on a
+        # Paris-anchored day_plan ends up with item.city="Paris", which
+        # would falsely "match" every other Paris item below and the
+        # isolation would drop nothing).
         dt_city = ""
         for dt in day_trip_items:
-            candidate = (
-                (dt.get("city") or "").strip()
-                or (dt.get("primary_region") or "").strip()
-            )
-            if candidate:
-                dt_city = candidate.lower()
-                break
-        # Also parse from address as last resort.
+            addr = (dt.get("address") or "").strip()
+            if not addr:
+                continue
+            # Format from Google Places: "Street, 78000 Versailles, France"
+            parts = [p.strip() for p in addr.split(",") if p.strip()]
+            if len(parts) >= 2:
+                # Second-to-last segment usually holds "<postal> City".
+                candidate = parts[-2]
+                tokens = candidate.split(" ", 1)
+                # Strip leading postal-code numerics.
+                if tokens and tokens[0].replace("-", "").isdigit() and len(tokens) > 1:
+                    candidate = tokens[1]
+                candidate = candidate.strip().lower()
+                if candidate:
+                    dt_city = candidate
+                    break
+            # Single-segment fallback (no commas) — last 5+ char word.
+            if not dt_city:
+                words = [w.lower() for w in addr.split() if len(w) >= 4]
+                if words:
+                    dt_city = words[-1]
+                    break
+
+        # Last-resort fallbacks: known day-trip tokens, then item.city.
+        # item.city is LAST because of the city_by_day propagation issue.
         if not dt_city:
             for dt in day_trip_items:
-                addr = (dt.get("address") or "").lower()
-                for token in ("tigre", "versailles", "versalhes", "sintra", "colonia"):
-                    if token in addr:
+                addr_low = (dt.get("address") or "").lower()
+                for token in ("tigre", "versailles", "versalhes", "sintra",
+                              "colonia", "ayutthaya", "giverny", "fontainebleau"):
+                    if token in addr_low:
                         dt_city = token
                         break
                 if dt_city:
+                    break
+        if not dt_city:
+            for dt in day_trip_items:
+                candidate = (
+                    (dt.get("city") or "").strip()
+                    or (dt.get("primary_region") or "").strip()
+                )
+                if candidate:
+                    dt_city = candidate.lower()
                     break
 
         for i in items:
@@ -3756,6 +3788,20 @@ def _optimize_day_proximity(
         if day_rigidity.get(d) == "locked":
             continue
         items = by_day[d]
+        # Skip cross-day swaps for day-trip days — Versailles 17km from
+        # Paris would always look like an outlier vs the urban centroid,
+        # and we'd merrily swap it to a Paris day, defeating the
+        # day-trip. _enforce_day_trip_isolation owns these days.
+        if any(
+            (it.get("activity_model") == "day_trip")
+            or (it.get("item_role") == "day_trip_destination")
+            or (int(it.get("duration_minutes") or 0) >= 300)
+            for it in items
+        ):
+            continue
+        # Also skip days that are the destination of a day-trip from
+        # ANOTHER day (so we don't pull Paris items INTO a Versailles
+        # day either).
         i = 0
         while i < len(items):
             item = items[i]
@@ -3764,6 +3810,8 @@ def _optimize_day_proximity(
             if not lat or not lng:
                 i += 1
                 continue
+            # Skip target days that have a day-trip too.
+            # (handled by per-target check below — see best_day loop)
             # NEVER move link-sourced items even between flexible days —
             # their day came from the video.
             if item.get("source") == "link" or item.get("origin") == "extracted_from_video":
@@ -3778,7 +3826,9 @@ def _optimize_day_proximity(
 
             dist_to_own = _haversine_km(centroids[d][0], centroids[d][1], float(lat), float(lng))
 
-            # Find best alternative day (not locked, has room).
+            # Find best alternative day (not locked, not a day-trip
+            # day, has room). Day-trip days are sacred — never pull
+            # urban items into a Versailles/Tigre day.
             best_day = d
             best_dist = dist_to_own
             for other_d, other_c in centroids.items():
@@ -3786,7 +3836,15 @@ def _optimize_day_proximity(
                     continue
                 if day_rigidity.get(other_d) == "locked":
                     continue
-                if len(by_day.get(other_d, [])) >= 6:
+                other_items = by_day.get(other_d, [])
+                if len(other_items) >= 6:
+                    continue
+                if any(
+                    (it.get("activity_model") == "day_trip")
+                    or (it.get("item_role") == "day_trip_destination")
+                    or (int(it.get("duration_minutes") or 0) >= 300)
+                    for it in other_items
+                ):
                     continue
                 dist_other = _haversine_km(
                     other_c[0], other_c[1], float(lat), float(lng),
