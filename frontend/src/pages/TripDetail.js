@@ -21,7 +21,7 @@ import AskDestinationModal from "../components/modals/AskDestinationModal";
 import CityDistributionModal from "../components/modals/CityDistributionModal";
 import AddDayTripModal from "../components/modals/AddDayTripModal";
 import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
-import { updateTrip, triggerBuild, confirmCityDistribution } from "../api/trips";
+import { updateTrip, triggerBuild, confirmCityDistribution, addDayTrip } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -287,17 +287,23 @@ export default function TripDetail() {
     }
   };
 
-  // Day-trip add/remove via the city pills bar. Both fire a refine call —
-  // orchestrator.refine_itinerary detects day-trip phrasing in feedback
-  // and runs in surgical mode (replace ONE flexible day with the trip,
-  // isolate other-city items). Polling reflects the result.
+  // Day-trip add via /add-day-trip — direct, deterministic, no Sonnet
+  // refine. Modes:
+  //   - extend:  bumps trip.num_days +1, drops the new day-trip on the
+  //              new last day. Original days untouched.
+  //   - replace: clears items on a specific day, drops the day-trip
+  //              there. Refuses if the day has video-anchored items
+  //              (modal surfaces the error so the user can drag/keep
+  //              them manually first).
   const mainCityFromProfile = trip?.traveler_profile?.main_destination?.city || "";
-  const handleAddDayTrip = async (cityName) => {
+  const mainCountryFromProfile = trip?.traveler_profile?.main_destination?.country || "";
+  const handleAddDayTrip = async (cityName, options = {}) => {
     if (!cityName) return;
-    const feedback = lang === "pt-BR"
-      ? `Quero um dia inteiro em ${cityName} como bate-volta a partir de ${mainCityFromProfile || "minha cidade base"}.`
-      : `I want a full-day day-trip to ${cityName} from ${mainCityFromProfile || "my base city"}.`;
-    await refineItinerary(feedback, "trip");
+    await addDayTrip(trip.id, cityName, {
+      country: mainCountryFromProfile,
+      mode: options.mode || "extend",
+      targetDayNumber: options.targetDayNumber,
+    });
     await fetchTrip();
   };
   const handleRemoveDayTrip = async (cityName) => {
@@ -375,7 +381,7 @@ export default function TripDetail() {
       {showAddDayTrip && (
         <AddDayTripModal
           mainCity={mainCityFromProfile}
-          mainCountry={trip?.traveler_profile?.main_destination?.country || ""}
+          mainCountry={mainCountryFromProfile}
           excludeCities={[
             mainCityFromProfile,
             ...new Set(
@@ -384,6 +390,8 @@ export default function TripDetail() {
                 .filter(Boolean),
             ),
           ]}
+          dayPlans={trip?.day_plans || []}
+          numDays={trip?.num_days || (trip?.day_plans?.length ?? 0)}
           onSubmit={handleAddDayTrip}
           onClose={() => setShowAddDayTrip(false)}
         />

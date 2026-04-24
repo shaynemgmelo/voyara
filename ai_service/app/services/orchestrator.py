@@ -7010,6 +7010,295 @@ async def suggest_day_trips(
     return out
 
 
+async def _generate_day_trip_items(
+    destination: str,
+    base_city: str,
+    country: str = "",
+    profile: dict | None = None,
+    cost: CostTracker | None = None,
+) -> list[dict]:
+    """Build 3-5 itinerary_items for a full-day day-trip to `destination`.
+
+    Output is a structured list of items the caller can geo-enrich via
+    Google Places + insert into a day_plan directly. NO Sonnet refine —
+    cheap Haiku call, deterministic shape.
+
+    First item is the day-trip destination itself (activity_model=day_trip,
+    item_role=day_trip_destination, duration ~240min). Subsequent items
+    are an anchored lunch + 1-2 nearby experiences in the same destination.
+    """
+    if not destination:
+        return []
+    cost = cost or CostTracker(link_id=0)
+    profile = profile or {}
+    interests = profile.get("interests") or []
+    interests_str = ", ".join(str(i) for i in interests[:5]) if interests else "varied"
+
+    prompt = (
+        f"You are planning a one-day day-trip to {destination}"
+        f"{f', {country}' if country else ''} from {base_city}.\n\n"
+        f"Traveler interests: {interests_str}\n\n"
+        f"Build 4 itinerary items for the day. Output JSON ONLY:\n"
+        f"[\n"
+        f'  {{"name": "...", "category": "attraction|activity|restaurant", '
+        f'"time_slot": "HH:MM", "duration_minutes": <int>, '
+        f'"description": "1 short sentence in pt-BR", '
+        f'"notes": "1 practical tip in pt-BR", '
+        f'"vibe_tags": ["tag"], "activity_model": "day_trip|anchored_experience|direct_place", '
+        f'"item_role": "day_trip_destination|attraction|restaurant|experience_activity"}}\n'
+        f"]\n\n"
+        f"Rules:\n"
+        f"- Item 1: the main destination itself ({destination}), the iconic\n"
+        f"  attraction/landmark there. activity_model='day_trip',\n"
+        f"  item_role='day_trip_destination', duration_minutes=240,\n"
+        f"  time_slot='10:00', category='attraction'.\n"
+        f"- Item 2: lunch IN {destination} (real local restaurant if you\n"
+        f"  know one, or a representative venue type). category='restaurant',\n"
+        f"  time_slot='13:00', duration_minutes=75.\n"
+        f"- Items 3-4: 1-2 more anchored experiences in {destination} "
+        f"(secondary attraction, gardens, viewpoint). All time_slots after\n"
+        f"  14:30. Each duration ~60-120min.\n"
+        f"- ALL items must be IN {destination}, not in {base_city}.\n"
+        f"- Each name must be a SPECIFIC real place (e.g. 'Palace of\n"
+        f"  Versailles', 'Hall of Mirrors'), not generic ('local\n"
+        f"  restaurant').\n"
+        f"- Descriptions and notes ALWAYS in pt-BR with proper accents.\n"
+        f"- Return JSON only, no prose, no markdown fences."
+    )
+
+    try:
+        client = anthropic.Anthropic(
+            api_key=settings.anthropic_api_key, max_retries=1,
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=20.0,
+                )
+            ),
+            timeout=25.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except Exception as e:
+        logger.warning("[day-trip-gen] Haiku failed for %r: %s", destination, e)
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.warning(
+            "[day-trip-gen] non-list response for %r: %r",
+            destination, raw[:120],
+        )
+        return []
+
+    out: list[dict] = []
+    for i, item in enumerate(parsed[:5]):
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        # Basic sanitization + defaults so persistence never fails.
+        clean = {
+            "name": str(item["name"])[:120],
+            "category": str(item.get("category") or "attraction")[:30],
+            "time_slot": str(item.get("time_slot") or "10:00")[:5],
+            "duration_minutes": int(item.get("duration_minutes") or 90),
+            "description": str(item.get("description") or "")[:500],
+            "notes": str(item.get("notes") or "")[:300],
+            "vibe_tags": [str(t)[:30] for t in (item.get("vibe_tags") or [])][:4],
+            "activity_model": str(item.get("activity_model") or "direct_place"),
+            "item_role": str(item.get("item_role") or "attraction"),
+            "source": "ai",
+            "origin": "ai_suggested",
+            "position": i,
+        }
+        # First item must always be the day-trip destination.
+        if i == 0:
+            clean["activity_model"] = "day_trip"
+            clean["item_role"] = "day_trip_destination"
+            if clean["duration_minutes"] < 240:
+                clean["duration_minutes"] = 240
+        out.append(clean)
+
+    logger.info(
+        "[day-trip-gen] %r in %s → %d items",
+        destination, base_city or country or "?", len(out),
+    )
+    return out
+
+
+async def add_day_trip(
+    trip_id: int,
+    destination: str,
+    country: str = "",
+    *,
+    mode: str = "extend",
+    target_day_number: int | None = None,
+) -> dict:
+    """Programmatically add a day-trip to the trip WITHOUT a Sonnet refine.
+
+    Modes:
+    - "replace": clear all items on `target_day_number` and insert the
+      day-trip there. REFUSES to delete origin=extracted_from_video items
+      (returns error so the user can manually move/keep them).
+    - "extend": bump trip.num_days +1, create a new day_plan at the end,
+      put the day-trip there. Original days stay untouched.
+
+    Uses Haiku + Google Places — no full-trip regeneration, no rate-limit
+    risk, no chance of nuking video-anchored items elsewhere in the trip.
+    """
+    from app.google_places.client import GooglePlacesClient
+    rails = RailsClient()
+    cost = CostTracker(link_id=0)
+
+    trip = await rails.get_trip(trip_id)
+    if not trip:
+        return {"error": "Trip not found"}
+
+    profile = trip.get("traveler_profile") or {}
+    base_city = (profile.get("main_destination") or {}).get("city") \
+        or (profile.get("cities_detected") or [None])[0] or ""
+    if not country:
+        country = (profile.get("country_detected") or "")
+
+    # 1) Generate items for the day-trip via Haiku (cheap, structured).
+    items = await _generate_day_trip_items(
+        destination=destination,
+        base_city=base_city,
+        country=country,
+        profile=profile,
+        cost=cost,
+    )
+    if not items:
+        return {"error": f"Could not generate day-trip items for {destination}"}
+
+    # 2) Geo-enrich each item with Google Places (lat/lng/place_id/etc).
+    places = GooglePlacesClient()
+    geo_query_city = destination + (f", {country}" if country else "")
+    enriched: list[dict] = []
+    for cand in items:
+        try:
+            results = await places.search(f"{cand['name']} {geo_query_city}")
+            if not results:
+                continue
+            top = results[0]
+            details = await places.get_details(top.get("place_id"))
+            if not details:
+                continue
+            cand["latitude"] = details.get("latitude")
+            cand["longitude"] = details.get("longitude")
+            cand["address"] = details.get("address")
+            cand["google_place_id"] = details.get("place_id")
+            cand["google_rating"] = details.get("rating")
+            cand["google_reviews_count"] = details.get("reviews_count")
+            cand["operating_hours"] = details.get("operating_hours") or {}
+            cand["phone"] = details.get("phone")
+            cand["website"] = details.get("website")
+            cand["photos"] = details.get("photos") or []
+            if cand.get("latitude") and cand.get("longitude"):
+                enriched.append(cand)
+        except Exception as e:
+            logger.warning("[add-day-trip] geo lookup failed for %r: %s", cand.get("name"), e)
+    if not enriched:
+        return {"error": f"Could not geocode day-trip items for {destination}"}
+
+    # 3) Decide where the items go. Two modes:
+    if mode == "extend":
+        current_days = int(trip.get("num_days") or 0)
+        new_day_number = current_days + 1
+        await rails.update_trip(trip_id, {"num_days": new_day_number})
+        try:
+            new_dp = await rails.create_day_plan(
+                trip_id,
+                {
+                    "day_number": new_day_number,
+                    "city": destination,
+                    "day_type": "day_trip",
+                    "origin": "user_edited",
+                    "rigidity": "flexible",
+                },
+            )
+            target_dp_id = new_dp.get("id") or new_dp.get("day_plan", {}).get("id")
+        except Exception as e:
+            return {"error": f"Failed to create day_plan: {e}"}
+        if not target_dp_id:
+            return {"error": "Could not resolve new day_plan id"}
+        affected_day_number = new_day_number
+    elif mode == "replace":
+        if not isinstance(target_day_number, int):
+            return {"error": "target_day_number is required for replace mode"}
+        # Resolve the day_plan id by day_number.
+        all_dps = await rails.get_day_plans(trip_id)
+        target_dp = next(
+            (dp for dp in all_dps if int(dp.get("day_number") or 0) == target_day_number),
+            None,
+        )
+        if not target_dp:
+            return {"error": f"Day {target_day_number} not found"}
+        target_dp_id = target_dp["id"]
+        # SACRED RULE: refuse if any item on this day is video-anchored.
+        existing = target_dp.get("itinerary_items") or []
+        locked = [
+            it for it in existing
+            if (it.get("origin") == "extracted_from_video")
+            or (it.get("source") == "link")
+        ]
+        if locked:
+            return {
+                "error": "day_has_locked_items",
+                "locked_count": len(locked),
+                "locked_names": [it.get("name") for it in locked][:8],
+                "message": (
+                    f"O dia {target_day_number} tem {len(locked)} item(s) "
+                    f"do vídeo. Apague-os manualmente ou arraste pra outro "
+                    f"dia antes de substituir."
+                ),
+            }
+        # Delete every existing item on the target day.
+        for it in existing:
+            try:
+                await rails.delete_itinerary_item(trip_id, target_dp_id, it["id"])
+            except Exception as e:
+                logger.warning(
+                    "[add-day-trip] delete failed for item %s: %s",
+                    it.get("id"), e,
+                )
+        await rails.update_day_plan(
+            trip_id, target_dp_id,
+            {"city": destination, "day_type": "day_trip"},
+        )
+        affected_day_number = target_day_number
+    else:
+        return {"error": f"Invalid mode: {mode}"}
+
+    # 4) Insert the day-trip items.
+    created = 0
+    for cand in enriched:
+        try:
+            await rails.create_itinerary_item(trip_id, target_dp_id, cand)
+            created += 1
+        except Exception as e:
+            logger.warning(
+                "[add-day-trip] insert failed for %r: %s", cand.get("name"), e,
+            )
+
+    logger.info(
+        "[add-day-trip] mode=%s destination=%r day=%d created=%d (cost=%s)",
+        mode, destination, affected_day_number, created, cost.summary(),
+    )
+
+    return {
+        "status": "ok",
+        "mode": mode,
+        "day_number": affected_day_number,
+        "day_plan_id": target_dp_id,
+        "items_created": created,
+        "cost": cost.summary(),
+    }
+
+
 async def _research_itinerary_patterns(
     country: str,
     cities: list[str],

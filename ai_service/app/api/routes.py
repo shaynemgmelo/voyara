@@ -33,6 +33,7 @@ from app.services.orchestrator import (
     optimize_trip_routing,
     enrich_trip_with_experiences,
     suggest_day_trips,
+    add_day_trip,
     FlexibleResearchUnavailable,
 )
 
@@ -390,6 +391,55 @@ async def handle_resume_processing(
         status="accepted",
         message=f"Building itinerary for trip {trip_id}",
     )
+
+
+@router.post("/add-day-trip")
+async def handle_add_day_trip(request: dict):
+    """Programmatically add a day-trip without invoking refine.
+
+    Body:
+      {
+        "trip_id": int,
+        "destination": str,
+        "country": str (optional),
+        "mode": "replace" | "extend",
+        "target_day_number": int (required for replace mode)
+      }
+
+    Returns 200 on success or 400 with an error dict — most importantly
+    `error: "day_has_locked_items"` when the user tried to replace a day
+    that contains video-anchored items (we surface that to the UI so the
+    user can move/keep them manually).
+    """
+    trip_id = request.get("trip_id")
+    destination = (request.get("destination") or "").strip()
+    country = (request.get("country") or "").strip()
+    mode = request.get("mode") or "extend"
+    target_day_number = request.get("target_day_number")
+    if not isinstance(trip_id, int) or not destination:
+        raise HTTPException(400, "trip_id (int) and destination (str) required")
+    if mode not in ("replace", "extend"):
+        raise HTTPException(400, f"mode must be 'replace' or 'extend' (got {mode!r})")
+    if mode == "replace" and not isinstance(target_day_number, int):
+        raise HTTPException(400, "target_day_number (int) required for mode=replace")
+    try:
+        result = await add_day_trip(
+            trip_id=trip_id,
+            destination=destination,
+            country=country,
+            mode=mode,
+            target_day_number=target_day_number,
+        )
+    except Exception:
+        logger.exception("[add-day-trip] unexpected failure")
+        raise HTTPException(500, "internal error adding day-trip")
+
+    if isinstance(result, dict) and result.get("error"):
+        # Surface user-actionable errors with 400; everything else 500.
+        if result["error"] == "day_has_locked_items":
+            raise HTTPException(409, detail=result)
+        raise HTTPException(400, detail=result)
+    return result
 
 
 @router.get("/day-trip-suggestions")

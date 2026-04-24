@@ -71,6 +71,15 @@ class RailsClient:
             json={"day_plan": data},
         )
 
+    async def create_day_plan(self, trip_id: int, data: dict) -> dict:
+        """Create a new day_plan. Used by add_day_trip(extend) when the
+        user wants to bump trip duration by 1 day for the new day-trip."""
+        return await self._request(
+            "POST",
+            f"/trips/{trip_id}/day_plans",
+            json={"day_plan": data},
+        )
+
     async def create_itinerary_item(
         self, trip_id: int, day_plan_id: int, item_data: dict
     ) -> dict:

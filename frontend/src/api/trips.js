@@ -63,6 +63,30 @@ export async function refineItinerary(tripId, feedback, scope = "trip", dayPlanI
   return resp.json();
 }
 
+// Programmatic day-trip add — replaces the refine path. mode="replace"
+// clears items on target_day_number and inserts the day-trip; mode=
+// "extend" bumps trip.num_days +1 and creates a new day. Backend uses
+// Haiku + Google Places only (no Sonnet refine), so it's fast and
+// won't trigger the "regenerate the whole trip" cascade.
+export async function addDayTrip(tripId, destination, options = {}) {
+  const { country = "", mode = "extend", targetDayNumber } = options;
+  const body = { trip_id: tripId, destination, country, mode };
+  if (mode === "replace") body.target_day_number = targetDayNumber;
+  const resp = await fetch(`${AI_URL}/add-day-trip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const err = new Error(data?.detail?.message || data?.detail?.error || "add-day-trip failed");
+    err.status = resp.status;
+    err.data = data?.detail || data;
+    throw err;
+  }
+  return data;
+}
+
 // Live day-trip suggestions for the AddDayTripModal. Backend hits Tavily
 // + extracts city names via Haiku, caches per (city, country) for 24h.
 // On any failure, returns {suggestions: [], source: "unavailable"} —
