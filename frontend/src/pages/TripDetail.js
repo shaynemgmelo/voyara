@@ -19,6 +19,7 @@ import ProcessingStatus, { detectPhase } from "../components/trips/ProcessingSta
 import GenerationProgressModal from "../components/modals/GenerationProgressModal";
 import AskDestinationModal from "../components/modals/AskDestinationModal";
 import CityDistributionModal from "../components/modals/CityDistributionModal";
+import AddDayTripModal from "../components/modals/AddDayTripModal";
 import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
 import { updateTrip, triggerBuild, confirmCityDistribution } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
@@ -86,6 +87,7 @@ export default function TripDetail() {
   const [activeTab, setActiveTab] = useState("itinerary");
   const [showPDFExport, setShowPDFExport] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showAddDayTrip, setShowAddDayTrip] = useState(false);
 
   // Build a fingerprint of all item IDs to detect changes (adds, deletes, reorders)
   const itemsFingerprint = useMemo(() => {
@@ -285,6 +287,34 @@ export default function TripDetail() {
     }
   };
 
+  // Day-trip add/remove via the city pills bar. Both fire a refine call —
+  // orchestrator.refine_itinerary detects day-trip phrasing in feedback
+  // and runs in surgical mode (replace ONE flexible day with the trip,
+  // isolate other-city items). Polling reflects the result.
+  const mainCityFromProfile = trip?.traveler_profile?.main_destination?.city || "";
+  const handleAddDayTrip = async (cityName) => {
+    if (!cityName) return;
+    const feedback = lang === "pt-BR"
+      ? `Quero um dia inteiro em ${cityName} como bate-volta a partir de ${mainCityFromProfile || "minha cidade base"}.`
+      : `I want a full-day day-trip to ${cityName} from ${mainCityFromProfile || "my base city"}.`;
+    await refineItinerary(feedback, "trip");
+    await fetchTrip();
+  };
+  const handleRemoveDayTrip = async (cityName) => {
+    if (!cityName) return;
+    const ok = window.confirm(
+      lang === "pt-BR"
+        ? `Remover o day-trip a ${cityName}? O dia vira flexível na cidade principal.`
+        : `Remove the day-trip to ${cityName}? That day becomes flexible in the main city.`,
+    );
+    if (!ok) return;
+    const feedback = lang === "pt-BR"
+      ? `Remova o day-trip a ${cityName} e troque por um dia flexível em ${mainCityFromProfile || "minha cidade base"}.`
+      : `Remove the day-trip to ${cityName} and replace it with a flexible day in ${mainCityFromProfile || "my base city"}.`;
+    await refineItinerary(feedback, "trip");
+    await fetchTrip();
+  };
+
   // Phase 5.5 — heavy pipeline phases open a full-screen progress modal
   // instead of a tiny inline pulse. Shared phase detection with
   // ProcessingStatus so extracting stays inline and the modal only covers
@@ -341,6 +371,21 @@ export default function TripDetail() {
       )}
       {needsDestination && (
         <AskDestinationModal onSubmit={handleDestinationSubmit} />
+      )}
+      {showAddDayTrip && (
+        <AddDayTripModal
+          mainCity={mainCityFromProfile}
+          excludeCities={[
+            mainCityFromProfile,
+            ...new Set(
+              (trip?.day_plans || [])
+                .map((dp) => dp.city)
+                .filter(Boolean),
+            ),
+          ]}
+          onSubmit={handleAddDayTrip}
+          onClose={() => setShowAddDayTrip(false)}
+        />
       )}
       {buildErrorMsg && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -497,11 +542,14 @@ export default function TripDetail() {
             }}
           />
 
-          {/* City tabs (only shown for multi-city trips) */}
+          {/* City pills bar — main city + day-trips with add/remove */}
           <CityTabs
             dayPlans={trip.day_plans || []}
             activeCity={activeCity}
             onCityChange={setActiveCity}
+            mainCity={mainCityFromProfile}
+            onAddDayTrip={() => setShowAddDayTrip(true)}
+            onRemoveDayTrip={handleRemoveDayTrip}
           />
 
           {/* View toggle. Routing + experiences used to live here as
