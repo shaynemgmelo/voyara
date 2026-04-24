@@ -8537,6 +8537,48 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
                         "removed %d non-matching item(s)",
                         dp.get("day_number"), len(dt_items), isolation_drops,
                     )
+                # Update the day_plan's city to the day-trip destination so
+                # the trip detail city pills bar shows it as a separate
+                # entry ("🚶 Versailles · 1d") instead of merging it into
+                # the base city's count.
+                #
+                # Priority: name → address segment → item.city. The name is
+                # the cleanest label for a day-trip destination ("Disneyland
+                # Paris", "Versailles") because item.city often inherits
+                # the base city ("Paris") from upstream city_by_day
+                # propagation, defeating the purpose of the separate pill.
+                dt_primary = dt_items[0]
+                target_city = (dt_primary.get("name") or "").strip()
+                if not target_city:
+                    addr = (dt_primary.get("address") or "").strip()
+                    if addr:
+                        # "Bd de Parc, 77700 Coupvray, France" → "Coupvray"
+                        parts = [p.strip() for p in addr.split(",") if p.strip()]
+                        if len(parts) >= 2:
+                            second_to_last = parts[-2]
+                            # Strip leading postal code if present
+                            tokens = second_to_last.split(" ", 1)
+                            if tokens and tokens[0].isdigit() and len(tokens) > 1:
+                                target_city = tokens[1]
+                            else:
+                                target_city = second_to_last
+                if not target_city:
+                    target_city = (dt_primary.get("city") or "").strip()
+                if target_city and target_city != (dp.get("city") or "").strip():
+                    try:
+                        await rails.update_day_plan(
+                            trip_id, dp["id"],
+                            {"city": target_city, "day_type": "day_trip"},
+                        )
+                        logger.info(
+                            "[refine-isolation] day %s city: %r → %r (day-trip)",
+                            dp.get("day_number"), dp.get("city"), target_city,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[refine-isolation] failed to update dp.city for day %s: %s",
+                            dp.get("day_number"), e,
+                        )
         except Exception as e:
             logger.warning("[refine-isolation] non-fatal failure: %s", e)
 
