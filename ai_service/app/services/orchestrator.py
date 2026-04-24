@@ -2742,6 +2742,22 @@ async def _validate_and_create_items(
     # that day are dropped (with a log so we can tune).
     validated = _enforce_day_trip_isolation(validated)
 
+    # EMPTY-DAY GUARD — the geo-cluster tightening + final dedup + day-trip
+    # isolation together can leave a flexible day with 0 items (e.g. day 4
+    # of a Buenos Aires trip lost Barrio Chino + Barco Humb to day 5 and
+    # 2 duplicates were collapsed). A real planner would NEVER hand back
+    # an empty day. Detect it here and re-fill with a Sonnet call —
+    # preferring a structured day-trip (Tigre, Versalhes, Sintra…) when
+    # the destination is well-known for them, otherwise a coherent
+    # neighborhood-themed day from the existing flex research snippets.
+    validated = await _fill_empty_days_after_cleanup(
+        validated,
+        day_plans=day_plans,
+        trip=trip,
+        cost=cost,
+        places=places,
+    )
+
     logger.info("[eco] Validated %d places, creating items", len(validated))
 
     # Create items in Rails (parallel for speed)
@@ -6233,6 +6249,195 @@ def _validate_and_repair_itinerary(
         logger.info("[validate] All validation rules passed cleanly")
 
     return place_list, report
+
+
+# ──────────────────────────────────────────────
+# STEP 2.9 — Fill empty days after geo + dedup cleanup
+# ──────────────────────────────────────────────
+
+async def _fill_empty_days_after_cleanup(
+    validated: list[dict],
+    day_plans: list[dict],
+    trip: dict,
+    cost: CostTracker,
+    places: GooglePlacesClient,
+) -> list[dict]:
+    """Detect days that ended up empty AFTER geo-cluster tightening +
+    final dedup + day-trip isolation, and fill them with a structured
+    Sonnet suggestion (preferring a day-trip when the destination is
+    well-known for one — Tigre for BsAs, Versailles for Paris, Sintra
+    for Lisbon, etc.). Each suggestion is enriched with a Google Places
+    lookup so the items have real lat/lng/place_id before reaching Rails.
+
+    Empty here means 0 items — we don't touch days with even 1 item
+    (those get a thin-days banner via the regular validator). Locked
+    days are skipped.
+
+    Fail-open: if the Sonnet call or Google Places lookup fails, we
+    return the validated list unchanged. The user sees an empty day
+    with a banner rather than the build aborting.
+    """
+    by_day: dict[int, list[dict]] = {}
+    for item in validated:
+        d = item.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(item)
+
+    locked_days = {
+        dp.get("day_number") for dp in day_plans
+        if (dp.get("rigidity") or "").lower() == "locked"
+    }
+    empty_days = [
+        dp.get("day_number") for dp in day_plans
+        if dp.get("day_number")
+        and dp.get("day_number") not in locked_days
+        and not by_day.get(dp.get("day_number"))
+    ]
+    if not empty_days:
+        return validated
+
+    profile = trip.get("traveler_profile") or {}
+    destination = trip.get("destination") or ""
+    country = profile.get("country_detected") or ""
+    cities = profile.get("cities_detected") or []
+    base_city = cities[0] if cities else (destination.split(",")[0].strip() if destination else "")
+    interests = ", ".join((profile.get("interests") or [])[:5])
+
+    # Names already in the itinerary — Sonnet must NOT duplicate them.
+    existing_names = sorted({
+        (it.get("name") or "").strip() for it in validated if it.get("name")
+    })
+
+    logger.warning(
+        "[empty-day-fill] %d empty day(s) after cleanup: %s — calling Sonnet",
+        len(empty_days), empty_days,
+    )
+
+    prompt = f"""You are filling EMPTY days in a travel itinerary. The build pipeline ran and these specific days came out with zero activities. You must propose a coherent, structured day for each — NOT a random list.
+
+Trip context:
+  Destination: {destination}
+  Country: {country}
+  Base city: {base_city}
+  Traveler interests: {interests}
+
+Empty days to fill: {empty_days}
+
+Already-scheduled places (DO NOT duplicate ANY of these):
+{chr(10).join(f"  - {n}" for n in existing_names[:40])}
+
+Rules for each empty day:
+1. Pick ONE coherent theme. Either:
+   (a) A structured DAY-TRIP from {base_city or 'the base city'} — e.g. Tigre Delta + Puerto de Frutos for BsAs, Versailles full day for Paris, Sintra+Cabo da Roca for Lisbon. The day-trip destination becomes 1 main item with duration_minutes>=300 and item_role="day_trip_destination". Include 1-2 anchored experiences IN that destination city (lunch, viewpoint, attraction).
+   (b) A NEIGHBORHOOD-themed day in {base_city} — pick a real bairro NOT already heavily used (look at the existing list above). 4-5 items in walking distance: 2-3 attractions + 1 restaurant + 1 cafe/viewpoint.
+2. Geographic coherence is non-negotiable: every item is either at the same destination (option a) or in the same neighborhood (option b).
+3. NEVER duplicate any name from the "Already-scheduled" list above.
+4. Names must be REAL, specific places — never bare neighborhood names like "Palermo" or generic categories like "rooftop bar".
+
+Output ONLY a JSON array. Each item:
+{{"day": <day_number>, "name": "Exact Specific Place Name", "category": "restaurant|attraction|activity|cafe|shopping|nightlife|other", "time_slot": "HH:MM", "duration_minutes": <int>, "description": "1 short sentence in pt-BR with proper accents — what makes this place worth it.", "notes": "Practical tip in pt-BR.", "vibe_tags": ["tag"], "activity_model": "direct_place|day_trip|anchored_experience|guided_excursion", "visit_mode": "self_guided|guided|book_separately", "item_role": "attraction|day_trip_destination|experience_activity|restaurant", "source": "ai"}}
+
+For each empty day, output 4-5 items. Nothing else."""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4500,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=50.0,
+                )
+            ),
+            timeout=55.0,
+        )
+        cost.record_usage(response.usage)
+        raw = response.content[0].text if response.content else "[]"
+    except asyncio.TimeoutError:
+        logger.warning("[empty-day-fill] Sonnet timed out — leaving empty days flagged")
+        return validated
+    except Exception as e:
+        logger.warning("[empty-day-fill] Sonnet failed (%s)", e)
+        return validated
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, list):
+        logger.warning("[empty-day-fill] Parse failed, raw: %s", raw[:200])
+        return validated
+
+    # Filter to valid empty-day items + dedup against existing names.
+    existing_norms = {_normalize_place_name(n) for n in existing_names if n}
+    candidates: list[dict] = []
+    for it in parsed:
+        if not isinstance(it, dict):
+            continue
+        d = it.get("day")
+        if not isinstance(d, int) or d not in empty_days:
+            continue
+        name = (it.get("name") or "").strip()
+        if not name:
+            continue
+        if _normalize_place_name(name) in existing_norms:
+            continue
+        # Defensive defaults.
+        it.setdefault("category", "attraction")
+        it.setdefault("activity_model", "direct_place")
+        it.setdefault("visit_mode", "self_guided")
+        it.setdefault("source", "ai")
+        candidates.append(it)
+
+    if not candidates:
+        logger.warning("[empty-day-fill] Sonnet returned no usable items")
+        return validated
+
+    # Google Places enrichment — populate lat/lng/place_id so the items
+    # render properly on the map and pass downstream constraints.
+    geo_query_city = base_city or destination
+    enriched_count = 0
+    for cand in candidates:
+        try:
+            query = f"{cand['name']} {geo_query_city}"
+            results = await places.search(query)
+            if not results:
+                continue
+            top = results[0]
+            details = await places.get_details(top.get("place_id"))
+            if not details:
+                continue
+            geo = details.get("geometry") or {}
+            loc = geo.get("location") or {}
+            cand["latitude"] = loc.get("lat")
+            cand["longitude"] = loc.get("lng")
+            cand["address"] = details.get("formatted_address")
+            cand["google_place_id"] = details.get("place_id")
+            cand["google_rating"] = details.get("rating")
+            cand["google_reviews_count"] = details.get("user_ratings_total")
+            cand["operating_hours"] = details.get("opening_hours") or {}
+            cand["phone"] = details.get("formatted_phone_number")
+            cand["website"] = details.get("website")
+            photos = []
+            for p in (details.get("photos") or [])[:2]:
+                ref = p.get("photo_reference")
+                if ref:
+                    photos.append(
+                        f"https://maps.googleapis.com/maps/api/place/photo?"
+                        f"maxwidth=400&photo_reference={ref}&key={settings.google_places_api_key}"
+                    )
+            cand["photos"] = photos
+            enriched_count += 1
+        except Exception as e:
+            logger.warning("[empty-day-fill] geo lookup failed for '%s': %s", cand.get("name"), e)
+            continue
+
+    # Only keep items with coords — Rails accepts items without lat/lng
+    # but the map breaks. If a place couldn't be geocoded, drop it.
+    final_new = [c for c in candidates if c.get("latitude") and c.get("longitude")]
+    logger.info(
+        "[empty-day-fill] Sonnet=%d, geocoded=%d, kept=%d (filling %s)",
+        len(candidates), enriched_count, len(final_new), empty_days,
+    )
+    return validated + final_new
 
 
 # ──────────────────────────────────────────────
