@@ -2095,6 +2095,18 @@ def _tighten_day_clusters(
             if day_rigidity.get(day) == "locked":
                 continue
             places = by_day[day]
+            # Day-trip days span their own destination (Versailles 17km from
+            # Paris, Tigre 30km from BsAs). The 7km diameter rule would drop
+            # the day-trip items every time. _enforce_day_trip_isolation
+            # handles non-matching items separately — let it own these days.
+            has_day_trip = any(
+                (p.get("activity_model") == "day_trip")
+                or (p.get("item_role") == "day_trip_destination")
+                or (int(p.get("duration_minutes") or 0) >= 300)
+                for p in places
+            )
+            if has_day_trip:
+                continue
             geocoded = [
                 p for p in places
                 if p.get("latitude") is not None and p.get("longitude") is not None
@@ -6481,6 +6493,12 @@ For each empty day, output 4-5 items. Nothing else."""
 
     # Google Places enrichment — populate lat/lng/place_id so the items
     # render properly on the map and pass downstream constraints.
+    # NOTE: GooglePlacesClient.get_details() returns a FLAT pre-mapped
+    # dict (latitude/longitude/address/place_id/rating/reviews_count/
+    # operating_hours/photos as URL list) — NOT the raw Google API
+    # response with geometry.location.lat etc. Earlier this function
+    # treated the response as raw and crashed with "'str' object has
+    # no attribute 'get'" when iterating photos as if they were dicts.
     geo_query_city = base_city or destination
     enriched_count = 0
     for cand in candidates:
@@ -6493,26 +6511,16 @@ For each empty day, output 4-5 items. Nothing else."""
             details = await places.get_details(top.get("place_id"))
             if not details:
                 continue
-            geo = details.get("geometry") or {}
-            loc = geo.get("location") or {}
-            cand["latitude"] = loc.get("lat")
-            cand["longitude"] = loc.get("lng")
-            cand["address"] = details.get("formatted_address")
+            cand["latitude"] = details.get("latitude")
+            cand["longitude"] = details.get("longitude")
+            cand["address"] = details.get("address")
             cand["google_place_id"] = details.get("place_id")
             cand["google_rating"] = details.get("rating")
-            cand["google_reviews_count"] = details.get("user_ratings_total")
-            cand["operating_hours"] = details.get("opening_hours") or {}
-            cand["phone"] = details.get("formatted_phone_number")
+            cand["google_reviews_count"] = details.get("reviews_count")
+            cand["operating_hours"] = details.get("operating_hours") or {}
+            cand["phone"] = details.get("phone")
             cand["website"] = details.get("website")
-            photos = []
-            for p in (details.get("photos") or [])[:2]:
-                ref = p.get("photo_reference")
-                if ref:
-                    photos.append(
-                        f"https://maps.googleapis.com/maps/api/place/photo?"
-                        f"maxwidth=400&photo_reference={ref}&key={settings.google_places_api_key}"
-                    )
-            cand["photos"] = photos
+            cand["photos"] = details.get("photos") or []
             enriched_count += 1
         except Exception as e:
             logger.warning("[empty-day-fill] geo lookup failed for '%s': %s", cand.get("name"), e)
@@ -6873,6 +6881,7 @@ async def suggest_day_trips(
     """
     if not main_city:
         return []
+    import time as _t
     main_city = main_city.strip()
     country = (country or "").strip()
     key = f"{main_city.lower()}|{country.lower()}"
