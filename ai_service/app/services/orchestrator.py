@@ -5171,6 +5171,16 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
             }
 
         try:
+            # Preserve user-set fields from the create form before overwriting
+            # the profile with Haiku output. main_destination is the canonical
+            # example: the user picked "Buenos Aires, Argentina" via the city
+            # autocomplete; if we blindly write `profile` we'd wipe that out
+            # and downstream code would re-run Haiku classification instead
+            # of trusting the user's pick.
+            for preserve_key in ("main_destination",):
+                if existing_profile.get(preserve_key) and not profile.get(preserve_key):
+                    profile[preserve_key] = existing_profile[preserve_key]
+
             # Auto-confirm — the user can edit the profile inline on the trip
             # page now (Phase 3 of the deferred-extraction redesign). No more
             # confirmation modal blocking the build.
