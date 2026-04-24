@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
+import CityAutocomplete from "./CityAutocomplete";
 
 // Frontend-only URL validation. We don't fire any backend call here —
 // extraction is deferred until the user clicks "Generate" (the new
@@ -33,6 +34,11 @@ export default function TripForm({ onSubmit, initial }) {
   const [links, setLinks] = useState([]); // [{url, platform, valid}]
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // Main destination — required. Anchors Tavily research + skips the Haiku
+  // city detection step (the user's pick is ground truth).
+  const [mainDestination, setMainDestination] = useState(
+    initial?.traveler_profile?.main_destination || null,
+  );
 
   const addLink = () => {
     const trimmed = linkText.trim();
@@ -63,6 +69,10 @@ export default function TripForm({ onSubmit, initial }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!mainDestination?.city) {
+      setError(pt ? "Escolhe a cidade principal antes de continuar." : "Pick the main city first.");
+      return;
+    }
     if (!name.trim()) {
       setError(pt ? "Dá um nome pra viagem." : "Give the trip a name.");
       return;
@@ -82,6 +92,14 @@ export default function TripForm({ onSubmit, initial }) {
         name: name.trim(),
         num_days: numDays,
         ai_mode: aiMode,
+        destination: mainDestination.description || mainDestination.city,
+        traveler_profile: {
+          main_destination: {
+            city: mainDestination.city,
+            country: mainDestination.country,
+            place_id: mainDestination.place_id,
+          },
+        },
         links: links.map((l) => l.url),
       });
     } catch (err) {
@@ -102,6 +120,30 @@ export default function TripForm({ onSubmit, initial }) {
           {error}
         </div>
       )}
+
+      {/* Main destination — required */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          {pt ? "Pra onde você vai?" : "Where are you going?"}
+        </label>
+        <CityAutocomplete
+          value={mainDestination}
+          onSelect={setMainDestination}
+          onClear={() => setMainDestination(null)}
+          placeholder={pt ? "Ex: Buenos Aires" : "e.g. Buenos Aires"}
+          required
+        />
+        {mainDestination?.city && mainDestination?.country && (
+          <p className="text-xs text-emerald-600 mt-1.5">
+            ✓ {mainDestination.city}, {mainDestination.country}
+          </p>
+        )}
+        <p className="text-xs text-gray-500 mt-1.5">
+          {pt
+            ? "Já vamos pesquisar blogs e guias dessa cidade enquanto você cola os vídeos."
+            : "We'll start researching blogs and guides for this city while you paste videos."}
+        </p>
+      </div>
 
       {/* Trip name */}
       <div>

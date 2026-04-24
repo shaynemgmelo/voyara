@@ -16,7 +16,7 @@ export default function TripCreate() {
   //
   // The frontend then navigates to /trips/:id where the GenerationProgressModal
   // polls until items appear (or build_error fires the failure modal).
-  const handleSubmit = async ({ name, num_days, ai_mode, links }) => {
+  const handleSubmit = async ({ name, num_days, ai_mode, destination, traveler_profile, links }) => {
     let isFirstTrip = false;
     try {
       const existing = await getTrips();
@@ -25,7 +25,13 @@ export default function TripCreate() {
       // ignore; default = no onboarding
     }
 
-    const trip = await createTrip({ name, num_days, ai_mode });
+    const trip = await createTrip({
+      name,
+      num_days,
+      ai_mode,
+      destination,
+      traveler_profile,
+    });
 
     // Trigger the combined pipeline. Rails persists the links + fires
     // /api/extract-and-build on the AI service. We don't loop createLink

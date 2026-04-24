@@ -4874,24 +4874,55 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
             country = (refreshed_profile.get("country_detected") or "").strip()
             cities = refreshed_profile.get("cities_detected") or []
             num_days = int(refreshed.get("num_days") or 0)
-            # Build a small content sample from the links so the classifier
-            # has something to ground on. Cap at 1500 chars to keep Haiku fast.
-            sample_parts: list[str] = []
-            for l in (refreshed.get("links") or []):
-                ct = ((l.get("extracted_data") or {}).get("content_text") or "")[:600]
-                if ct:
-                    sample_parts.append(ct)
-                if sum(len(p) for p in sample_parts) > 1500:
-                    break
-            content_sample = "\n".join(sample_parts)
-            classify_cost = CostTracker(link_id=0)
-            classification = await _classify_destination(
-                country=country,
-                cities=cities,
-                num_days=num_days,
-                content_sample=content_sample,
-                cost=classify_cost,
-            )
+
+            # USER-PICKED MAIN DESTINATION — when the trip-create form
+            # captured a city via Google Places autocomplete, that pick is
+            # ground truth. Synthesize a walkable_urban classification and
+            # skip the Haiku call entirely. Secondary cities mentioned in
+            # the videos still flow through the normal day-trip detection
+            # downstream — the user-picked city anchors the BASE.
+            user_main = refreshed_profile.get("main_destination") or {}
+            user_main_city = (user_main.get("city") or "").strip()
+            user_main_country = (user_main.get("country") or "").strip()
+            classification = None
+            if user_main_city:
+                # Backfill country_detected / cities_detected so downstream
+                # geo-fence + research helpers see the user's choice as
+                # authoritative even if the Haiku profile pass missed it.
+                if user_main_country and not country:
+                    refreshed_profile["country_detected"] = user_main_country
+                    country = user_main_country
+                if user_main_city not in (cities or []):
+                    cities = [user_main_city] + [c for c in (cities or []) if c != user_main_city]
+                    refreshed_profile["cities_detected"] = cities
+                classification = {
+                    "destination_type": "walkable_urban",
+                    "base_cities": [user_main_city],
+                    "country": user_main_country or country,
+                    "rationale": "user_picked_main_destination",
+                    "source": "user",
+                }
+                _mark(f"main destination provided by user — skipping Haiku classification ({user_main_city})")
+
+            if classification is None:
+                # Build a small content sample from the links so the classifier
+                # has something to ground on. Cap at 1500 chars to keep Haiku fast.
+                sample_parts: list[str] = []
+                for l in (refreshed.get("links") or []):
+                    ct = ((l.get("extracted_data") or {}).get("content_text") or "")[:600]
+                    if ct:
+                        sample_parts.append(ct)
+                    if sum(len(p) for p in sample_parts) > 1500:
+                        break
+                content_sample = "\n".join(sample_parts)
+                classify_cost = CostTracker(link_id=0)
+                classification = await _classify_destination(
+                    country=country,
+                    cities=cities,
+                    num_days=num_days,
+                    content_sample=content_sample,
+                    cost=classify_cost,
+                )
             if classification:
                 refreshed_profile["destination_classification"] = classification
                 dtype = classification.get("destination_type")
