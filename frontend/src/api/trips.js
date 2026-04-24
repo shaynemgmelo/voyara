@@ -69,9 +69,10 @@ export async function refineItinerary(tripId, feedback, scope = "trip", dayPlanI
 // Haiku + Google Places only (no Sonnet refine), so it's fast and
 // won't trigger the "regenerate the whole trip" cascade.
 export async function addDayTrip(tripId, destination, options = {}) {
-  const { country = "", mode = "extend", targetDayNumber } = options;
+  const { country = "", mode = "extend", targetDayNumber, forceDeleteLocked = false } = options;
   const body = { trip_id: tripId, destination, country, mode };
   if (mode === "replace") body.target_day_number = targetDayNumber;
+  if (forceDeleteLocked) body.force_delete_locked = true;
   const resp = await fetch(`${AI_URL}/add-day-trip`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

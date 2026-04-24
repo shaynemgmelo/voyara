@@ -24,7 +24,7 @@ export default function AddDayTripModal({
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
 
-  const [step, setStep] = useState("city"); // "city" | "mode"
+  const [step, setStep] = useState("city"); // "city" | "mode" | "confirm-locked"
   const [pickedCity, setPickedCity] = useState("");
   const [customCity, setCustomCity] = useState("");
   const [chosenMode, setChosenMode] = useState("extend"); // "replace" | "extend"
@@ -32,6 +32,7 @@ export default function AddDayTripModal({
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [lockedNames, setLockedNames] = useState(null);
+  const [pendingLockedDay, setPendingLockedDay] = useState(null); // {day_number, items}
   const [liveSuggestions, setLiveSuggestions] = useState([]);
   const [loadingLive, setLoadingLive] = useState(false);
 
@@ -88,32 +89,48 @@ export default function AddDayTripModal({
     setStep("mode");
   };
 
-  const confirm = async () => {
-    if (submitting) return;
+  const submitWithOpts = async (opts) => {
     setSubmitting(true);
     setErrorMsg(null);
-    setLockedNames(null);
     try {
-      const opts = chosenMode === "replace"
-        ? { mode: "replace", targetDayNumber: chosenDay }
-        : { mode: "extend" };
       await onSubmit(pickedCity, opts);
       onClose();
     } catch (err) {
       const data = err?.data || {};
-      if (err?.status === 409 || data?.error === "day_has_locked_items") {
-        setErrorMsg(
-          data?.message
-          || (pt
-            ? "Esse dia tem items do vídeo. Apague-os manualmente ou arraste pra outro dia antes de substituir."
-            : "That day has video-anchored items. Delete or move them manually before replacing."),
-        );
-        setLockedNames(Array.isArray(data?.locked_names) ? data.locked_names : null);
+      if (err?.status === 409 && data?.error === "day_has_locked_items") {
+        // Open the explicit consent step before touching video items.
+        const dp = dayPlans.find((d) => d.day_number === opts.targetDayNumber);
+        setPendingLockedDay({
+          day_number: opts.targetDayNumber,
+          items: (dp?.itinerary_items || []).filter(
+            (it) => (it.origin === "extracted_from_video") || (it.source === "link"),
+          ),
+          locked_names: Array.isArray(data?.locked_names) ? data.locked_names : [],
+        });
+        setStep("confirm-locked");
       } else {
         setErrorMsg(err?.message || (pt ? "Falha ao adicionar day-trip." : "Failed to add day-trip."));
       }
       setSubmitting(false);
     }
+  };
+
+  const confirm = async () => {
+    if (submitting) return;
+    setLockedNames(null);
+    const opts = chosenMode === "replace"
+      ? { mode: "replace", targetDayNumber: chosenDay }
+      : { mode: "extend" };
+    await submitWithOpts(opts);
+  };
+
+  const confirmForce = async () => {
+    if (submitting) return;
+    await submitWithOpts({
+      mode: "replace",
+      targetDayNumber: pendingLockedDay?.day_number,
+      forceDeleteLocked: true,
+    });
   };
 
   // Build a short summary line per day for the radio list.
@@ -320,15 +337,16 @@ export default function AddDayTripModal({
                   {dayPlans.map((dp) => {
                     const locked = isLocked(dp);
                     const selected = chosenDay === dp.day_number;
+                    const lockedCount = (dp.itinerary_items || []).filter(
+                      (it) => (it.origin === "extracted_from_video") || (it.source === "link"),
+                    ).length;
                     return (
                       <label
                         key={dp.id}
-                        className={`block rounded-lg border p-3 transition-colors ${
-                          locked
-                            ? "border-gray-200 bg-gray-50 cursor-not-allowed opacity-60"
-                            : selected
-                            ? "border-amber-400 bg-amber-50 cursor-pointer"
-                            : "border-gray-200 hover:border-gray-300 bg-white cursor-pointer"
+                        className={`block rounded-lg border p-3 cursor-pointer transition-colors ${
+                          selected
+                            ? "border-amber-400 bg-amber-50"
+                            : "border-gray-200 hover:border-gray-300 bg-white"
                         }`}
                       >
                         <input
@@ -336,7 +354,6 @@ export default function AddDayTripModal({
                           name="targetDay"
                           value={dp.day_number}
                           checked={selected}
-                          disabled={locked}
                           onChange={() => setChosenDay(dp.day_number)}
                           className="sr-only"
                         />
@@ -357,9 +374,11 @@ export default function AddDayTripModal({
                           {locked && (
                             <span
                               className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 flex-shrink-0"
-                              title={pt ? "Items deste dia vieram do vídeo — não podem ser apagados aqui" : "Items came from the video — cannot be replaced"}
+                              title={pt
+                                ? `${lockedCount} item(s) deste dia vieram do vídeo — confirmação extra antes de apagar`
+                                : `${lockedCount} item(s) came from the video — extra confirmation before delete`}
                             >
-                              🔒 {pt ? "Vídeo" : "Video"}
+                              🔒 {lockedCount} {pt ? "do vídeo" : "from video"}
                             </span>
                           )}
                         </div>
@@ -369,8 +388,8 @@ export default function AddDayTripModal({
                 </div>
                 <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
                   {pt
-                    ? "⚠️ Os items deste dia serão removidos. Cancele aqui se quiser arrastar items pra outros dias antes de substituir."
-                    : "⚠️ This day's items will be removed. Cancel here to drag items to other days first."}
+                    ? "⚠️ Os items deste dia serão removidos. Se o dia tiver items do vídeo, vamos pedir confirmação extra antes de apagar."
+                    : "⚠️ This day's items will be removed. If the day has video items, we'll ask for extra confirmation."}
                 </p>
               </div>
             )}
@@ -415,6 +434,68 @@ export default function AddDayTripModal({
                   : chosenMode === "extend"
                   ? (pt ? `Adicionar dia ${numDays + 1}` : `Add day ${numDays + 1}`)
                   : (pt ? `Substituir dia ${chosenDay || "?"}` : `Replace day ${chosenDay || "?"}`)}
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === "confirm-locked" && pendingLockedDay && (
+          <>
+            <div>
+              <h2 className="text-xl font-bold text-gray-900">
+                {pt
+                  ? `Apagar items do vídeo do dia ${pendingLockedDay.day_number}?`
+                  : `Delete video items from day ${pendingLockedDay.day_number}?`}
+              </h2>
+              <p className="text-sm text-gray-600 mt-1">
+                {pt
+                  ? `O dia ${pendingLockedDay.day_number} tem ${(pendingLockedDay.locked_names || []).length} item(s) que vieram do vídeo. Eles serão removidos pra dar lugar a ${pickedCity}.`
+                  : `Day ${pendingLockedDay.day_number} has ${(pendingLockedDay.locked_names || []).length} item(s) from the video. They will be removed to make room for ${pickedCity}.`}
+              </p>
+            </div>
+
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-xs font-semibold text-red-700 uppercase tracking-wide mb-2">
+                {pt ? "Items que serão apagados" : "Items to be deleted"}
+              </p>
+              <ul className="space-y-1">
+                {(pendingLockedDay.locked_names || []).map((n, i) => (
+                  <li key={i} className="text-sm text-red-700 flex items-center gap-2">
+                    <span>📸</span>
+                    <span>{n}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <p className="text-xs text-gray-500">
+              {pt
+                ? "Dica: cancele aqui pra arrastar esses items pra outros dias do roteiro antes de substituir. Eles não voltam depois."
+                : "Tip: cancel here to drag these items to other days first. They won't come back after deletion."}
+            </p>
+
+            <div className="flex items-center justify-between pt-2">
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => {
+                  setStep("mode");
+                  setPendingLockedDay(null);
+                  setErrorMsg(null);
+                }}
+                className="text-sm text-gray-500 hover:text-gray-900"
+              >
+                ← {pt ? "Voltar" : "Back"}
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={confirmForce}
+                className="bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-lg text-sm transition-colors"
+              >
+                {submitting
+                  ? (pt ? "Apagando..." : "Deleting...")
+                  : (pt ? "Apagar e substituir" : "Delete and replace")}
               </button>
             </div>
           </>

@@ -7194,6 +7194,7 @@ async def add_day_trip(
     *,
     mode: str = "extend",
     target_day_number: int | None = None,
+    force_delete_locked: bool = False,
 ) -> dict:
     """Programmatically add a day-trip to the trip WITHOUT a Sonnet refine.
 
@@ -7296,24 +7297,34 @@ async def add_day_trip(
         if not target_dp:
             return {"error": f"Day {target_day_number} not found"}
         target_dp_id = target_dp["id"]
-        # SACRED RULE: refuse if any item on this day is video-anchored.
+        # CONSENT RULE: if the day has video-anchored items, refuse
+        # UNLESS the caller explicitly opted in via force_delete_locked.
+        # The frontend prompts the user with the locked names so the
+        # decision is informed — never silent.
         existing = target_dp.get("itinerary_items") or []
         locked = [
             it for it in existing
             if (it.get("origin") == "extracted_from_video")
             or (it.get("source") == "link")
         ]
-        if locked:
+        if locked and not force_delete_locked:
             return {
                 "error": "day_has_locked_items",
                 "locked_count": len(locked),
                 "locked_names": [it.get("name") for it in locked][:8],
                 "message": (
                     f"O dia {target_day_number} tem {len(locked)} item(s) "
-                    f"do vídeo. Apague-os manualmente ou arraste pra outro "
-                    f"dia antes de substituir."
+                    f"do vídeo. Confirme se quer apagá-los ou arraste-os "
+                    f"pra outro dia antes."
                 ),
             }
+        if locked and force_delete_locked:
+            logger.info(
+                "[add-day-trip] force-delete: removing %d video-anchored "
+                "item(s) from day %d on user consent: %s",
+                len(locked), target_day_number,
+                [it.get("name") for it in locked][:8],
+            )
         # Delete every existing item on the target day.
         for it in existing:
             try:

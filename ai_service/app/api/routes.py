@@ -416,6 +416,7 @@ async def handle_add_day_trip(request: dict):
     country = (request.get("country") or "").strip()
     mode = request.get("mode") or "extend"
     target_day_number = request.get("target_day_number")
+    force_delete_locked = bool(request.get("force_delete_locked"))
     if not isinstance(trip_id, int) or not destination:
         raise HTTPException(400, "trip_id (int) and destination (str) required")
     if mode not in ("replace", "extend"):
@@ -429,6 +430,7 @@ async def handle_add_day_trip(request: dict):
             country=country,
             mode=mode,
             target_day_number=target_day_number,
+            force_delete_locked=force_delete_locked,
         )
     except Exception:
         logger.exception("[add-day-trip] unexpected failure")
