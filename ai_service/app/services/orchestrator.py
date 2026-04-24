@@ -7809,9 +7809,64 @@ PLACES FROM USER'S LINKS (preserve these when possible — tag as source: "link"
     num_target_days = len(target_days)
     total_items_needed = num_target_days * 5
 
+    # Detect a day-trip request — keywords in pt-BR + EN that map to "user
+    # wants to dedicate a full day to a single destination". When this hits,
+    # the prompt switches to a SURGICAL mode: replace exactly one day with
+    # a day-trip + leave everything else intact.
+    feedback_lower = (feedback or "").lower()
+    DAY_TRIP_PATTERNS = (
+        "dia inteiro em ", "passar o dia em ", "um dia em ",
+        "bate-volta", "bate e volta", "bate volta", "day trip to ",
+        "full day in ", "full day at ", "spend a day in ",
+    )
+    is_day_trip_request = any(p in feedback_lower for p in DAY_TRIP_PATTERNS)
+
+    # Identify flexible (non-locked) day_numbers — these are the ones the
+    # refine is allowed to fully reshape. Locked days from the source video
+    # stay sacred.
+    flexible_day_numbers = []
+    for dp in target_days:
+        items = dp.get("itinerary_items", [])
+        has_locked = any(
+            (it.get("origin") or "") == "extracted_from_video"
+            or it.get("source") == "link"
+            for it in items
+        )
+        if not has_locked:
+            flexible_day_numbers.append(dp["day_number"])
+
+    surgical_block = ""
+    if is_day_trip_request:
+        flex_str = ", ".join(str(d) for d in flexible_day_numbers) or "(none — all locked)"
+        surgical_block = f"""
+╔═══════════════════════════════════════════════════════════════════╗
+║  ⚡ DAY-TRIP REQUEST DETECTED — SURGICAL MODE                     ║
+╚═══════════════════════════════════════════════════════════════════╝
+The user is asking for a FULL-DAY day trip. You MUST:
+
+1. Pick EXACTLY ONE day from this set (flexible only, never locked): {flex_str}
+   Prefer the LAST flexible day if multiple exist.
+
+2. On that ONE day, REPLACE all current items with a structured day-trip:
+   • Item 1: the day-trip destination itself, duration_minutes=480 (8h),
+     activity_model="day_trip", item_role="day_trip_destination",
+     time_slot="09:00".
+   • Items 2-3: 1-2 anchored experiences IN THE DAY-TRIP DESTINATION
+     CITY (e.g. Puerto de Frutos in Tigre, lunch in Tigre). Never
+     attractions from the base city.
+
+3. EVERY OTHER DAY stays IDENTICAL. Return every existing item from
+   those days WITH ITS SAME id. Do NOT omit any item from non-target
+   days. Do NOT change name/time_slot/duration on those days.
+
+4. Total items in the output ≈ (current_total - replaced_day_count + 3).
+   You are NOT regenerating the trip. You are surgically replacing
+   ONE day. Verify by counting before responding.
+"""
+
     # Build the refine prompt. Phase 4: include id + origin on every line so
     # the output can reuse ids (upsert) instead of regenerating everything.
-    prompt = f"""You are an expert travel planner. The user already has an itinerary for {destination} but wants changes based on their feedback.
+    prompt = f"""You are an expert travel planner. The user already has an itinerary for {destination} and is asking for a SPECIFIC change. Your job is to make the SMALLEST possible modification to satisfy their feedback — not to redesign the trip.
 
 USER'S FEEDBACK:
 "{feedback}"
@@ -7826,6 +7881,14 @@ TRAVELER PROFILE:
 - Interests: {', '.join(profile.get('interests', []))}
 - Pace: {profile.get('pace', 'moderate')}
 {places_section}
+{surgical_block}
+
+PRINCIPLE OF MINIMAL CHANGE (NON-NEGOTIABLE):
+- The user picked a specific thing to change. Don't touch anything else.
+- If the feedback says "more restaurants on day 2" → only edit day 2.
+- If the feedback says "I want a day in Tigre" → see DAY-TRIP REQUEST block above.
+- Default behavior is KEEP every existing item with its original id. Only
+  change what the feedback explicitly asks for.
 
 UPSERT RULES (MUST FOLLOW — this is how we avoid losing user annotations):
 1. To KEEP an existing item untouched: return it with its SAME `id`. You may
@@ -7841,20 +7904,15 @@ UPSERT RULES (MUST FOLLOW — this is how we avoid losing user annotations):
    "the user wants this gone" — it will be deleted UNLESS it's 🔒 locked.
 
 OTHER INSTRUCTIONS:
-- Read the user's feedback carefully. They may like some items and dislike others.
-- KEEP items that align with the feedback (return with their id).
-- REPLACE items that don't match with better alternatives (new objects, no id).
-- If the user gives general feedback (e.g., "more restaurants", "less museums"),
-  apply it intelligently across the affected days.
-- Maintain 4-5 items per day, geographic clustering, and time flow.
+- Maintain 4-5 items per day, geographic clustering, and time flow ON THE DAYS YOU ACTUALLY EDIT.
 - LINK CONTENT HAS PRIORITY: Items with origin=extracted_from_video MUST be
   kept on their assigned day, and their id MUST appear in your output.
 
 Return ONLY a JSON array. Each object:
-{{"id": <existing id OR omit for new items>, "day": <day_number>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "09:00", "duration_minutes": 90, "description": "Why this is great + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert if relevant"], "source": "link|ai"}}
+{{"id": <existing id OR omit for new items>, "day": <day_number>, "name": "Exact Place Name", "category": "restaurant|attraction|activity|shopping|cafe|nightlife|other", "time_slot": "09:00", "duration_minutes": 90, "description": "Why this is great + practical tip in Portuguese.", "notes": "Insider tip in Portuguese.", "vibe_tags": ["tag1", "tag2"], "alerts": ["alert if relevant"], "source": "link|ai", "activity_model": "direct_place|day_trip|anchored_experience", "item_role": "attraction|day_trip_destination|experience_activity|restaurant"}}
 
-Generate approximately {total_items_needed} items across {num_target_days} day(s).
-Day numbers to use: {', '.join(str(dp['day_number']) for dp in target_days)}.
+Day numbers available: {', '.join(str(dp['day_number']) for dp in target_days)}.
+Total items in output should be approximately the SAME count as the current itinerary above (you are editing, not expanding).
 
 PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUST use PERFECT Brazilian Portuguese (pt-BR) with proper accents (á, é, í, ó, ú, â, ê, ô, ã, õ, à), cedilla (ç), and punctuation. NEVER omit accents.
 
@@ -8030,6 +8088,75 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
         "[refine] upsert done: updated=%d deleted=%d created=%d conflicts=%d",
         updated, deleted, created_count, len(locked_orphans),
     )
+
+    # Day-trip isolation pass — if the refine introduced a day-trip
+    # (duration_minutes >= 300) on a day that still has unrelated urban
+    # items, delete the urban items so the day stays a clean day-trip.
+    # This catches the "user asked for full day in Tigre" case where
+    # Sonnet added Tigre but left "Galeria Pacífico" / "Catedral
+    # Metropolitana" on the same day from a previous build.
+    if is_day_trip_request and created_count > 0:
+        try:
+            refreshed_dps = await rails.get_day_plans(trip_id)
+            for dp in refreshed_dps:
+                items = dp.get("itinerary_items") or []
+                dt_items = [
+                    it for it in items
+                    if (
+                        (it.get("activity_model") == "day_trip")
+                        or (it.get("item_role") == "day_trip_destination")
+                        or (int(it.get("duration_minutes") or 0) >= 300)
+                    )
+                ]
+                if not dt_items:
+                    continue
+                # The day has at least one day-trip. Build city-allowlist
+                # from the day-trip items themselves (case-insensitive).
+                allow_cities = set()
+                for dt in dt_items:
+                    for k in ("city", "primary_region"):
+                        v = (dt.get(k) or "").strip().lower()
+                        if v:
+                            allow_cities.add(v)
+                    addr = (dt.get("address") or "").lower()
+                    for token in ("tigre", "versailles", "versalhes", "sintra", "colonia"):
+                        if token in addr:
+                            allow_cities.add(token)
+                # Delete every non-daytrip item that isn't in an allowed city.
+                isolation_drops = 0
+                for it in items:
+                    if it in dt_items:
+                        continue
+                    city = (
+                        (it.get("city") or "").strip().lower()
+                        or (it.get("primary_region") or "").strip().lower()
+                    )
+                    addr = (it.get("address") or "").lower()
+                    matches = any(c and (c in city or c in addr) for c in allow_cities)
+                    if matches:
+                        continue
+                    # Don't blow away items the user explicitly tagged as
+                    # link — those produce conflict_alerts elsewhere. But
+                    # for the day-trip case the user EXPLICITLY asked for
+                    # the day to be Tigre, so even link items get cleared
+                    # (the conflict handling will surface them on a different
+                    # day if needed).
+                    try:
+                        await rails.delete_itinerary_item(trip_id, dp["id"], it["id"])
+                        isolation_drops += 1
+                    except Exception:
+                        logger.warning(
+                            "[refine-isolation] could not delete item %s on day %s",
+                            it.get("id"), dp.get("day_number"),
+                        )
+                if isolation_drops:
+                    logger.info(
+                        "[refine-isolation] day %s: kept %d day-trip item(s), "
+                        "removed %d non-matching item(s)",
+                        dp.get("day_number"), len(dt_items), isolation_drops,
+                    )
+        except Exception as e:
+            logger.warning("[refine-isolation] non-fatal failure: %s", e)
 
     return {
         "places_created": created_count,
