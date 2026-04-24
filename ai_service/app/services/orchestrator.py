@@ -8482,6 +8482,21 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
             refreshed_dps = await rails.get_day_plans(trip_id)
             for dp in refreshed_dps:
                 items = dp.get("itinerary_items") or []
+                # Guard 1: NEVER touch a day that has even one item locked
+                # from the source video (origin=extracted_from_video OR
+                # source=link). The user's video assigned that day's
+                # composition — a stray Sonnet-generated day-trip item that
+                # happened to land on this day must NOT trigger us to nuke
+                # the locked items. (Real example: Sonnet placed
+                # Fontainebleau on day 1 of a Paris trip; isolation
+                # deleted 12 video-anchored items including Louvre.)
+                has_locked = any(
+                    (it.get("origin") == "extracted_from_video")
+                    or (it.get("source") == "link")
+                    for it in items
+                )
+                if has_locked:
+                    continue
                 dt_items = [
                     it for it in items
                     if (
@@ -8492,6 +8507,38 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
                 ]
                 if not dt_items:
                     continue
+                # Guard 2: the user's feedback said "Versailles" / "Tigre" /
+                # etc. — we should ONLY isolate the day where THAT
+                # destination landed. If Sonnet sprinkled a separate
+                # day-trip on a different flexible day, leave that day
+                # alone (it's likely an existing user-confirmed day-trip,
+                # or a Sonnet hallucination we should not amplify by
+                # deleting the rest of the day's content).
+                feedback_lower_local = (feedback or "").lower()
+                feedback_match = any(
+                    any(
+                        (token in feedback_lower_local)
+                        and (token in (dt.get("name") or "").lower()
+                             or token in (dt.get("address") or "").lower())
+                        for token in ("versailles", "versalhes", "tigre",
+                                      "sintra", "colonia", "ayutthaya",
+                                      "giverny", "disneyland", "fontainebleau",
+                                      "campos do jordão", "petrópolis")
+                    )
+                    for dt in dt_items
+                )
+                # If the day's day-trip clearly matches the user's
+                # request, we proceed with isolation. If not, skip —
+                # better to leave a slightly mixed day than to nuke
+                # legitimate user content.
+                if not feedback_match:
+                    logger.info(
+                        "[refine-isolation] day %s has a day-trip but it "
+                        "doesn't match feedback %r — skipping isolation",
+                        dp.get("day_number"), feedback_lower_local[:80],
+                    )
+                    continue
+
                 # The day has at least one day-trip. Build city-allowlist
                 # from the day-trip items themselves (case-insensitive).
                 allow_cities = set()
@@ -8517,12 +8564,6 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
                     matches = any(c and (c in city or c in addr) for c in allow_cities)
                     if matches:
                         continue
-                    # Don't blow away items the user explicitly tagged as
-                    # link — those produce conflict_alerts elsewhere. But
-                    # for the day-trip case the user EXPLICITLY asked for
-                    # the day to be Tigre, so even link items get cleared
-                    # (the conflict handling will surface them on a different
-                    # day if needed).
                     try:
                         await rails.delete_itinerary_item(trip_id, dp["id"], it["id"])
                         isolation_drops += 1
