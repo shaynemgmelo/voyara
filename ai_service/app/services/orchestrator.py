@@ -7098,12 +7098,12 @@ async def _generate_day_trip_items(
         f"Traveler interests: {interests_str}\n\n"
         f"Build 4 itinerary items for the day. Output JSON ONLY:\n"
         f"[\n"
-        f'  {{"name": "...", "category": "attraction|activity|restaurant", '
+        f'  {{"name": "...", "category": "attraction|activity|restaurant|cafe", '
         f'"time_slot": "HH:MM", "duration_minutes": <int>, '
         f'"description": "1 short sentence in pt-BR", '
         f'"notes": "1 practical tip in pt-BR", '
         f'"vibe_tags": ["tag"], "activity_model": "day_trip|anchored_experience|direct_place", '
-        f'"item_role": "day_trip_destination|attraction|restaurant|experience_activity"}}\n'
+        f'"item_role": "day_trip_destination|landmark|attraction|food_market|experience_activity"}}\n'
         f"]\n\n"
         f"Rules:\n"
         f"- Item 1: the main destination itself ({destination}), the iconic\n"
@@ -7111,15 +7111,22 @@ async def _generate_day_trip_items(
         f"  item_role='day_trip_destination', duration_minutes=240,\n"
         f"  time_slot='10:00', category='attraction'.\n"
         f"- Item 2: lunch IN {destination} (real local restaurant if you\n"
-        f"  know one, or a representative venue type). category='restaurant',\n"
+        f"  know one). category='restaurant', item_role='food_market',\n"
         f"  time_slot='13:00', duration_minutes=75.\n"
         f"- Items 3-4: 1-2 more anchored experiences in {destination} "
         f"(secondary attraction, gardens, viewpoint). All time_slots after\n"
-        f"  14:30. Each duration ~60-120min.\n"
-        f"- ALL items must be IN {destination}, not in {base_city}.\n"
+        f"  14:30. Each duration ~60-120min. item_role='attraction' or\n"
+        f"  'experience_activity'.\n"
+        f"- ALL items MUST be physically IN {destination}, not in\n"
+        f"  {base_city} and not in any other city. NEVER generate names\n"
+        f"  like 'X de Versailles em Miniatura' or 'Y replica' that could\n"
+        f"  be misread by Google Places as the actual external location.\n"
         f"- Each name must be a SPECIFIC real place (e.g. 'Palace of\n"
         f"  Versailles', 'Hall of Mirrors'), not generic ('local\n"
-        f"  restaurant').\n"
+        f"  restaurant') and not a fictional/themed riff on another city.\n"
+        f"- item_role MUST be one of: landmark, attraction, food_market,\n"
+        f"  experience_activity, day_trip_destination. NEVER use\n"
+        f"  'restaurant' (use food_market for restaurants).\n"
         f"- Descriptions and notes ALWAYS in pt-BR with proper accents.\n"
         f"- Return JSON only, no prose, no markdown fences."
     )
@@ -7158,6 +7165,35 @@ async def _generate_day_trip_items(
         if not isinstance(item, dict) or not item.get("name"):
             continue
         # Basic sanitization + defaults so persistence never fails.
+        raw_role = str(item.get("item_role") or "attraction")
+        # Rails ITEM_ROLES whitelist — anything outside this set causes a
+        # 422 on the create call. Map common Haiku slips ("restaurant" →
+        # food_market) and drop the rest by setting None (Rails allows nil).
+        role_aliases = {
+            "restaurant": "food_market",
+            "cafe": "food_market",
+            "café": "food_market",
+            "food": "food_market",
+            "experience": "experience_activity",
+            "activity": "experience_activity",
+            "tour": "experience_activity",
+            "viewpoint": "viewpoint_nature",
+            "park": "viewpoint_nature",
+            "nightlife": "nightlife_venue",
+            "bar": "nightlife_venue",
+            "museum": "museum_cultural",
+            "cultural": "museum_cultural",
+            "beach": "beach_island",
+            "island": "beach_island",
+            "neighborhood": "neighborhood",
+            "transport": "transport_leg",
+        }
+        normalized_role = raw_role.lower().strip()
+        if normalized_role not in ITEM_ROLES:
+            normalized_role = role_aliases.get(normalized_role, "attraction")
+        if normalized_role not in ITEM_ROLES:
+            normalized_role = None  # let Rails store NULL — better than 422
+
         clean = {
             "name": str(item["name"])[:120],
             "category": str(item.get("category") or "attraction")[:30],
@@ -7167,11 +7203,12 @@ async def _generate_day_trip_items(
             "notes": str(item.get("notes") or "")[:300],
             "vibe_tags": [str(t)[:30] for t in (item.get("vibe_tags") or [])][:4],
             "activity_model": str(item.get("activity_model") or "direct_place"),
-            "item_role": str(item.get("item_role") or "attraction"),
             "source": "ai",
             "origin": "ai_suggested",
             "position": i,
         }
+        if normalized_role is not None:
+            clean["item_role"] = normalized_role
         # First item must always be the day-trip destination.
         if i == 0:
             clean["activity_model"] = "day_trip"
@@ -7240,6 +7277,13 @@ async def add_day_trip(
     places = GooglePlacesClient()
     geo_query_city = destination + (f", {country}" if country else "")
 
+    # Resolve the destination centroid first so we can reject items
+    # that geo-lookup placed far away (Haiku once produced "Jardins
+    # de Versalhes em Miniatura" for a Disneyland day-trip, and
+    # Google Places resolved that name to actual Versailles, 50km
+    # from the park).
+    dest_coords = await _get_destination_coords(geo_query_city, places)
+
     async def _enrich_one(cand: dict) -> dict | None:
         try:
             results = await places.search(f"{cand['name']} {geo_query_city}")
@@ -7249,8 +7293,28 @@ async def add_day_trip(
             details = await places.get_details(top.get("place_id"))
             if not details:
                 return None
-            cand["latitude"] = details.get("latitude")
-            cand["longitude"] = details.get("longitude")
+            lat = details.get("latitude")
+            lng = details.get("longitude")
+            if not lat or not lng:
+                return None
+            # Reject items that landed too far from the destination —
+            # 25km is plenty for a single day-trip area (Versailles is
+            # 17km from Paris, Tigre 30km from BsAs — but those are
+            # destinations, not items WITHIN them).
+            if dest_coords:
+                dist = _haversine_km(
+                    dest_coords[0], dest_coords[1], float(lat), float(lng),
+                )
+                if dist > 25:
+                    logger.warning(
+                        "[add-day-trip] dropping %r — %.0fkm from %s "
+                        "(probably a Haiku-naming slip that geocoded to "
+                        "the wrong city)",
+                        cand.get("name"), dist, destination,
+                    )
+                    return None
+            cand["latitude"] = lat
+            cand["longitude"] = lng
             cand["address"] = details.get("address")
             cand["google_place_id"] = details.get("place_id")
             cand["google_rating"] = details.get("rating")
@@ -7259,8 +7323,7 @@ async def add_day_trip(
             cand["phone"] = details.get("phone")
             cand["website"] = details.get("website")
             cand["photos"] = details.get("photos") or []
-            if cand.get("latitude") and cand.get("longitude"):
-                return cand
+            return cand
         except Exception as e:
             logger.warning("[add-day-trip] geo lookup failed for %r: %s", cand.get("name"), e)
         return None
