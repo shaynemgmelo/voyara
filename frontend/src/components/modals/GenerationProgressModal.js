@@ -49,7 +49,19 @@ const STAGE_TO_PCT = [
   ["DONE", 99],
 ];
 
-function stageToPercent(stage, extractedCount, totalLinks, stageElapsed) {
+// Sonnet call legitimately scales with trip size + multi-base
+// complexity. Returns the budget in milliseconds for the
+// "generating itinerary" stage so interpolation + stuck-detection
+// both use the SAME ceiling and never contradict each other.
+function generatingItineraryBudgetMs(numDays) {
+  // Base 120s for a 5-day single-city build; +8s per extra day.
+  // 7-day → 136s, 10-day → 160s, 15-day → 200s, 20-day → 240s.
+  const days = Math.max(1, Math.min(30, numDays || 5));
+  const ms = 120_000 + (days - 5) * 8_000;
+  return Math.min(240_000, Math.max(120_000, ms));
+}
+
+function stageToPercent(stage, extractedCount, totalLinks, stageElapsed, numDays) {
   if (!stage) return null;
   const low = stage.toLowerCase();
   for (const [keyword, basePct] of STAGE_TO_PCT) {
@@ -61,13 +73,11 @@ function stageToPercent(stage, extractedCount, totalLinks, stageElapsed) {
         return Math.round(5 + ratio * 23);
       }
       if (keyword === "generating itinerary") {
-        // 65 → 88% over the first 120s of this stage. Sonnet legitimately
-        // takes 90-120s on 7-day builds with external research snippets.
-        // Interpolation AND stuck-detection both clamp at 120s so the bar
-        // visibly freezes at the exact moment the stuck card appears —
-        // no contradictory "still climbing" vs. "looks stuck" state.
-        const clamped = Math.min(stageElapsed, 120_000);
-        const t = clamped / 120_000;
+        // 65 → 88% over the per-trip Sonnet budget. Bigger / multi-base
+        // trips legitimately take longer — see generatingItineraryBudgetMs.
+        const budget = generatingItineraryBudgetMs(numDays);
+        const clamped = Math.min(stageElapsed, budget);
+        const t = clamped / budget;
         return Math.round(65 + t * 23);
       }
       return basePct;
@@ -171,13 +181,14 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
     (l) => l.status === "extracted" || l.status === "processed"
   ).length;
   const totalLinks = links.length;
+  const numDays = trip?.num_days || (trip?.day_plans?.length ?? 5);
 
   // NEW percent calculation — prefer real backend stage, fall back to phase-based.
   const percent = useMemo(() => {
     if (!phase) return 0;
     const stageElapsed = backendStage ? now - stageChangedAtRef.current : 0;
     const fromStage = stageToPercent(
-      backendStage, extractedCount, totalLinks, stageElapsed,
+      backendStage, extractedCount, totalLinks, stageElapsed, numDays,
     );
     if (fromStage !== null) return fromStage;
     // Fallback to the old phase-based estimate when we don't have stage yet.
@@ -198,24 +209,28 @@ export default function GenerationProgressModal({ phase, trip, onRetry }) {
   }, [phase, backendStage, now, extractedCount, totalLinks, elapsedMs]);
 
   // Stuck detection — per-stage thresholds. "generating itinerary" is the
-  // Sonnet call which legitimately takes 90-120s on 7-day builds, so a
-  // 60s threshold was crying wolf. Other stages (extraction, analysis,
-  // classification) are fast and stay at 60s. Thresholds match the
-  // interpolation clamps so the bar and the card freeze/appear together.
+  // Sonnet call which legitimately takes 90-180s depending on trip size +
+  // multi-base complexity, so the threshold scales with num_days (same
+  // budget the bar interpolation uses, so they freeze/appear together).
+  // Other stages (extraction, analysis, classification) are fast and
+  // stay at 60s.
   const stageAge = Date.now() - stageChangedAtRef.current;
   const stuck = useMemo(() => {
     if (backendStage) {
       const low = backendStage.toLowerCase();
       const threshold = low.includes("generating itinerary")
-        ? 120_000
+        ? generatingItineraryBudgetMs(numDays)
         : low.includes("validate") || low.includes("creating items")
           ? 90_000
           : 60_000;
       return stageAge > threshold;
     }
-    if (elapsedMs > 180_000) return true; // no status in 3min = something's off
+    // No backend stage seen yet — only declare stuck after a generous
+    // ceiling that scales with trip size (180s base + 8s/day, max 5min).
+    const fallbackCeiling = Math.max(180_000, generatingItineraryBudgetMs(numDays) + 60_000);
+    if (elapsedMs > fallbackCeiling) return true;
     return false;
-  }, [backendStage, stageAge, elapsedMs]);
+  }, [backendStage, stageAge, elapsedMs, numDays]);
 
   const steps = useMemo(() => {
     const defs = [
