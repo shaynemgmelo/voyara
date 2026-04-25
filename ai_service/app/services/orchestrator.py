@@ -5331,6 +5331,27 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
     _mark("building itinerary")
     try:
         build_result = await build_trip_itinerary(trip_id, http_client=http_client)
+
+        # Retry-on-empty: Sonnet/Haiku is non-deterministic and occasionally
+        # returns a place_list with 0 valid items even when extraction +
+        # research succeeded. The smoke test caught this on Paris (run 1
+        # → 0 places, run 2 → 29 places, same trip, same inputs). One
+        # extra retry costs ~$0.13 in worst case but rescues the user
+        # from a "Itinerary generation failed" modal on a build that
+        # should obviously have worked.
+        if (
+            build_result.get("places_created", 0) == 0
+            and build_result.get("error") == "Itinerary generation failed"
+        ):
+            _mark("build returned empty place_list — retrying once (LLM flake recovery)")
+            logger.warning(
+                "[combined] trip=%d build returned 0 places; retrying once",
+                trip_id,
+            )
+            build_result = await build_trip_itinerary(
+                trip_id, http_client=http_client,
+            )
+
         elapsed = _t.time() - pipeline_start
         _mark(f"DONE in {elapsed:.1f}s — {build_result.get('places_created', 0)} places")
         build_result["elapsed_s"] = round(elapsed, 1)
