@@ -451,7 +451,14 @@ export default function TripDetail() {
           {t("tripDetail.back")}
         </Link>
         <div className="flex-1 min-w-0">
-          <h1 className="text-xl font-bold text-gray-900">{trip.name}</h1>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-xl font-bold text-gray-900">{trip.name}</h1>
+            {trip.is_staging && (
+              <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-200">
+                🧪 {lang === "pt-BR" ? "Teste" : "Staging"}
+              </span>
+            )}
+          </div>
           <p className="text-sm text-gray-500">
             {trip.destination}
             {trip.num_days && ` · ${trip.num_days} ${t("tripDetail.days")}`}

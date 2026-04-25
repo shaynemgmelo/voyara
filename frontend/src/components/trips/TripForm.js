@@ -34,6 +34,10 @@ export default function TripForm({ onSubmit, initial }) {
   const [links, setLinks] = useState([]); // [{url, platform, valid}]
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // Staging trips are flagged for pipeline-testing without polluting real
+  // travel-planning trips. Filtered/badged separately in the UI; orchestrator
+  // behavior is identical.
+  const [isStaging, setIsStaging] = useState(initial?.is_staging || false);
   // Main destination — required. Anchors Tavily research + skips the Haiku
   // city detection step (the user's pick is ground truth).
   const [mainDestination, setMainDestination] = useState(
@@ -92,6 +96,7 @@ export default function TripForm({ onSubmit, initial }) {
         name: name.trim(),
         num_days: numDays,
         ai_mode: aiMode,
+        is_staging: isStaging,
         destination: mainDestination.description || mainDestination.city,
         traveler_profile: {
           main_destination: {
@@ -293,6 +298,23 @@ export default function TripForm({ onSubmit, initial }) {
           </p>
         )}
       </div>
+
+      <label className="flex items-center gap-2 text-xs text-gray-500 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={isStaging}
+          onChange={(e) => setIsStaging(e.target.checked)}
+          className="rounded border-gray-300 text-amber-500 focus:ring-amber-400"
+        />
+        <span>
+          🧪 {pt ? "Viagem de teste (staging)" : "Staging trip"}
+          <span className="text-gray-400 ml-1">
+            {pt
+              ? "— marca essa viagem como teste de pipeline."
+              : "— flag this trip as a pipeline test."}
+          </span>
+        </span>
+      </label>
 
       <button
         type="submit"

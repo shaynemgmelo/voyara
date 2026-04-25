@@ -117,7 +117,7 @@ class Api::V1::TripsController < ApplicationController
   end
 
   def trip_params
-    params.require(:trip).permit(:name, :destination, :num_days, :status, :ai_mode, :profile_status, traveler_profile: {})
+    params.require(:trip).permit(:name, :destination, :num_days, :status, :ai_mode, :profile_status, :is_staging, traveler_profile: {})
   end
 
   def generate_day_plans(trip)

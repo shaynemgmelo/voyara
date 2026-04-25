@@ -133,6 +133,11 @@ export default function TripCard({ trip, onDelete, draggable }) {
             {pt ? "Ativa" : "Active"}
           </div>
         )}
+        {trip.is_staging && (
+          <div className="absolute top-3 left-3 bg-amber-500 text-white text-[9px] font-bold px-2 py-0.5 rounded-full shadow-sm flex items-center gap-1" style={{ marginTop: trip.status === "active" ? "1.4rem" : 0 }}>
+            🧪 {pt ? "Teste" : "Staging"}
+          </div>
+        )}
 
         {/* Delete button — only on hover */}
         <button

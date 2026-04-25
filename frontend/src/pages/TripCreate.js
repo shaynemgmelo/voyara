@@ -16,7 +16,7 @@ export default function TripCreate() {
   //
   // The frontend then navigates to /trips/:id where the GenerationProgressModal
   // polls until items appear (or build_error fires the failure modal).
-  const handleSubmit = async ({ name, num_days, ai_mode, destination, traveler_profile, links }) => {
+  const handleSubmit = async ({ name, num_days, ai_mode, is_staging, destination, traveler_profile, links }) => {
     let isFirstTrip = false;
     try {
       const existing = await getTrips();
@@ -29,6 +29,7 @@ export default function TripCreate() {
       name,
       num_days,
       ai_mode,
+      is_staging,
       destination,
       traveler_profile,
     });

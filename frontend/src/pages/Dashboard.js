@@ -150,6 +150,11 @@ export default function Dashboard() {
                 <div className="absolute top-5 right-5 bg-white/20 backdrop-blur-md text-white text-xs font-bold px-4 py-1.5 rounded-full">
                   {pt ? "Continuar planejando →" : "Continue planning →"}
                 </div>
+                {heroTrip.is_staging && (
+                  <div className="absolute top-5 left-5 bg-amber-500/90 backdrop-blur-md text-white text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-1 shadow-lg">
+                    🧪 {pt ? "Teste" : "Staging"}
+                  </div>
+                )}
               </Link>
             </div>
           )}

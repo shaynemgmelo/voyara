@@ -14,6 +14,7 @@ class TripSerializer
       ai_mode: @trip.ai_mode,
       traveler_profile: @trip.traveler_profile,
       profile_status: @trip.profile_status,
+      is_staging: @trip.is_staging,
       day_plans_count: @trip.day_plans.size,
       items_count: @trip.itinerary_items.size,
       links_count: @trip.links.size,
