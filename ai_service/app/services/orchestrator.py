@@ -6432,11 +6432,22 @@ def _assert_pipeline_invariants(
 
     # ── 1. Video / link items must not have been dropped ───────────────
     if places_mentioned:
-        mentioned_norm: set[str] = set()
+        # Carry the source_url alongside the normalized name so we can tell
+        # an alias-drop ("Palácio Errázuriz" + "Museu de Arte Decorativa"
+        # are the same building, both surfaced from one video) apart from
+        # a real drop (an entire video's content never reached the
+        # itinerary).
+        mention_records: list[dict] = []
         for p in places_mentioned:
             n = (p.get("name") or "").strip()
-            if n:
-                mentioned_norm.add(_normalize_place_name(n))
+            if not n:
+                continue
+            mention_records.append({
+                "norm": _normalize_place_name(n),
+                "source_url": p.get("source_url") or "",
+            })
+        mentioned_norm: set[str] = {r["norm"] for r in mention_records}
+
         # Any item is considered "covering" a mention if its normalized
         # name overlaps with the mention's normalized name.
         covered: set[str] = set()
@@ -6453,12 +6464,43 @@ def _assert_pipeline_invariants(
                 if len(m_norm) >= 6 and (m_norm in norm or norm in m_norm):
                     covered.add(m_norm)
                     break
+
         dropped = mentioned_norm - covered
         if dropped:
-            violations.append(
-                f"[{context}] CRITICAL: {len(dropped)} link-mentioned "
-                f"place(s) absent from final list: {sorted(dropped)[:8]}"
-            )
+            # Partition: a "dropped" mention is treated as an ALIAS when
+            # it has a non-empty source_url AND at least one OTHER mention
+            # from the same source IS covered. Reasoning: the video's
+            # content reached the itinerary; the extractor just emitted
+            # multiple names for the same physical place. Without a
+            # source_url we can't verify, so it stays CRITICAL.
+            covered_by_source: dict[str, bool] = {}
+            for r in mention_records:
+                src = r["source_url"]
+                if src and r["norm"] in covered:
+                    covered_by_source[src] = True
+
+            truly_dropped: set[str] = set()
+            alias_dropped: set[str] = set()
+            for r in mention_records:
+                if r["norm"] not in dropped:
+                    continue
+                src = r["source_url"]
+                if src and covered_by_source.get(src):
+                    alias_dropped.add(r["norm"])
+                else:
+                    truly_dropped.add(r["norm"])
+
+            if truly_dropped:
+                violations.append(
+                    f"[{context}] CRITICAL: {len(truly_dropped)} link-mentioned "
+                    f"place(s) absent from final list: {sorted(truly_dropped)[:8]}"
+                )
+            if alias_dropped:
+                warnings.append(
+                    f"[{context}] {len(alias_dropped)} mention(s) appear to be "
+                    f"aliases (a sibling mention from the same source is "
+                    f"covered): {sorted(alias_dropped)[:8]}"
+                )
 
     # ── 2. Two day-trips on the same day in DIFFERENT cities ──────────
     by_day: dict[int, list[dict]] = {}

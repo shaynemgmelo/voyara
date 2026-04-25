@@ -1,0 +1,48 @@
+[
+  {
+    "name": "buenos_aires_5d",
+    "destination": "Buenos Aires, Argentina",
+    "num_days": 5,
+    "links": [
+      "https://vt.tiktok.com/ZS91HpAVE/",
+      "https://vt.tiktok.com/ZS919YHB5/"
+    ],
+    "traveler_profile": {
+      "main_destination": {
+        "city": "Buenos Aires",
+        "country": "Argentina"
+      }
+    }
+  },
+  {
+    "name": "tailandia_15d_multibase",
+    "destination": "Tailândia",
+    "num_days": 15,
+    "links": [
+      "https://vt.tiktok.com/ZS98LgBPH/",
+      "https://vt.tiktok.com/ZS98LQmDN/"
+    ],
+    "traveler_profile": {
+      "main_destination": {
+        "city": "Bangkok",
+        "country": "Thailand"
+      }
+    },
+    "_note": "Triggers multi_base classifier IF the videos mention 2+ Thai cities. Smoke script auto-confirms proportional distribution at the pause."
+  },
+  {
+    "name": "paris_5d",
+    "destination": "Paris, France",
+    "num_days": 5,
+    "links": [
+      "https://vt.tiktok.com/ZS98AKYDo/",
+      "https://vt.tiktok.com/ZS98AX4eD/"
+    ],
+    "traveler_profile": {
+      "main_destination": {
+        "city": "Paris",
+        "country": "France"
+      }
+    }
+  }
+]

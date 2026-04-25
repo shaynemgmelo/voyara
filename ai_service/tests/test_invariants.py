@@ -80,6 +80,48 @@ class TestVideoItemPreservation:
         )
         assert result["violations"] == []
 
+    def test_alias_dropped_downgrades_to_warning(self):
+        """When two mentions share a source_url and only one resolves to
+        an item, the unmatched one is treated as an ALIAS — the video's
+        content DID reach the itinerary, the extractor just emitted two
+        names for the same physical place ('Palácio Errázuriz' is the
+        building that houses 'Museu de Arte Decorativa')."""
+        place_list = [
+            _item("Museu de Arte Decorativa", 1, source="link",
+                  address="Av. del Libertador 1902, Buenos Aires, Argentina"),
+        ]
+        mentioned = [
+            {"name": "Palácio Errázuriz", "source_url": "https://vt.tiktok.com/abc"},
+            {"name": "Museu de Arte Decorativa", "source_url": "https://vt.tiktok.com/abc"},
+        ]
+        result = _assert_pipeline_invariants(
+            place_list, places_mentioned=mentioned, num_days=1,
+        )
+        assert result["violations"] == []
+        assert any("alias" in w for w in result["warnings"])
+
+    def test_truly_dropped_when_no_sibling_covered(self):
+        """If a video's mentions are ALL dropped (no sibling covered), it's
+        a real drop — entire video content was lost, NOT an alias case."""
+        place_list = [
+            _item("Eiffel Tower", 1, source="link"),
+        ]
+        mentioned = [
+            {"name": "Casa Rosada", "source_url": "https://vt.tiktok.com/lost"},
+            {"name": "Plaza de Mayo", "source_url": "https://vt.tiktok.com/lost"},
+            {"name": "Eiffel Tower", "source_url": "https://vt.tiktok.com/other"},
+        ]
+        result = _assert_pipeline_invariants(
+            place_list, places_mentioned=mentioned, num_days=1,
+        )
+        # Casa Rosada + Plaza de Mayo BOTH dropped from the same source —
+        # no sibling covered → CRITICAL. Plaza de Mayo normalizes to "mayo"
+        # (the helper strips generic prefixes), so we assert the count and
+        # one canonical name.
+        assert len(result["violations"]) == 1
+        assert "2 link-mentioned" in result["violations"][0]
+        assert "casa rosada" in result["violations"][0].lower()
+
 
 # ---------------------------------------------------------------------------
 # Warning: multi-city day-trip on same day
