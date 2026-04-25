@@ -73,11 +73,30 @@ export async function addDayTrip(tripId, destination, options = {}) {
   const body = { trip_id: tripId, destination, country, mode };
   if (mode === "replace") body.target_day_number = targetDayNumber;
   if (forceDeleteLocked) body.force_delete_locked = true;
-  const resp = await fetch(`${AI_URL}/add-day-trip`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // 90s ceiling — Haiku ~10s + 4 parallel Google Places ~5s + Rails
+  // CRUD ~2s = ~20s typical, but we leave headroom for slow networks.
+  // Without this the fetch would hang indefinitely if something on
+  // the backend stalls.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90_000);
+  let resp;
+  try {
+    resp = await fetch(`${AI_URL}/add-day-trip`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") {
+      const err = new Error("Tempo esgotado (90s). Tente de novo em alguns segundos.");
+      err.status = 504;
+      throw err;
+    }
+    throw e;
+  }
+  clearTimeout(timeoutId);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const err = new Error(data?.detail?.message || data?.detail?.error || "add-day-trip failed");

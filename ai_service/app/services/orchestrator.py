@@ -7234,18 +7234,21 @@ async def add_day_trip(
         return {"error": f"Could not generate day-trip items for {destination}"}
 
     # 2) Geo-enrich each item with Google Places (lat/lng/place_id/etc).
+    # Run searches in parallel to keep the user-facing latency under
+    # ~10s even with 4-5 items — sequential was hitting 30-60s and
+    # users were clicking the button multiple times thinking it hung.
     places = GooglePlacesClient()
     geo_query_city = destination + (f", {country}" if country else "")
-    enriched: list[dict] = []
-    for cand in items:
+
+    async def _enrich_one(cand: dict) -> dict | None:
         try:
             results = await places.search(f"{cand['name']} {geo_query_city}")
             if not results:
-                continue
+                return None
             top = results[0]
             details = await places.get_details(top.get("place_id"))
             if not details:
-                continue
+                return None
             cand["latitude"] = details.get("latitude")
             cand["longitude"] = details.get("longitude")
             cand["address"] = details.get("address")
@@ -7257,9 +7260,15 @@ async def add_day_trip(
             cand["website"] = details.get("website")
             cand["photos"] = details.get("photos") or []
             if cand.get("latitude") and cand.get("longitude"):
-                enriched.append(cand)
+                return cand
         except Exception as e:
             logger.warning("[add-day-trip] geo lookup failed for %r: %s", cand.get("name"), e)
+        return None
+
+    enriched_results = await asyncio.gather(
+        *(_enrich_one(c) for c in items), return_exceptions=False,
+    )
+    enriched: list[dict] = [r for r in enriched_results if r]
     if not enriched:
         return {"error": f"Could not geocode day-trip items for {destination}"}
 

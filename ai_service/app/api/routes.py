@@ -393,6 +393,13 @@ async def handle_resume_processing(
     )
 
 
+# In-flight set so clicking "Apagar e substituir" 3x in a row doesn't
+# spawn 3 parallel processings of the same trip (each generating Haiku
+# items + geo-enriching + writing to Rails — the resulting race ended
+# up triple-inserting items in trip 28).
+_add_day_trip_inflight: set[int] = set()
+
+
 @router.post("/add-day-trip")
 async def handle_add_day_trip(request: dict):
     """Programmatically add a day-trip without invoking refine.
@@ -423,6 +430,16 @@ async def handle_add_day_trip(request: dict):
         raise HTTPException(400, f"mode must be 'replace' or 'extend' (got {mode!r})")
     if mode == "replace" and not isinstance(target_day_number, int):
         raise HTTPException(400, "target_day_number (int) required for mode=replace")
+
+    if trip_id in _add_day_trip_inflight:
+        raise HTTPException(
+            409,
+            detail={
+                "error": "already_in_progress",
+                "message": "Já está adicionando um day-trip pra esta viagem. Aguarde alguns segundos.",
+            },
+        )
+    _add_day_trip_inflight.add(trip_id)
     try:
         result = await add_day_trip(
             trip_id=trip_id,
@@ -435,6 +452,8 @@ async def handle_add_day_trip(request: dict):
     except Exception:
         logger.exception("[add-day-trip] unexpected failure")
         raise HTTPException(500, "internal error adding day-trip")
+    finally:
+        _add_day_trip_inflight.discard(trip_id)
 
     if isinstance(result, dict) and result.get("error"):
         # Surface user-actionable errors with 400; everything else 500.
