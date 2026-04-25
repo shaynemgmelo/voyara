@@ -1655,6 +1655,110 @@ def _final_itinerary_dedup(place_list: list[dict]) -> list[dict]:
     return final
 
 
+def _split_multi_day_trip_days(
+    place_list: list[dict],
+    day_rigidity: dict[int, str] | None = None,
+) -> list[dict]:
+    """When a single day ended up with 2+ day-trip items in DIFFERENT
+    cities (e.g. Campanópolis 40km SW + Parque de la Costa 30km N from
+    Buenos Aires), split them across days. Real travel agents never
+    schedule two day-trips on the same day — the user can't be in
+    Tigre at noon and González Catán at 2pm.
+
+    Strategy: keep the dominant day-trip on the original day, move
+    others to the next flexible day that doesn't already host a
+    day-trip. If no eligible target day exists, the second day-trip
+    stays put — the downstream isolation pass + cluster tightener will
+    surface the conflict via outlier flags.
+    """
+    day_rigidity = day_rigidity or {}
+
+    def _parse_city(item: dict) -> str:
+        addr = (item.get("address") or "").strip()
+        if not addr:
+            return ""
+        parts = [p.strip() for p in addr.split(",") if p.strip()]
+        if len(parts) < 2:
+            return ""
+        cand = parts[-2]
+        toks = cand.split(" ", 1)
+        if toks and toks[0].replace("-", "").isdigit() and len(toks) > 1:
+            cand = toks[1]
+        return cand.lower().strip()
+
+    def _is_day_trip(item: dict) -> bool:
+        return (
+            (item.get("activity_model") == "day_trip")
+            or (item.get("item_role") == "day_trip_destination")
+            or (int(item.get("duration_minutes") or 0) >= 300)
+        )
+
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(p)
+
+    moves = 0
+    for day in sorted(by_day.keys()):
+        if day_rigidity.get(day) == "locked":
+            continue
+        items = by_day[day]
+        dt_items = [i for i in items if _is_day_trip(i)]
+        if len(dt_items) < 2:
+            continue
+        # Group day-trip items by their parsed city.
+        cities: dict[str, list[dict]] = {}
+        for dt in dt_items:
+            city = _parse_city(dt) or "_unknown"
+            cities.setdefault(city, []).append(dt)
+        if len(cities) < 2:
+            continue
+        # Dominant city = most day-trip items in it.
+        dominant = max(cities.keys(), key=lambda c: len(cities[c]))
+        # For each non-dominant day-trip, find a target day that's flex
+        # AND doesn't have a day-trip yet.
+        for city, dt_subset in cities.items():
+            if city == dominant:
+                continue
+            for dt in dt_subset:
+                target = None
+                for cand_day in sorted(by_day.keys()):
+                    if cand_day == day:
+                        continue
+                    if day_rigidity.get(cand_day) == "locked":
+                        continue
+                    cand_items = by_day.get(cand_day, [])
+                    if any(_is_day_trip(i) for i in cand_items):
+                        continue
+                    if len(cand_items) >= 6:
+                        continue
+                    target = cand_day
+                    break
+                if target is None:
+                    logger.warning(
+                        "[multi-day-trip-split] no flex day available for "
+                        "%r — leaving on day %d (will likely conflict with %r)",
+                        dt.get("name"), day, dominant,
+                    )
+                    continue
+                logger.info(
+                    "[multi-day-trip-split] %r: day %d → day %d "
+                    "(was conflicting with another day-trip in %r)",
+                    dt.get("name"), day, target, dominant,
+                )
+                dt["day"] = target
+                by_day[day].remove(dt)
+                by_day.setdefault(target, []).append(dt)
+                moves += 1
+
+    if moves:
+        logger.info(
+            "[multi-day-trip-split] resolved %d conflicting day-trip(s)", moves,
+        )
+    return place_list
+
+
 def _enforce_day_trip_isolation(place_list: list[dict]) -> list[dict]:
     """If a day contains a day-trip destination (e.g. Tigre Delta ~1h away
     from Buenos Aires), that day should NOT also have afternoon-Palermo
@@ -1983,26 +2087,56 @@ def _ensure_link_places_present(
     # the least-packed day, capped at 6 items per day.
     num_days = len(day_plans)
     items_per_day: dict[int, int] = {}
+    days_with_day_trip: set[int] = set()
     for it in place_list:
         d = it.get("day") or 1
         items_per_day[d] = items_per_day.get(d, 0) + 1
+        # Mark days that already host a day-trip so we don't inject a
+        # second one. Real example: Sonnet placed Campanópolis (40km SW)
+        # on day 4 — link-coverage then injected Parque de la Costa
+        # (30km N, Tigre) on day 4 too, leaving the user with two
+        # day-trips in opposite directions on the same day.
+        if (
+            (it.get("activity_model") == "day_trip")
+            or (it.get("item_role") == "day_trip_destination")
+            or (int(it.get("duration_minutes") or 0) >= 240)
+        ):
+            days_with_day_trip.add(d)
+
+    _DT_NAME_TOKENS = (
+        "tigre", "campanópolis", "campanopolis", "parque de la costa",
+        "versailles", "versalhes", "giverny", "fontainebleau",
+        "disneyland", "ayutthaya", "sintra", "colonia",
+        "petrópolis", "petropolis", "campos do jordão",
+        "mont-saint-michel", "mont saint michel",
+    )
+
+    def _looks_like_day_trip_name(nm: str) -> bool:
+        low = (nm or "").lower()
+        return any(tok in low for tok in _DT_NAME_TOKENS)
 
     for p in missing:
         target_day = p.get("day") or None
+        is_dt_like = _looks_like_day_trip_name(p.get("name") or "")
         if not target_day or target_day < 1 or target_day > num_days:
-            # Pick day with fewest items, avoiding days already full
-            target_day = min(
-                range(1, num_days + 1),
-                key=lambda d: items_per_day.get(d, 0),
-            )
+            # When the candidate is a likely day-trip, prefer days that
+            # DON'T already have one. Otherwise: least-packed.
+            non_dt_days = [
+                d for d in range(1, num_days + 1)
+                if d not in days_with_day_trip
+            ]
+            pool = non_dt_days if (is_dt_like and non_dt_days) else list(range(1, num_days + 1))
+            target_day = min(pool, key=lambda d: items_per_day.get(d, 0))
         if items_per_day.get(target_day, 0) >= 6:
-            # Day is full — pick any other under 6
-            candidates = [
+            # Day is full — pick any other under 6 (same day-trip-aware logic).
+            base_pool = [
                 d for d in range(1, num_days + 1)
                 if items_per_day.get(d, 0) < 6
             ]
-            if candidates:
-                target_day = min(candidates, key=lambda d: items_per_day.get(d, 0))
+            non_dt_pool = [d for d in base_pool if d not in days_with_day_trip]
+            pool = non_dt_pool if (is_dt_like and non_dt_pool) else base_pool
+            if pool:
+                target_day = min(pool, key=lambda d: items_per_day.get(d, 0))
 
         injected = {
             "day": target_day,
@@ -2020,6 +2154,10 @@ def _ensure_link_places_present(
         }
         place_list.append(injected)
         items_per_day[target_day] = items_per_day.get(target_day, 0) + 1
+        # If we just injected something that looks like a day-trip, mark
+        # the day so the next injection avoids it.
+        if is_dt_like:
+            days_with_day_trip.add(target_day)
         logger.info(
             "[link-coverage] Injected '%s' on day %d", p.get("name"), target_day
         )
@@ -2789,6 +2927,14 @@ async def _validate_and_create_items(
     # "Casa Rosada" independently on a different day. Here we know the real
     # Google Place and can collapse the two.
     validated = _final_itinerary_dedup(validated)
+
+    # MULTI-DAY-TRIP SPLIT — if a single day ended up with 2+ day-trips
+    # in different cities (Sonnet hallucination + link-coverage injection
+    # both targeting the same day), spread them across flex days BEFORE
+    # isolation runs. Otherwise isolation would happily keep both
+    # day-trips on the same day (since both pass _is_day_trip), creating
+    # the "Campanópolis SW + Parque de la Costa N on day 4" mess.
+    validated = _split_multi_day_trip_days(validated, day_rigidity=day_rigidity)
 
     # DAY-TRIP ISOLATION — a real travel agent would never mix a Tigre day
     # trip (8h round-trip from Buenos Aires) with "afternoon Palermo
