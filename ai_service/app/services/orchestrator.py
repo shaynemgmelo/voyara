@@ -5664,10 +5664,13 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
     except Exception as e:
         return {"error": f"Failed to load trip: {e}", "changed": 0}
 
-    # Flatten current items + remember their original (day, position) so
-    # we can detect what actually moved.
+    # Flatten current items + remember their original (day, position, slot)
+    # so we can detect what actually moved. CRITICAL: capture the original
+    # time_slot here BEFORE _optimize_day_proximity runs and mutates it
+    # in place — otherwise the slot diff below sees no change and the
+    # PATCH never persists the new slot to Rails.
     place_list: list[dict] = []
-    original_state: dict[int, tuple[int, int]] = {}  # item_id -> (day, position)
+    original_state: dict[int, tuple[int, int, str | None]] = {}
     dp_by_number: dict[int, int] = {}
     for dp in day_plans_raw:
         day_num = dp.get("day_number")
@@ -5675,7 +5678,7 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         for idx, it in enumerate(dp.get("itinerary_items") or []):
             place = {**it, "day": day_num}
             place_list.append(place)
-            original_state[it["id"]] = (day_num, idx)
+            original_state[it["id"]] = (day_num, idx, it.get("time_slot"))
 
     if not place_list:
         return {"changed": 0, "total": 0, "summary": "Trip is empty"}
@@ -5729,12 +5732,31 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         )
         return "20:00" if is_night else None
 
+    def _slots_for_count(n: int) -> list[str]:
+        """For days that exceed the 5-slot default, evenly spread N items
+        between 10:00 and 19:00 so two items never share a slot. Mirrors
+        _spread_daytime_slots in _optimize_day_proximity."""
+        if n <= len(slot_by_position):
+            return slot_by_position[:n]
+        if n == 1:
+            return ["12:00"]
+        start_min, end_min = 10 * 60, 19 * 60
+        step = (end_min - start_min) / (n - 1)
+        return [
+            f"{int(round(start_min + i * step) // 60):02d}:"
+            f"{int(round(start_min + i * step) % 60):02d}"
+            for i in range(n)
+        ]
+
     patches: list[tuple[int, int, int, dict]] = []  # (item_id, new_dp_id, new_pos, data)
     for day_num in sorted(by_day.keys()):
         items = by_day[day_num]
         new_dp_id = dp_by_number.get(day_num)
         if not new_dp_id:
             continue
+        # Pre-compute the slot map for this day so all items get a unique
+        # slot even when the day has more than 5 items.
+        day_slots = _slots_for_count(len(items))
         for pos, item in enumerate(items):
             item_id = item.get("id")
             if not item_id:
@@ -5742,19 +5764,23 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
             orig = original_state.get(item_id)
             if not orig:
                 continue
-            orig_day, orig_pos = orig
+            orig_day, orig_pos, orig_slot = orig
             # Nightlife/bar overrides positional slots — no more "Phi Phi
             # Nightlife @ 14:30". Evening items always get 20:00.
             night_override = _nightlife_slot_for(item)
             if night_override:
                 new_slot = night_override
-            elif pos < len(slot_by_position):
-                new_slot = slot_by_position[pos]
+            elif pos < len(day_slots):
+                new_slot = day_slots[pos]
             else:
                 new_slot = item.get("time_slot")
             changed_day = orig_day != day_num
             changed_pos = orig_pos != pos
-            changed_slot = item.get("time_slot") != new_slot
+            # Compare against the ORIGINAL slot from Rails (captured before
+            # _optimize_day_proximity mutated time_slot in place). Without
+            # this, the diff would be against the already-updated value
+            # and the PATCH would never persist the new slot.
+            changed_slot = orig_slot != new_slot
             if not (changed_day or changed_pos or changed_slot):
                 continue
             data: dict = {"position": pos}
@@ -5775,7 +5801,7 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         orig = id_to_original_day.get(item_id)
         if not orig:
             return
-        orig_day, _ = orig
+        orig_day, _, _ = orig
         orig_dp_id = dp_by_number.get(orig_day)
         if not orig_dp_id:
             return
@@ -6624,6 +6650,74 @@ def _assert_pipeline_invariants(
             f"[{context}] {len(dup_ids)} duplicate google_place_id(s) "
             f"in final list — dedup pass missed them"
         )
+
+    # ── 5. Duplicate time_slots within a day (CRITICAL) ───────────────
+    # Trip 36 surfaced this: Day 1 had two items at 16:30 AND two at 19:00
+    # because the slot fallback grabbed slots by their old positional index
+    # after a nearest-neighbor reorder. Two items can't be at the same time
+    # — flag as critical so the build / optimize fails fast in strict mode.
+    for d, items in by_day.items():
+        slots_seen: dict[str, list[str]] = {}
+        for it in items:
+            ts = it.get("time_slot")
+            if not ts:
+                continue
+            slots_seen.setdefault(ts, []).append(it.get("name") or "?")
+        for ts, names in slots_seen.items():
+            if len(names) > 1:
+                violations.append(
+                    f"[{context}] CRITICAL: day {d} has {len(names)} items "
+                    f"sharing time_slot {ts}: {names[:5]}"
+                )
+
+    # ── 6. Day cluster diameter exceeded (WARN) ───────────────────────
+    # Locked days were previously skipped entirely by _tighten_day_clusters.
+    # Trip 36 surfaced an 11.6km locked day. Now we flag any day above the
+    # threshold (15km — well above the new 12km tightener limit) so the
+    # smoke test catches "Microcentro + Tigre on the same day" before the
+    # user opens the trip.
+    DIAMETER_WARN_KM = 15.0
+    for d, items in by_day.items():
+        # Skip day-trips — they legitimately span their remote destination.
+        has_dt = any(
+            it.get("activity_model") == "day_trip"
+            or it.get("item_role") == "day_trip_destination"
+            or int(it.get("duration_minutes") or 0) >= 300
+            for it in items
+        )
+        if has_dt:
+            continue
+        coords = []
+        for it in items:
+            try:
+                lat = float(it.get("latitude")) if it.get("latitude") else None
+                lng = float(it.get("longitude")) if it.get("longitude") else None
+            except (TypeError, ValueError):
+                continue
+            if lat is not None and lng is not None:
+                coords.append((lat, lng))
+        if len(coords) < 2:
+            continue
+        # Max pairwise haversine
+        import math as _m
+        max_d_km = 0.0
+        for i in range(len(coords)):
+            for j in range(i + 1, len(coords)):
+                la1, lo1 = _m.radians(coords[i][0]), _m.radians(coords[i][1])
+                la2, lo2 = _m.radians(coords[j][0]), _m.radians(coords[j][1])
+                dlat, dlon = la2 - la1, lo2 - lo1
+                a = (
+                    _m.sin(dlat / 2) ** 2
+                    + _m.cos(la1) * _m.cos(la2) * _m.sin(dlon / 2) ** 2
+                )
+                km = 2 * 6371 * _m.asin(_m.sqrt(a))
+                if km > max_d_km:
+                    max_d_km = km
+        if max_d_km > DIAMETER_WARN_KM:
+            warnings.append(
+                f"[{context}] day {d} cluster diameter {max_d_km:.1f}km "
+                f"exceeds {DIAMETER_WARN_KM:.0f}km — items spread too far"
+            )
 
     # ── Logging ───────────────────────────────────────────────────────
     for v in violations:

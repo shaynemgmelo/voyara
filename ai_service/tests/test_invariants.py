@@ -210,6 +210,81 @@ class TestDuplicates:
 
 
 # ---------------------------------------------------------------------------
+# Critical: time_slot collisions within a day
+# ---------------------------------------------------------------------------
+
+class TestTimeSlotDuplicates:
+    def test_warns_on_duplicate_slot_same_day(self):
+        place_list = [
+            _item("A", 1, time_slot="10:00"),
+            _item("B", 1, time_slot="16:30"),
+            _item("C", 1, time_slot="16:30"),  # collision
+        ]
+        result = _assert_pipeline_invariants(place_list, num_days=1)
+        assert any("16:30" in v and "day 1" in v for v in result["violations"])
+
+    def test_no_violation_when_all_slots_unique(self):
+        place_list = [
+            _item("A", 1, time_slot="10:00"),
+            _item("B", 1, time_slot="14:30"),
+            _item("C", 1, time_slot="19:00"),
+        ]
+        result = _assert_pipeline_invariants(place_list, num_days=1)
+        assert not any("time_slot" in v for v in result["violations"])
+
+    def test_strict_raises_on_slot_collision(self):
+        place_list = [
+            _item("A", 1, time_slot="10:00"),
+            _item("B", 1, time_slot="10:00"),
+        ]
+        with pytest.raises(PipelineInvariantViolation):
+            _assert_pipeline_invariants(place_list, num_days=1, strict=True)
+
+
+# ---------------------------------------------------------------------------
+# Warning: day cluster diameter exceeded
+# ---------------------------------------------------------------------------
+
+class TestDayDiameter:
+    def test_warns_on_day_with_huge_diameter(self):
+        # ~25km between Paris center and a far suburb.
+        place_list = [
+            _item("Paris A", 1, latitude=48.8566, longitude=2.3522),
+            _item("Paris B", 1, latitude=48.8600, longitude=2.3550),
+            _item("FarOutlier", 1, latitude=49.0866, longitude=2.6022),
+        ]
+        result = _assert_pipeline_invariants(place_list, num_days=1)
+        assert any(
+            "diameter" in w and "day 1" in w for w in result["warnings"]
+        )
+
+    def test_no_warn_on_tight_day(self):
+        place_list = [
+            _item("A", 1, latitude=48.8566, longitude=2.3522),
+            _item("B", 1, latitude=48.8600, longitude=2.3550),
+        ]
+        result = _assert_pipeline_invariants(place_list, num_days=1)
+        assert not any("diameter" in w for w in result["warnings"])
+
+    def test_skips_diameter_check_on_day_trip(self):
+        """Day-trip days legitimately span the remote destination."""
+        place_list = [
+            _item(
+                "Versailles", 1,
+                latitude=48.8049, longitude=2.1204,
+                activity_model="day_trip",
+                duration_minutes=480,
+            ),
+            _item(
+                "Other Versailles spot", 1,
+                latitude=48.7800, longitude=2.0500,
+            ),
+        ]
+        result = _assert_pipeline_invariants(place_list, num_days=1)
+        assert not any("diameter" in w for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
 # Info / housekeeping
 # ---------------------------------------------------------------------------
 
