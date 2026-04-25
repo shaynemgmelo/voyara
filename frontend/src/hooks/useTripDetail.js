@@ -127,9 +127,17 @@ export default function useTripDetail(tripId) {
       // If we're in generating phase, also probe the AI service to see if
       // the build is really still running — if it died while the tab was
       // backgrounded, retry IMMEDIATELY instead of waiting for the timer.
+      // Manual mode is a TERMINAL state by user choice — no auto-retry,
+      // no auto-build. The "Assistência IA" button is the only way to
+      // trigger an AI build for a manual trip. Trip 40 surfaced this
+      // bug: the visibility handler kept calling resumeProcessing even
+      // though the user picked manual, and the AI silently rebuilt the
+      // whole itinerary.
       const t = trip;
+      const tIsManual = t?.ai_mode === "manual";
       if (
         t
+        && !tIsManual
         && t.profile_status === "confirmed"
         && t.links?.some((l) => l.status === "extracted")
         && !t.day_plans?.some((dp) => dp.itinerary_items?.length > 0)
@@ -561,8 +569,12 @@ export default function useTripDetail(tripId) {
     // trip already has items, this is just a profile edit from the inline
     // card — no rebuild, otherwise we'd duplicate every item. The user can
     // still use the explicit "refine" flow if they want a rebuild.
+    // Manual mode NEVER auto-builds — the user must press "Assistência IA"
+    // explicitly. Confirming the profile in manual just persists the
+    // profile, doesn't generate items.
     const hasItems = trip?.day_plans?.some((dp) => dp.itinerary_items?.length > 0);
-    if (status === "confirmed" && !hasItems) {
+    const isManual = trip?.ai_mode === "manual";
+    if (status === "confirmed" && !hasItems && !isManual) {
       const anyLink = trip?.links?.[0];
       if (anyLink) {
         try {

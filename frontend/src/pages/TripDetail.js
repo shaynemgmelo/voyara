@@ -87,6 +87,8 @@ export default function TripDetail() {
   const [activeTab, setActiveTab] = useState("itinerary");
   const [showPDFExport, setShowPDFExport] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  // Loading state for the "Assistência IA" button (only used in manual mode).
+  const [aiAssistRunning, setAiAssistRunning] = useState(false);
   const [showAddDayTrip, setShowAddDayTrip] = useState(false);
 
   // Build a fingerprint of all item IDs to detect changes (adds, deletes, reorders)
@@ -350,6 +352,24 @@ export default function TripDetail() {
     effectivePhase === "awaiting_city_distribution";
   const cityDistribution = trip?.traveler_profile?.city_distribution;
   const isManualMode = trip?.ai_mode === "manual";
+  // Manual trips never auto-build. The "Assistência IA" button is the
+  // only way the user can ask the AI to organize their extracted places
+  // into days. Only offer it when there's nothing in the itinerary yet —
+  // re-triggering after items exist would duplicate everything.
+  const hasItemsForAssist = trip?.day_plans?.some(
+    (dp) => (dp.itinerary_items || []).length > 0,
+  );
+  const showAiAssistButton = isManualMode && !hasItemsForAssist;
+  const handleAiAssist = async () => {
+    if (aiAssistRunning) return;
+    setAiAssistRunning(true);
+    try {
+      await retryBuild();
+    } finally {
+      // Polling will pick up the new items + flip to AI-organized view.
+      setAiAssistRunning(false);
+    }
+  };
 
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
@@ -465,6 +485,25 @@ export default function TripDetail() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
+          {showAiAssistButton && (
+            <button
+              onClick={handleAiAssist}
+              disabled={aiAssistRunning}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-500 hover:to-amber-600 disabled:opacity-60 text-white text-sm font-semibold transition-colors shadow-sm"
+              title={
+                lang === "pt-BR"
+                  ? "Deixar a IA organizar seus lugares nos dias"
+                  : "Let the AI organize your places into days"
+              }
+            >
+              <span className="text-base leading-none">🪄</span>
+              <span className="hidden sm:inline">
+                {aiAssistRunning
+                  ? (lang === "pt-BR" ? "Organizando..." : "Organizing...")
+                  : (lang === "pt-BR" ? "Assistência IA" : "AI Assist")}
+              </span>
+            </button>
+          )}
           <button
             onClick={() => setShowShareModal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:text-gray-900 hover:border-gray-400 transition-colors"

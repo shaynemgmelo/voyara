@@ -9,6 +9,11 @@ import { useLanguage } from "../../i18n/LanguageContext";
  * place is dropped, TripDetail calls addItem(dayPlanId, {name, source_url})
  * and we visually mark it as "added" here so the user can see what's done.
  *
+ * Places are GROUPED BY source_url so the user can see "these came from
+ * this video, those from that one". This makes the pick-and-choose flow
+ * intuitive for trips built from multiple videos — drag the ones you
+ * actually want, skip the rest from any given source.
+ *
  * Empty state messaging:
  *   - extraction still running       → "Reading your videos…"
  *   - extraction done, no places     → "Couldn't find places. Add them manually."
@@ -19,9 +24,33 @@ import { useLanguage } from "../../i18n/LanguageContext";
  */
 
 const DROPPABLE_ID = "extracted-pool";
+const NO_SOURCE = "__no_source__";
 
 function normalize(name) {
   return (name || "").trim().toLowerCase();
+}
+
+/** Best-effort short label for a source URL — domain + last path segment. */
+function shortSourceLabel(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host.includes("tiktok")) return "TikTok";
+    if (host.includes("instagram")) return "Instagram";
+    if (host.includes("youtube") || host.includes("youtu.be")) return "YouTube";
+    return host;
+  } catch {
+    return url.length > 30 ? `${url.slice(0, 30)}…` : url;
+  }
+}
+
+function sourceIcon(url) {
+  if (!url) return "📝";
+  if (url.includes("tiktok")) return "🎵";
+  if (url.includes("instagram")) return "📸";
+  if (url.includes("youtube") || url.includes("youtu.be")) return "▶️";
+  return "🔗";
 }
 
 export default function ExtractedPlacesPanel({ trip }) {
@@ -45,6 +74,36 @@ export default function ExtractedPlacesPanel({ trip }) {
   const links = trip?.links || [];
   const extracting = links.some((l) => l.status === "pending" || l.status === "processing");
 
+  // Group places by source_url, preserving each place's GLOBAL index in
+  // placesMentioned so the @hello-pangea/dnd Draggable index stays unique
+  // and consistent across the whole droppable.
+  const groups = useMemo(() => {
+    const byUrl = new Map();
+    placesMentioned.forEach((place, globalIndex) => {
+      const key = place.source_url || NO_SOURCE;
+      if (!byUrl.has(key)) byUrl.set(key, []);
+      byUrl.get(key).push({ place, globalIndex });
+    });
+    // Order: groups in the order they first appear in placesMentioned, with
+    // NO_SOURCE last so manually-added items don't fragment the visual flow.
+    const ordered = [];
+    const seen = new Set();
+    placesMentioned.forEach((place) => {
+      const key = place.source_url || NO_SOURCE;
+      if (seen.has(key) || key === NO_SOURCE) return;
+      seen.add(key);
+      ordered.push({ url: key, places: byUrl.get(key) });
+    });
+    if (byUrl.has(NO_SOURCE)) {
+      ordered.push({ url: NO_SOURCE, places: byUrl.get(NO_SOURCE) });
+    }
+    return ordered;
+  }, [placesMentioned]);
+
+  const totalRemaining = placesMentioned.filter(
+    (p) => !usedNames.has(normalize(p.name)),
+  ).length;
+
   return (
     <aside className="rounded-2xl bg-white border border-gray-200 overflow-hidden flex flex-col h-fit sticky top-4">
       <header className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
@@ -61,7 +120,7 @@ export default function ExtractedPlacesPanel({ trip }) {
         </div>
         {placesMentioned.length > 0 && (
           <span className="text-[11px] font-semibold text-coral-600 tabular-nums">
-            {placesMentioned.filter((p) => !usedNames.has(normalize(p.name))).length}
+            {totalRemaining}
             <span className="text-gray-400">/{placesMentioned.length}</span>
           </span>
         )}
@@ -72,7 +131,7 @@ export default function ExtractedPlacesPanel({ trip }) {
           <div
             ref={provided.innerRef}
             {...provided.droppableProps}
-            className="p-3 space-y-2 max-h-[calc(100vh-12rem)] overflow-y-auto"
+            className="p-3 space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto"
           >
             {placesMentioned.length === 0 && (
               <div className="px-4 py-8 text-center text-sm text-gray-400">
@@ -84,52 +143,78 @@ export default function ExtractedPlacesPanel({ trip }) {
               </div>
             )}
 
-            {placesMentioned.map((place, index) => {
-              const used = usedNames.has(normalize(place.name));
+            {groups.map(({ url, places }) => {
+              const isNoSource = url === NO_SOURCE;
+              const remaining = places.filter(
+                ({ place }) => !usedNames.has(normalize(place.name)),
+              ).length;
               return (
-                <Draggable
-                  key={`${place.name}-${index}`}
-                  draggableId={`extracted::${place.name}::${index}`}
-                  index={index}
-                  isDragDisabled={used}
-                >
-                  {(p, snapshot) => (
-                    <div
-                      ref={p.innerRef}
-                      {...p.draggableProps}
-                      {...p.dragHandleProps}
-                      className={`rounded-lg border p-3 text-sm transition select-none ${
-                        used
-                          ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
-                          : snapshot.isDragging
-                            ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
-                            : "border-gray-200 bg-white hover:border-coral-300 cursor-grab"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="font-medium text-gray-900 leading-snug min-w-0">
-                          {place.name}
-                        </div>
-                        {used && (
-                          <span className="text-emerald-500 text-xs flex-shrink-0">
-                            ✓ {pt ? "no roteiro" : "added"}
-                          </span>
-                        )}
-                      </div>
-                      {place.source_url && !used && (
+                <section key={url} className="space-y-1.5">
+                  <header className="flex items-center gap-1.5 px-1 pb-1 border-b border-dashed border-gray-200">
+                    <span className="text-sm leading-none">
+                      {isNoSource ? "✏️" : sourceIcon(url)}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      {isNoSource ? (
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500">
+                          {pt ? "Adicionados manualmente" : "Added manually"}
+                        </span>
+                      ) : (
                         <a
-                          href={place.source_url}
+                          href={url}
                           target="_blank"
                           rel="noreferrer"
                           onClick={(e) => e.stopPropagation()}
-                          className="block mt-1 text-[10px] text-gray-400 hover:text-coral-600 truncate"
+                          className="text-[11px] font-bold uppercase tracking-wider text-gray-500 hover:text-coral-600 truncate block"
+                          title={url}
                         >
-                          {pt ? "do vídeo" : "from video"} ↗
+                          {shortSourceLabel(url)} ↗
                         </a>
                       )}
                     </div>
-                  )}
-                </Draggable>
+                    <span className="text-[10px] font-semibold text-gray-400 tabular-nums flex-shrink-0">
+                      {remaining}/{places.length}
+                    </span>
+                  </header>
+
+                  {places.map(({ place, globalIndex }) => {
+                    const used = usedNames.has(normalize(place.name));
+                    return (
+                      <Draggable
+                        key={`${place.name}-${globalIndex}`}
+                        draggableId={`extracted::${place.name}::${globalIndex}`}
+                        index={globalIndex}
+                        isDragDisabled={used}
+                      >
+                        {(p, snapshot) => (
+                          <div
+                            ref={p.innerRef}
+                            {...p.draggableProps}
+                            {...p.dragHandleProps}
+                            className={`rounded-lg border p-3 text-sm transition select-none ${
+                              used
+                                ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
+                                : snapshot.isDragging
+                                  ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
+                                  : "border-gray-200 bg-white hover:border-coral-300 cursor-grab"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="font-medium text-gray-900 leading-snug min-w-0">
+                                {place.name}
+                              </div>
+                              {used && (
+                                <span className="text-emerald-500 text-xs flex-shrink-0">
+                                  ✓ {pt ? "no roteiro" : "added"}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </Draggable>
+                    );
+                  })}
+                </section>
               );
             })}
             {provided.placeholder}
