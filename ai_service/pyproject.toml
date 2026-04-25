@@ -28,6 +28,23 @@ dependencies = [
     "eval_type_backport>=0.2.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Treat any uncaught warning as a hard failure during tests so pipeline
+# bugs (e.g. unawaited coroutines, deprecated calls) surface loudly
+# instead of being lost in noise.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
