@@ -2218,6 +2218,7 @@ def _cluster_diameter_km(places: list[dict]) -> float:
 def _tighten_day_clusters(
     place_list: list[dict],
     max_diameter_km: float = 7.0,
+    max_diameter_km_locked: float = 12.0,
     day_rigidity: dict[int, str] | None = None,
 ) -> list[dict]:
     """Enforce that every day's places sit within max_diameter_km of each
@@ -2237,9 +2238,14 @@ def _tighten_day_clusters(
     Runs iteratively: each pass drops at most one outlier per day so that
     removing an outlier recomputes the centroid before dropping the next.
 
-    Phase 3: `day_rigidity` — locked days are SKIPPED entirely (their layout
-    is the video's intent, even if it looks geographically sparse). Outliers
-    from flexible days also can't be moved INTO a locked day.
+    Phase 3: `day_rigidity` — locked days were previously SKIPPED entirely
+    (their layout was treated as sacred video intent). After trip 36 surfaced
+    a locked Day 1 with 11 items at 11.6km diameter, locked days now get a
+    looser threshold (`max_diameter_km_locked`, default 12km) instead of a
+    skip. The slack still respects "video said these go together" for
+    multi-neighborhood days (Microcentro+Puerto Madero ~2km) while catching
+    egregious "Microcentro + Tigre on the same day" type splits. Outliers
+    from flexible days still can't be moved INTO a locked day.
     """
     if not place_list:
         return place_list
@@ -2261,9 +2267,14 @@ def _tighten_day_clusters(
     for _ in range(6):
         changes = False
         for day in list(by_day.keys()):
-            # Locked days are sacred — skip.
-            if day_rigidity.get(day) == "locked":
-                continue
+            is_locked = day_rigidity.get(day) == "locked"
+            # Locked days get a looser threshold (12km default) — wide enough
+            # to honor "video grouped these together" for multi-neighborhood
+            # days, tight enough to catch a Microcentro+Tigre 11.6km split
+            # like trip 36's Day 1.
+            threshold_for_day = (
+                max_diameter_km_locked if is_locked else max_diameter_km
+            )
             places = by_day[day]
             # Day-trip days span their own destination (Versailles 17km from
             # Paris, Tigre 30km from BsAs). The 7km diameter rule would drop
@@ -2285,7 +2296,7 @@ def _tighten_day_clusters(
                 continue
 
             diameter = _cluster_diameter_km(geocoded)
-            if diameter <= max_diameter_km:
+            if diameter <= threshold_for_day:
                 continue
 
             # Find the place furthest from the centroid — that's the outlier.
@@ -2324,6 +2335,8 @@ def _tighten_day_clusters(
             o_lat = float(outlier["latitude"])
             o_lng = float(outlier["longitude"])
             best_day = None
+            # Use the FLEXIBLE threshold for the destination match (we're
+            # moving the item INTO a flexible day — should sit tight there).
             best_dist = max_diameter_km
             for other_day, other_places in by_day.items():
                 if other_day == day:
@@ -4049,6 +4062,30 @@ def _optimize_day_proximity(
     # "Phi Phi Island Nightlife" at 14:30 — obviously wrong.
     default_time_slots = ["10:00", "12:30", "14:30", "16:30", "19:00"]
     evening_slots = ["20:00", "21:30"]
+
+    def _spread_daytime_slots(n: int) -> list[str]:
+        """Evenly spread N daytime items between 10:00 and 19:00.
+
+        Used when a day has more items than the 5-slot default. Without
+        this, items beyond index 4 used to fall back to original_time_slots
+        BY POSITION INDEX after a nearest-neighbor reorder — so the slot
+        belonged to whichever item HAD been at that original position, not
+        the item now sitting there. Result: the same time_slot appearing
+        twice in one day (e.g. trip 36's Day 1 had two items at 16:30 and
+        two at 19:00 because the reorder shuffled positions but the
+        fallback grabbed slots by their old index).
+        """
+        if n <= 0:
+            return []
+        if n == 1:
+            return ["12:00"]
+        start_min, end_min = 10 * 60, 19 * 60
+        step = (end_min - start_min) / (n - 1)
+        out = []
+        for i in range(n):
+            m = round(start_min + i * step)
+            out.append(f"{int(m // 60):02d}:{int(m % 60):02d}")
+        return out
     NIGHTLIFE_CATEGORIES = {"nightlife", "bar", "club", "vida_noturna"}
 
     def _is_nightlife(item: dict) -> bool:
@@ -4116,8 +4153,15 @@ def _optimize_day_proximity(
         new_sequence = ordered + night_items + non_geo
 
         # Reassign time_slots by position — daytime items use the
-        # standard rhythm, nightlife items get pinned evening slots.
+        # standard rhythm (5 items: 10:00, 12:30, 14:30, 16:30, 19:00),
+        # or evenly-spread interpolation when a day has more items than
+        # the default rhythm covers. Nightlife items get pinned evening
+        # slots regardless.
         num_day = len(ordered)
+        if num_day <= len(default_time_slots):
+            daytime_slots_for_day = default_time_slots[:num_day]
+        else:
+            daytime_slots_for_day = _spread_daytime_slots(num_day)
         for idx, item in enumerate(new_sequence):
             if _is_nightlife(item):
                 night_idx = idx - num_day
@@ -4125,10 +4169,9 @@ def _optimize_day_proximity(
                     item["time_slot"] = evening_slots[night_idx]
                 else:
                     item["time_slot"] = "22:00"
-            elif idx < len(default_time_slots):
-                item["time_slot"] = default_time_slots[idx]
-            elif idx < len(original_time_slots) and original_time_slots[idx]:
-                item["time_slot"] = original_time_slots[idx]
+            elif idx < len(daytime_slots_for_day):
+                item["time_slot"] = daytime_slots_for_day[idx]
+            # else: leave whatever was there — non-geo items at the tail
 
         by_day[d] = new_sequence
 

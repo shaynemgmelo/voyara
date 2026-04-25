@@ -366,6 +366,55 @@ class TestTightenDayClusters:
         outlier_on_day1 = any(i.get("name") == "FarOutlier" for i in day1)
         assert not outlier_on_day1
 
+    def test_locked_day_within_loose_threshold_untouched(self):
+        """A locked day with 8km diameter (e.g. Microcentro+Recoleta) stays
+        intact — looser locked threshold (12km default) honors video intent."""
+        items = [
+            _paris_item("A", 1),
+            _paris_item("B", 1),
+            _item(
+                "ModerateOutlier",
+                1,
+                # ~8km from Paris centroid
+                lat=PARIS_LATLNG[0] + 0.08,
+                lng=PARIS_LATLNG[1] + 0.05,
+                address="suburb",
+                source="link",
+            ),
+        ]
+        result = _tighten_day_clusters(
+            list(items), day_rigidity={1: "locked"},
+        )
+        day1_names = [i.get("name") for i in result if i.get("day") == 1]
+        assert "ModerateOutlier" in day1_names
+
+    def test_locked_day_egregious_diameter_gets_outlier_flagged(self):
+        """A locked day with 25km diameter (egregious — Microcentro+Tigre on
+        the same day) crosses the 12km locked threshold and the link-sourced
+        outlier gets flagged for user review."""
+        items = [
+            _paris_item("A", 1),
+            _paris_item("B", 1),
+            _paris_item("C", 1),
+            _item(
+                "TigreFarAway",
+                1,
+                lat=PARIS_LATLNG[0] + 0.25,  # ~25km
+                lng=PARIS_LATLNG[1] + 0.25,
+                address="far suburb",
+                source="link",
+            ),
+        ]
+        result = _tighten_day_clusters(
+            list(items), day_rigidity={1: "locked"},
+        )
+        outliers = [i for i in result if i.get("name") == "TigreFarAway"]
+        assert len(outliers) == 1
+        # Either moved off day 1 OR flagged for review (link-sourced never dropped).
+        moved_off = outliers[0].get("day") != 1
+        flagged = bool(outliers[0].get("needs_review"))
+        assert moved_off or flagged
+
 
 # ---------------------------------------------------------------------------
 # _optimize_day_proximity
