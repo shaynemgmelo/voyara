@@ -2973,6 +2973,20 @@ async def _validate_and_create_items(
         places=places,
     )
 
+    # Final invariant audit — logs ERROR for critical breaches (video items
+    # missing) and WARN for soft ones (empty days, multi-city day-trips,
+    # duplicate place_ids). Currently strict=False (observe-only). Once
+    # the logs show a clean baseline for a few days we flip to strict.
+    profile_for_audit = trip.get("traveler_profile") or {}
+    _assert_pipeline_invariants(
+        validated,
+        places_mentioned=profile_for_audit.get("places_mentioned") or [],
+        day_rigidity=day_rigidity,
+        num_days=len(day_plans),
+        strict=False,
+        context="build",
+    )
+
     logger.info("[eco] Validated %d places, creating items", len(validated))
 
     # Create items in Rails (parallel for speed)
@@ -6373,6 +6387,156 @@ def _is_generic_category_name(item_name: str) -> bool:
         ):
             return True
     return False
+
+
+class PipelineInvariantViolation(Exception):
+    """Raised when the post-Sonnet pipeline produced a state that violates
+    a baseline product invariant (video items lost, two day-trips on the
+    same day in different cities, etc.). The build flow catches this and
+    surfaces it as a clean build_error so the user retries instead of
+    landing on a corrupted itinerary."""
+
+    def __init__(self, violations: list[str]):
+        super().__init__("; ".join(violations) if violations else "invariant violation")
+        self.violations = list(violations)
+
+
+def _assert_pipeline_invariants(
+    place_list: list[dict],
+    *,
+    places_mentioned: list[dict] | None = None,
+    day_rigidity: dict[int, str] | None = None,
+    num_days: int = 0,
+    strict: bool = False,
+    context: str = "build",
+) -> dict:
+    """Cross-check the final place_list against the rules that EVERY user-
+    reported regression in the last week violated. Logs errors / warnings
+    and (optionally) raises on critical breaches.
+
+    Critical (logged ERROR; raises if `strict=True`):
+      - video-anchored items dropped (places_mentioned name with no
+        surviving source='link' item)
+
+    Warning (logged WARN; never raises):
+      - two day-trips on the same day in DIFFERENT cities
+      - non-locked day with zero items
+      - duplicate google_place_id across the trip
+
+    `strict=False` by default — we want to OBSERVE the rate of violations
+    in production for a few days before flipping the fail-fast switch.
+    """
+    day_rigidity = day_rigidity or {}
+    violations: list[str] = []
+    warnings: list[str] = []
+
+    # ── 1. Video / link items must not have been dropped ───────────────
+    if places_mentioned:
+        mentioned_norm: set[str] = set()
+        for p in places_mentioned:
+            n = (p.get("name") or "").strip()
+            if n:
+                mentioned_norm.add(_normalize_place_name(n))
+        # Any item is considered "covering" a mention if its normalized
+        # name overlaps with the mention's normalized name.
+        covered: set[str] = set()
+        for it in place_list:
+            n = (it.get("name") or "").strip()
+            if not n:
+                continue
+            norm = _normalize_place_name(n)
+            for m_norm in mentioned_norm:
+                if norm == m_norm:
+                    covered.add(m_norm)
+                    break
+                # Fuzzy: substring match either direction
+                if len(m_norm) >= 6 and (m_norm in norm or norm in m_norm):
+                    covered.add(m_norm)
+                    break
+        dropped = mentioned_norm - covered
+        if dropped:
+            violations.append(
+                f"[{context}] CRITICAL: {len(dropped)} link-mentioned "
+                f"place(s) absent from final list: {sorted(dropped)[:8]}"
+            )
+
+    # ── 2. Two day-trips on the same day in DIFFERENT cities ──────────
+    by_day: dict[int, list[dict]] = {}
+    for p in place_list:
+        d = p.get("day")
+        if isinstance(d, int):
+            by_day.setdefault(d, []).append(p)
+
+    def _is_dt(it: dict) -> bool:
+        return (
+            it.get("activity_model") == "day_trip"
+            or it.get("item_role") == "day_trip_destination"
+            or int(it.get("duration_minutes") or 0) >= 300
+        )
+
+    def _parse_city(it: dict) -> str:
+        addr = (it.get("address") or "").strip()
+        if not addr:
+            return ""
+        parts = [p.strip() for p in addr.split(",") if p.strip()]
+        if len(parts) < 2:
+            return ""
+        cand = parts[-2]
+        toks = cand.split(" ", 1)
+        if toks and toks[0].replace("-", "").isdigit() and len(toks) > 1:
+            cand = toks[1]
+        return cand.lower().strip()
+
+    for day, items in by_day.items():
+        dts = [i for i in items if _is_dt(i)]
+        if len(dts) < 2:
+            continue
+        cities = {_parse_city(dt) for dt in dts if _parse_city(dt)}
+        if len(cities) > 1:
+            warnings.append(
+                f"[{context}] day {day}: {len(dts)} day-trips across "
+                f"{len(cities)} cities ({sorted(cities)}) — should have "
+                f"been split"
+            )
+
+    # ── 3. Non-locked empty days ──────────────────────────────────────
+    for d in range(1, num_days + 1):
+        if day_rigidity.get(d) == "locked":
+            continue
+        if not by_day.get(d):
+            warnings.append(f"[{context}] day {d} is empty")
+
+    # ── 4. Duplicate google_place_ids ─────────────────────────────────
+    pid_counts: dict[str, int] = {}
+    for p in place_list:
+        pid = p.get("google_place_id")
+        if pid:
+            pid_counts[pid] = pid_counts.get(pid, 0) + 1
+    dup_ids = [pid for pid, cnt in pid_counts.items() if cnt > 1]
+    if dup_ids:
+        warnings.append(
+            f"[{context}] {len(dup_ids)} duplicate google_place_id(s) "
+            f"in final list — dedup pass missed them"
+        )
+
+    # ── Logging ───────────────────────────────────────────────────────
+    for v in violations:
+        logger.error(v)
+    for w in warnings:
+        logger.warning(w)
+
+    if strict and violations:
+        raise PipelineInvariantViolation(violations)
+
+    return {
+        "violations": violations,
+        "warnings": warnings,
+        "info": {
+            "total_items": len(place_list),
+            "days_used": len(by_day),
+            "num_days": num_days,
+        },
+    }
 
 
 def _validate_and_repair_itinerary(
