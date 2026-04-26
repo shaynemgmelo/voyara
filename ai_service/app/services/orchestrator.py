@@ -5988,11 +5988,20 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
             manual_profile = refreshed_for_manual.get("traveler_profile") or {}
             manual_places = manual_profile.get("places_mentioned") or []
             if manual_places:
-                enriched = await _geocode_places_for_manual(
-                    places=manual_places,
-                    destination=trip.get("destination") or "",
-                    places_client=places,
-                )
+                # Spin up a local GooglePlacesClient — extract_profile_and_build
+                # doesn't keep one in scope (build_trip_itinerary instantiates
+                # its own). The previous code referenced `places=places` which
+                # NameErrored and the broad except below quietly buried it,
+                # leaving cards bare and pins on Tokyo (trip 42 hit this).
+                places_client = GooglePlacesClient(http_client=http_client)
+                try:
+                    enriched = await _geocode_places_for_manual(
+                        places=manual_places,
+                        destination=trip.get("destination") or "",
+                        places_client=places_client,
+                    )
+                finally:
+                    await places_client.close()
                 if enriched:
                     manual_profile["places_mentioned"] = enriched
                     await rails.update_trip(

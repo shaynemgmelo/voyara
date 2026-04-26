@@ -411,6 +411,64 @@ class FakePlacesClient:
         return self.details_result
 
 
+class TestExtractProfileAndBuildManualPath:
+    """Anti-regression for the trip 42 NameError. The manual-mode block
+    inside extract_profile_and_build referenced a `places` variable that
+    didn't exist in scope (it's a local of build_trip_itinerary, not
+    extract_profile_and_build). The broad except below caught it as
+    'non-fatal' so geocoding silently never ran.
+
+    These tests don't run the full pipeline — they assert that the
+    function's manual block instantiates GooglePlacesClient itself and
+    doesn't reach for an undefined variable.
+    """
+
+    def test_manual_block_does_not_reference_undefined_places_var(self):
+        """Static check: the manual enrichment block must call
+        _geocode_places_for_manual with places_client=places_client (the
+        local instance), NOT places (which used to NameError). This is a
+        regex check on the source so a future refactor can't silently
+        reintroduce the old bug."""
+        import inspect
+        from app.services import orchestrator as orch
+        src = inspect.getsource(orch.extract_profile_and_build)
+        # Find the manual block (between 'if ai_mode == "manual":' and
+        # the next return).
+        assert "if ai_mode == \"manual\":" in src
+        manual_section = src.split("if ai_mode == \"manual\":", 1)[1]
+        # The actual call must pass places_client=places_client (local)
+        # — never `places_client=places` which doesn't exist in scope.
+        # We allow either named arg style as long as it doesn't reference
+        # the bare `places` variable.
+        # Find the _geocode_places_for_manual call.
+        assert "_geocode_places_for_manual(" in manual_section
+        # Pull the parameter slice for that call.
+        call_slice = manual_section.split("_geocode_places_for_manual(", 1)[1]
+        # Stop at the next closing paren followed by newline (rough end of call).
+        # Just check the first ~500 chars after the call open.
+        head = call_slice[:600]
+        assert "places_client=places_client" in head, (
+            f"Expected `places_client=places_client` in the manual block, "
+            f"got: {head[:200]}"
+        )
+        assert "places_client=places," not in head, (
+            "Regression: trip 42 NameError reappeared — `places_client=places` "
+            "references an undefined variable in this scope."
+        )
+
+    def test_manual_block_instantiates_places_client_locally(self):
+        """The manual block must spin up its own GooglePlacesClient.
+        Without it the geocoding helper has nothing to call."""
+        import inspect
+        from app.services import orchestrator as orch
+        src = inspect.getsource(orch.extract_profile_and_build)
+        manual_section = src.split("if ai_mode == \"manual\":", 1)[1]
+        assert "GooglePlacesClient(" in manual_section, (
+            "Manual block must instantiate GooglePlacesClient locally — "
+            "extract_profile_and_build doesn't keep one in scope."
+        )
+
+
 class TestAnalyzeTripRacePreservation:
     """Trip 42 surfaced a race condition: extract_profile_and_build's
     Phase 2 enriched 23/23 places with geo+photo via Google Places, then
