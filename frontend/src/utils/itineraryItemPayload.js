@@ -62,6 +62,19 @@ function normalizeOrigin(raw, fallback = "extracted_from_video") {
  * @returns {object} payload — only contains keys in RAILS_PERMITTED_FIELDS
  */
 export function buildItineraryItemPayload(place = {}, overrides = {}) {
+  if (process.env.NODE_ENV !== "production") {
+    const unknownOverrides = Object.keys(overrides).filter(
+      (k) => !RAILS_PERMITTED_FIELDS.has(k),
+    );
+    if (unknownOverrides.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[itineraryItemPayload] dropping unknown override fields:",
+        unknownOverrides,
+      );
+    }
+  }
+
   const photos = Array.isArray(place.photos)
     ? place.photos.filter(Boolean)
     : (place.photo_url ? [place.photo_url] : []);

@@ -89,4 +89,17 @@ describe("buildItineraryItemPayload", () => {
     );
     expect(payload.origin).toBe("ai_suggested");
   });
+
+  test("warns in dev when overrides contain unknown fields", () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    buildItineraryItemPayload(
+      { name: "X" },
+      { unknown_field: 42, also_bogus: true },
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("itineraryItemPayload"),
+      expect.arrayContaining(["unknown_field", "also_bogus"]),
+    );
+    warn.mockRestore();
+  });
 });
