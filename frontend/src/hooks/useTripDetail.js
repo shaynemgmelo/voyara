@@ -7,6 +7,7 @@ import { reorderDayPlans as reorderDayPlansApi } from "../api/dayPlans";
 import { resumeProcessing, analyzeTrip } from "../api/links";
 import { refineItinerary as refineApi } from "../api/trips";
 import { fetchBuildStatus, clearStuckBuild } from "../api/buildStatus";
+import { stripBackendOwned } from "../utils/profileFields";
 
 const POLL_INTERVAL = 5000; // 5 seconds
 
@@ -560,23 +561,9 @@ export default function useTripDetail(tripId) {
     // (snapshot taken BEFORE backend enrichment finished) and clobbered
     // the freshly-geocoded data Rails had just received from the AI
     // service. Result: cards showed "no data", map pins disappeared.
-    //
-    // The frontend OWNS: travel_style, interests, pace, country_detected,
-    // cities_detected, profile_description, main_destination,
-    // needs_destination, and the *_en variants. Everything else is
-    // computed by the AI pipeline and must NEVER round-trip through
-    // a frontend PATCH.
-    const FRONTEND_OWNED = new Set([
-      "travel_style", "travel_style_en",
-      "interests", "interests_en",
-      "pace",
-      "country_detected", "cities_detected",
-      "profile_description", "profile_description_en",
-      "main_destination", "needs_destination",
-    ]);
-    const safeProfile = Object.fromEntries(
-      Object.entries(profileData || {}).filter(([k]) => FRONTEND_OWNED.has(k)),
-    );
+    // The whitelist lives in utils/profileFields.js so Rails (and any
+    // future cross-language parity test) can mirror the same set.
+    const safeProfile = stripBackendOwned(profileData);
     const updated = await tripsApi.updateTrip(tripId, {
       traveler_profile: safeProfile,
       profile_status: status,
