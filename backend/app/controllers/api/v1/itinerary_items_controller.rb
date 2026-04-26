@@ -37,12 +37,20 @@ class Api::V1::ItineraryItemsController < Api::V1::BaseController
 
   def update
     permitted = item_params.to_h
-    # operating_hours is a HASH JSON column — deep-merge so a swap-path
-    # PATCH (or any partial update) doesn't wipe the previously-stored
-    # weekly schedule. The other JSON columns (photos, vibe_tags, alerts)
-    # are ARRAYS — Rails default replace is correct for them. The known
-    # GeoReviewModal alerts-clobber and swap-path operating_hours-wipe
-    # are mitigated by adding the deep-merge here.
+    # Trip 46 + audit row 2: operating_hours is a HASH JSON column that
+    # the swap path wipes when buildItineraryItemPayload sends `?? {}`.
+    # Deep-merge protects it.
+    #
+    # Note on the array columns (photos, vibe_tags, alerts): they
+    # intentionally retain REPLACE semantics per the JsonColumnMerge
+    # concern's contract (arrays are atomic — a partial-array merge
+    # would be ambiguous about ordering / dedup).
+    #
+    # The known GeoReviewModal alerts-clobber path (frontend sends the
+    # WHOLE filtered `alerts` array) is NOT mitigated by this concern.
+    # That requires a frontend FRONTEND_OWNED_ITEM_FIELDS allow-list or
+    # a dedicated `POST /alerts/:idx/dismiss` endpoint, deferred to a
+    # future task.
     if permitted["operating_hours"].present?
       permitted["operating_hours"] = merge_json_column(
         @item.operating_hours, permitted["operating_hours"],

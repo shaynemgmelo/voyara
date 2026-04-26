@@ -26,22 +26,41 @@ class DayPlanTest < ActiveSupport::TestCase
     trip.day_plans.create!(day_number: 1)
   end
 
-  test "deep merge preserves pattern_signature when only conflict_alerts updated" do
+  test "JsonColumnMerge.merge_json_column preserves pattern_signature when only conflict_alerts updated" do
     dp = build_dp
     dp.update!(
       pattern_signature: { "vibe" => "cultural", "pace" => "moderate" },
       conflict_alerts: [{ "type" => "transit", "msg" => "long walk" }],
     )
 
-    # Simulate a PATCH that updates only conflict_alerts. The controller
-    # would call merge_json_column for pattern_signature with an empty
-    # incoming hash, which preserves the existing keys.
-    merged = (dp.pattern_signature || {}).deep_merge({})
+    # Simulate the scenario where the AI service writes pattern_signature,
+    # then the frontend PATCHes only conflict_alerts (no pattern_signature
+    # key in the body). The controller's merge MUST preserve the existing
+    # signature.
+    incoming_pattern_signature = nil  # frontend didn't send it
+    merged = JsonColumnMerge.merge_json_column(
+      dp.pattern_signature, incoming_pattern_signature,
+    )
     dp.update!(pattern_signature: merged, conflict_alerts: [])
 
     dp.reload
     assert_equal "cultural", dp.pattern_signature["vibe"]
     assert_equal "moderate", dp.pattern_signature["pace"]
     assert_equal [], dp.conflict_alerts
+  end
+
+  test "JsonColumnMerge.merge_json_column merges new pattern_signature keys without clobbering existing" do
+    dp = build_dp
+    dp.update!(pattern_signature: { "vibe" => "cultural", "pace" => "moderate" })
+
+    # Frontend sends ONLY a new key (e.g. user toggles a UI control).
+    incoming = { "energy" => "high" }
+    merged = JsonColumnMerge.merge_json_column(dp.pattern_signature, incoming)
+    dp.update!(pattern_signature: merged)
+
+    dp.reload
+    assert_equal "cultural", dp.pattern_signature["vibe"]      # preserved
+    assert_equal "moderate", dp.pattern_signature["pace"]      # preserved
+    assert_equal "high", dp.pattern_signature["energy"]        # added
   end
 end
