@@ -5,6 +5,7 @@ without updating rails_contract, this test fails — preventing the silent
 """
 from __future__ import annotations
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -171,7 +172,11 @@ class TestRailsContractInSync:
             "backend/app/controllers/api/v1/links_controller.rb", "link",
             match_index=1,  # the SECOND permit() block — link_update_params
         )
-        assert LINK_UPDATE_PERMITTED_FIELDS == rails
+        assert LINK_UPDATE_PERMITTED_FIELDS == rails, (
+            f"Link update permit-list drift!\n"
+            f"  Python only: {sorted(LINK_UPDATE_PERMITTED_FIELDS - rails)}\n"
+            f"  Rails only: {sorted(rails - LINK_UPDATE_PERMITTED_FIELDS)}"
+        )
 
 
 class TestAssertItineraryItemPayload:
@@ -203,3 +208,158 @@ class TestAssertItineraryItemPayload:
         from app.services.rails_contract import assert_itinerary_item_payload
         with pytest.raises(AssertionError, match="must be a dict"):
             assert_itinerary_item_payload(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+class TestRailsPermitParser:
+    """Direct unit tests for _rails_permit_list. Pin parser behavior
+    independent of which Rails files happen to exercise which syntax."""
+
+    def _write_controller(self, tmp_path, body: str) -> str:
+        """Write a fake controller file under a backend/ subtree so the
+        parser's REPO_ROOT-relative path lookups still work."""
+        ctrl = tmp_path / "backend" / "app" / "controllers" / "api" / "v1"
+        ctrl.mkdir(parents=True)
+        f = ctrl / "fake_controller.rb"
+        f.write_text(body)
+        return str(f.relative_to(tmp_path))
+
+    def test_single_line_permit(self, tmp_path, monkeypatch):
+        from app.services import rails_contract as _  # ensure module loaded
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(:foo, :bar, :baz)
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        result = t._rails_permit_list(path, "fake")
+        assert result == {"foo", "bar", "baz"}
+
+    def test_multi_line_permit(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(
+                  :foo,
+                  :bar,
+                  :baz,
+                )
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        result = t._rails_permit_list(path, "fake")
+        assert result == {"foo", "bar", "baz"}
+
+    def test_array_of_hashes_strips_inner_symbols(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(
+                  :name,
+                  alerts: [[:type, :message, :severity]],
+                )
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        result = t._rails_permit_list(path, "fake")
+        # Outer key (alerts) included; inner symbols (type/message/severity) excluded.
+        assert result == {"name", "alerts"}, (
+            f"Inner [[]] symbols leaked or outer key dropped: {result}"
+        )
+
+    def test_nested_hash_columns_extracted(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(:foo, traveler_profile: {})
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        result = t._rails_permit_list(path, "fake")
+        assert result == {"foo", "traveler_profile"}
+
+    def test_match_index_picks_correct_block(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def first_params
+                params.require(:fake).permit(:url)
+              end
+
+              def second_params
+                params.require(:fake).permit(:status, extracted_data: {})
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        first = t._rails_permit_list(path, "fake", match_index=0)
+        second = t._rails_permit_list(path, "fake", match_index=1)
+        assert first == {"url"}
+        assert second == {"status", "extracted_data"}
+
+    def test_inline_comments_dont_break_parser(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(
+                  :foo,         # the foo
+                  :bar,         # the bar (Phase 1).
+                  :baz,
+                )
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        result = t._rails_permit_list(path, "fake")
+        assert result == {"foo", "bar", "baz"}, (
+            f"Comments leaked into field set: {result}"
+        )
+
+    def test_missing_permit_block_raises(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              # No permit block at all
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        with pytest.raises(AssertionError, match="permit"):
+            t._rails_permit_list(path, "fake")
+
+    def test_match_index_out_of_range_raises(self, tmp_path, monkeypatch):
+        from tests import test_rails_contract as t
+        monkeypatch.setattr(t, "REPO_ROOT", tmp_path)
+
+        body = textwrap.dedent('''
+            class FakeController
+              def fake_params
+                params.require(:fake).permit(:foo)
+              end
+            end
+        ''').strip()
+        path = self._write_controller(tmp_path, body)
+        with pytest.raises(AssertionError, match="requested index"):
+            t._rails_permit_list(path, "fake", match_index=5)
