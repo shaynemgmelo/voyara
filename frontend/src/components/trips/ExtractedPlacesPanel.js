@@ -269,7 +269,11 @@ export default function ExtractedPlacesPanel({
                           // intercepts the click during real drags.
                           const openDetail = () => {
                             if (used) return;
-                            if (onPlaceClick) onPlaceClick(place);
+                            // Pass placeKey alongside the place so TripDetail
+                            // can set highlightedPlaceKey to the stable pool
+                            // index rather than google_place_id || name
+                            // (which can collide when two cards share a name).
+                            if (onPlaceClick) onPlaceClick(place, placeKey);
                           };
                           const handleCardClick = (e) => {
                             if (used) return;

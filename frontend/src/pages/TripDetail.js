@@ -246,10 +246,21 @@ export default function TripDetail() {
   // when the early returns below short-circuit the render. They each
   // rely only on stable setters + addItem so the dependency lists stay
   // tight.
-  const handlePlaceClick = useCallback((place) => {
+  // placeKey is the stable pool-index string emitted by ExtractedPlacesPanel
+  // and TripMap ("String(globalIndex)" / "String(poolIndex)"). It's the same
+  // key the panel stores in cardRefs and compares against highlightedPlaceKey.
+  // Falling back to google_place_id || name only for map-pin clicks that
+  // predate the dual-arg signature — those places carry poolIndex directly on
+  // the object so we use that first.
+  const handlePlaceClick = useCallback((place, placeKey) => {
     if (!place) return;
     setDetailPlace(place);
-    setHighlightedPlaceKey(place.google_place_id || place.name || null);
+    const key = placeKey
+      ?? (place.poolIndex != null ? String(place.poolIndex) : null)
+      ?? place.google_place_id
+      ?? place.name
+      ?? null;
+    setHighlightedPlaceKey(key);
   }, []);
 
   const closePlaceDetail = useCallback(() => {
