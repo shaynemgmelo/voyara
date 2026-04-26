@@ -7098,10 +7098,17 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
             data: dict = {"position": pos}
             if new_slot:
                 data["time_slot"] = new_slot
-            # day_plan_id change goes through a MOVE-style PATCH (the
-            # controller allows changing day_plan_id on update).
+            # NOTE: day_plan_id is NOT in Rails item_params permit list, so it
+            # cannot be sent via update_itinerary_item — the field would be
+            # silently dropped and the item would never actually move to the new
+            # day.  Day-to-day moves require the dedicated Rails `move` endpoint
+            # (/trips/:trip_id/day_plans/:day_plan_id/itinerary_items/:id/move)
+            # which the RailsClient does not yet expose.  For now we skip the
+            # cross-day position update so we don't send unpermitted fields and
+            # create silent 422-class surprises.
+            # TODO: add RailsClient.move_itinerary_item and wire it here.
             if changed_day:
-                data["day_plan_id"] = new_dp_id
+                pass  # cross-day move omitted until RailsClient exposes /move
             patches.append((item_id, new_dp_id, pos, data))
 
     # Persist all patches in parallel. Send each to the ORIGINAL day's
@@ -10724,9 +10731,14 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
                 (dp for dp in target_days if dp["day_number"] == spec["day"]),
                 None,
             )
-            # Locked items cannot change day via refine.
+            # NOTE: day_plan_id is NOT in Rails item_params permit list, so
+            # sending it via update_itinerary_item would be silently dropped.
+            # Day-to-day moves require the dedicated Rails `move` endpoint
+            # which RailsClient does not yet expose.  Omit day_plan_id from
+            # the PATCH body to avoid sending unpermitted fields.
+            # TODO: add RailsClient.move_itinerary_item and wire it here.
             if target_dp and item_id not in locked_ids and target_dp["id"] != original["day_plan_id"]:
-                patch["day_plan_id"] = target_dp["id"]
+                pass  # cross-day move omitted until RailsClient exposes /move
         if not patch:
             continue
         try:
