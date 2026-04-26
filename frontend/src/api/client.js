@@ -3,6 +3,11 @@ import { supabase } from "../lib/supabase";
 const RAW_URL = process.env.REACT_APP_API_URL || "http://localhost:3000/api/v1";
 const BASE_URL = RAW_URL.endsWith("/api/v1") ? RAW_URL : `${RAW_URL.replace(/\/+$/, "")}/api/v1`;
 
+// Bumped in lockstep with backend's Api::V1 API_VERSION constant.
+// Mismatch = user is on a stale tab/cache after a deploy.
+const EXPECTED_API_VERSION = "2026-04-26";
+let _versionWarned = false;
+
 async function request(path, options = {}) {
   // Get current Supabase session token
   const { data: { session } } = await supabase.auth.getSession();
@@ -18,6 +23,16 @@ async function request(path, options = {}) {
     ...options,
     headers,
   });
+
+  const serverVersion = response.headers.get("X-API-Version");
+  if (serverVersion && serverVersion !== EXPECTED_API_VERSION && !_versionWarned) {
+    _versionWarned = true;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[api] Version mismatch — frontend expects ${EXPECTED_API_VERSION} but server is ${serverVersion}. ` +
+      "Hard-reload (Cmd+Shift+R) or clear cache to pick up the latest frontend bundle.",
+    );
+  }
 
   if (response.status === 204) return null;
 

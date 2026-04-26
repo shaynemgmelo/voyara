@@ -1,5 +1,23 @@
 class ApplicationController < ActionController::API
+  # Bump this whenever a breaking change ships to the v1 API surface
+  # (renamed field, removed endpoint, semantics change). Frontend
+  # compares against its compiled-in expectation; mismatch → console
+  # warning + Sentry event (Tier 3 wires the Sentry side).
+  #
+  # Lives on ApplicationController (not Api::V1::BaseController) because
+  # several v1 controllers (trips, health, users, google_places) inherit
+  # directly from ApplicationController, and the header must fire on
+  # EVERY API response to be useful.
+  API_VERSION = "2026-04-26".freeze
+
+  before_action :set_api_version_header
+
   private
+
+  def set_api_version_header
+    response.headers["X-API-Version"] = API_VERSION
+  end
+
 
   # Decode and verify the Supabase JWT from the Authorization header.
   # Also supports service-to-service auth via X-Service-Key header (for AI service).
