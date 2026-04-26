@@ -14,6 +14,7 @@ import pytest
 from app.services.orchestrator import (
     PipelineInvariantViolation,
     _assert_pipeline_invariants,
+    _assert_manual_extract_invariants,
 )
 
 
@@ -282,6 +283,84 @@ class TestDayDiameter:
         ]
         result = _assert_pipeline_invariants(place_list, num_days=1)
         assert not any("diameter" in w for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Manual-mode extract invariants (post-extraction audit)
+# ---------------------------------------------------------------------------
+
+class TestManualExtractInvariants:
+    def test_critical_when_geocoding_completely_failed(self):
+        """3+ places mentioned but ZERO have lat/lng = the silent
+        UnboundLocalError class of bug. Trip 41 hit this."""
+        places = [
+            {"name": "Casa Rosada", "source_url": "v1"},
+            {"name": "Eiffel Tower", "source_url": "v1"},
+            {"name": "Pantheon", "source_url": "v1"},
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert len(result["violations"]) == 1
+        assert "ZERO have lat/lng" in result["violations"][0]
+        assert result["info"]["with_geo"] == 0
+
+    def test_strict_raises_on_zero_geo(self):
+        places = [{"name": f"P{i}", "source_url": "v"} for i in range(5)]
+        with pytest.raises(PipelineInvariantViolation):
+            _assert_manual_extract_invariants(places, strict=True)
+
+    def test_warn_when_coverage_below_70_percent(self):
+        places = [
+            {"name": "A", "source_url": "v", "latitude": 1, "longitude": 1},
+            {"name": "B", "source_url": "v"},
+            {"name": "C", "source_url": "v"},
+            {"name": "D", "source_url": "v"},
+            {"name": "E", "source_url": "v"},
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert result["violations"] == []
+        assert any("coverage low" in w for w in result["warnings"])
+        assert result["info"]["coverage"] == 0.2
+
+    def test_clean_pass_when_full_coverage(self):
+        places = [
+            {"name": f"P{i}", "source_url": "v", "latitude": float(i), "longitude": 0.0}
+            for i in range(5)
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert result["violations"] == []
+        assert result["warnings"] == []
+        assert result["info"]["coverage"] == 1.0
+
+    def test_warns_on_missing_provenance(self):
+        places = [
+            {"name": "A", "latitude": 1, "longitude": 1},  # no source_url
+            {"name": "B", "source_url": "v", "latitude": 1, "longitude": 1},
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert any("missing source_url" in w for w in result["warnings"])
+
+    def test_manual_added_flag_satisfies_provenance(self):
+        """A place the user typed in by hand has no source_url but is OK."""
+        places = [
+            {"name": "Custom Stop", "manual_added": True,
+             "latitude": 1, "longitude": 1},
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert not any("missing source_url" in w for w in result["warnings"])
+
+    def test_warns_on_empty_name(self):
+        places = [
+            {"name": "", "source_url": "v"},
+            {"name": "Real", "source_url": "v", "latitude": 1, "longitude": 1},
+        ]
+        result = _assert_manual_extract_invariants(places)
+        assert any("empty name" in w for w in result["warnings"])
+
+    def test_empty_input_returns_clean(self):
+        result = _assert_manual_extract_invariants([])
+        assert result["violations"] == []
+        assert result["warnings"] == []
+        assert result["info"]["total"] == 0
 
 
 # ---------------------------------------------------------------------------

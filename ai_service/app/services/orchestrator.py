@@ -5680,6 +5680,15 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
                         f"manual mode — enriched {len(enriched)} places with "
                         f"Google data"
                     )
+                # Post-condition audit: we just wrote places_mentioned to
+                # the trip — verify it actually has lat/lng on most entries.
+                # If geocoding silently degraded we want a loud log NOW,
+                # not a confused user later seeing "sem dados" cards.
+                _assert_manual_extract_invariants(
+                    enriched if enriched else manual_places,
+                    strict=False,  # observe-only; flip later once stable
+                    context=f"manual_extract trip={trip_id}",
+                )
             else:
                 logger.warning(
                     "[combined] manual enrichment skipped — no places_mentioned"
@@ -6824,6 +6833,103 @@ def _is_generic_category_name(item_name: str) -> bool:
         ):
             return True
     return False
+
+
+def _assert_manual_extract_invariants(
+    places_mentioned: list[dict],
+    *,
+    strict: bool = False,
+    context: str = "manual_extract",
+) -> dict:
+    """Post-condition audit for the manual-mode extract path. Catches the
+    failure modes that previously slipped through silently:
+
+      CRITICAL (raises if strict=True):
+        - >=3 places mentioned and ZERO have lat/lng → geocoding wasn't
+          actually called (or every call failed). Trip 41 hit this when
+          a one-line UnboundLocalError swallowed the entire enrichment
+          and the cards rendered as bare names ("sem dados") with no
+          map pins.
+
+      WARNING (logged, never raises):
+        - Geocoding coverage <70% — Google didn't recognize many of the
+          extracted names. Either the names are off or the API quota
+          tripped; either way the user gets degraded cards.
+        - Place with empty name — extractor regression.
+        - Place without source_url AND without manual=True flag — we
+          lost the provenance, so smart-assist can't group by video.
+
+    Returns {violations, warnings, info} like _assert_pipeline_invariants.
+    """
+    violations: list[str] = []
+    warnings: list[str] = []
+
+    total = len(places_mentioned)
+    if total == 0:
+        return {
+            "violations": violations,
+            "warnings": warnings,
+            "info": {"total": 0, "with_geo": 0, "coverage": 0.0},
+        }
+
+    with_geo = 0
+    no_name = 0
+    no_provenance = 0
+    for p in places_mentioned:
+        if not isinstance(p, dict):
+            continue
+        if not (p.get("name") or "").strip():
+            no_name += 1
+            continue
+        if p.get("latitude") is not None and p.get("longitude") is not None:
+            with_geo += 1
+        if not p.get("source_url") and not p.get("manual_added"):
+            no_provenance += 1
+
+    coverage = with_geo / total if total else 0.0
+
+    if total >= 3 and with_geo == 0:
+        violations.append(
+            f"[{context}] CRITICAL: {total} places mentioned but ZERO have "
+            f"lat/lng — geocoding never ran or fully failed. Cards will "
+            f"render bare and the map won't show pins."
+        )
+    elif total >= 5 and coverage < 0.7:
+        warnings.append(
+            f"[{context}] geocoding coverage low: {with_geo}/{total} "
+            f"({coverage:.0%}) — Google Places didn't match many names"
+        )
+
+    if no_name:
+        warnings.append(
+            f"[{context}] {no_name} place(s) with empty name — extractor regression?"
+        )
+
+    if no_provenance:
+        warnings.append(
+            f"[{context}] {no_provenance} place(s) missing source_url — "
+            f"smart-assist won't be able to group them by video"
+        )
+
+    for v in violations:
+        logger.error(v)
+    for w in warnings:
+        logger.warning(w)
+
+    if strict and violations:
+        raise PipelineInvariantViolation(violations)
+
+    return {
+        "violations": violations,
+        "warnings": warnings,
+        "info": {
+            "total": total,
+            "with_geo": with_geo,
+            "coverage": round(coverage, 2),
+            "no_name": no_name,
+            "no_provenance": no_provenance,
+        },
+    }
 
 
 class PipelineInvariantViolation(Exception):
