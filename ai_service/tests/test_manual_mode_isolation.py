@@ -22,6 +22,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.contracts
+
 
 class FakeRails:
     """Minimal RailsClient stub that returns a canned trip + day_plans
@@ -115,6 +117,58 @@ class TestEnrichExperiencesRespectsManualMode:
 # ---------------------------------------------------------------------------
 # optimize_trip_routing
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fn_name", [
+    "enrich_trip_with_experiences",
+    "optimize_trip_routing",
+    "build_trip_itinerary",
+    "refine_itinerary",
+    "add_day_trip",
+])
+@pytest.mark.asyncio
+async def test_function_refuses_manual_mode(fn_name):
+    """Every non-whitelisted mutating function must short-circuit on
+    ai_mode=manual without calling Anthropic or writing to Rails."""
+    from app.services import orchestrator
+    fn = getattr(orchestrator, fn_name)
+
+    class FakeRails:
+        def __init__(self):
+            self.trip = {
+                "id": 99, "ai_mode": "manual", "destination": "London",
+                "profile_status": "confirmed",
+                "traveler_profile": {"places_mentioned": []},
+            }
+            self.mutations = []
+        async def get_trip(self, _): return self.trip
+        async def get_day_plans(self, _): return []
+        async def update_trip(self, *a, **k): self.mutations.append("update_trip"); return {}
+        async def create_itinerary_item(self, *a, **k):
+            self.mutations.append("create_itinerary_item"); return {"id": 1}
+        async def update_itinerary_item(self, *a, **k):
+            self.mutations.append("update_itinerary_item"); return {}
+
+    rails = FakeRails()
+    with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+         patch("app.services.orchestrator.anthropic.Anthropic") as anth:
+        # Pass minimal kwargs each function expects.
+        if fn_name == "refine_itinerary":
+            result = await fn(99, "feedback text", "trip", None)
+        elif fn_name == "add_day_trip":
+            result = await fn(99, "Brighton", "UK", mode="extend", target_day_number=None)
+        else:
+            result = await fn(99)
+    assert isinstance(result, dict)
+    # The function should return some skipped/refused signal.
+    assert (
+        result.get("skipped") == "manual_mode"
+        or result.get("error", "").startswith("manual_mode")
+    ), f"{fn_name} did not refuse manual mode: {result!r}"
+    # No Anthropic call.
+    anth.assert_not_called()
+    # No Rails mutation (whitelist: it's OK to call get_trip/get_day_plans).
+    assert rails.mutations == [], f"{fn_name} mutated Rails: {rails.mutations}"
+
 
 class TestOptimizeRoutingRespectsManualMode:
     @pytest.mark.asyncio

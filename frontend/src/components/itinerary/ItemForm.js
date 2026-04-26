@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
+import { buildItineraryItemPayload } from "../../utils/itineraryItemPayload";
 
 export default function ItemForm({ onSubmit, onCancel, initial }) {
   const { t } = useLanguage();
@@ -38,13 +39,28 @@ export default function ItemForm({ onSubmit, onCancel, initial }) {
     setSubmitting(true);
     setError(null);
     try {
-      const data = {
+      // Parse numeric fields from their string form-state values, then
+      // run through the canonical builder so category is validated,
+      // origin is set, and any unknown keys are stripped before Rails sees them.
+      const parsed = {
         ...form,
         duration_minutes: form.duration_minutes ? parseInt(form.duration_minutes) : null,
         latitude: form.latitude ? parseFloat(form.latitude) : null,
         longitude: form.longitude ? parseFloat(form.longitude) : null,
       };
-      await onSubmit(data);
+      // Preserve manual-entry fields that buildItineraryItemPayload doesn't
+      // pull from the place dict (description, time_slot, duration_minutes,
+      // notes, pricing_info) — they are already in RAILS_PERMITTED_FIELDS
+      // so the builder passes them through when supplied as overrides.
+      const payload = buildItineraryItemPayload(parsed, {
+        origin: "user_added",
+        description: parsed.description || null,
+        time_slot: parsed.time_slot || null,
+        duration_minutes: parsed.duration_minutes,
+        notes: parsed.notes || null,
+        pricing_info: parsed.pricing_info || null,
+      });
+      await onSubmit(payload);
     } catch (err) {
       setError(err.message);
     } finally {

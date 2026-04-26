@@ -44,6 +44,9 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
 ]
+markers = [
+    "contracts: cross-layer contract tests (must pass on every commit)",
+]
 
 [build-system]
 requires = ["setuptools>=75.0"]

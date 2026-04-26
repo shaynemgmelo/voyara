@@ -7098,18 +7098,22 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
             data: dict = {"position": pos}
             if new_slot:
                 data["time_slot"] = new_slot
-            # day_plan_id change goes through a MOVE-style PATCH (the
-            # controller allows changing day_plan_id on update).
-            if changed_day:
-                data["day_plan_id"] = new_dp_id
-            patches.append((item_id, new_dp_id, pos, data))
+            # Cross-day moves go through the dedicated Rails `move` endpoint
+            # (itinerary_items#move) via RailsClient.move_itinerary_item.
+            # day_plan_id must NOT be sent in the update body — item_params
+            # does not permit it, so it would be silently dropped.
+            patches.append((item_id, new_dp_id, pos, data, changed_day))
 
-    # Persist all patches in parallel. Send each to the ORIGINAL day's
-    # endpoint so we don't need a separate move call — the controller
-    # handles day_plan_id change on update.
+    # Persist all patches in parallel.
+    # - If the item stays on the same day: PATCH position/time_slot only.
+    # - If the item moves to a new day: call the /move endpoint first
+    #   (which updates day_plan + position atomically), then PATCH
+    #   time_slot separately if it changed.
     id_to_original_day = {item_id: orig for item_id, orig in original_state.items()}
 
-    async def _apply_patch(item_id: int, _dp_id: int, _pos: int, data: dict):
+    async def _apply_patch(
+        item_id: int, new_dp_id: int, _pos: int, data: dict, changed_day: bool,
+    ):
         orig = id_to_original_day.get(item_id)
         if not orig:
             return
@@ -7118,7 +7122,21 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         if not orig_dp_id:
             return
         try:
-            await rails.update_itinerary_item(trip_id, orig_dp_id, item_id, data)
+            if changed_day:
+                # Move the item to its new day atomically (day_plan + position).
+                await rails.move_itinerary_item(
+                    trip_id, orig_dp_id, item_id,
+                    target_day_plan_id=new_dp_id,
+                    position=data["position"],
+                )
+                # If time_slot also changed, apply that as a separate PATCH now
+                # that the item lives on the new day.
+                if "time_slot" in data:
+                    await rails.update_itinerary_item(
+                        trip_id, new_dp_id, item_id, {"time_slot": data["time_slot"]},
+                    )
+            else:
+                await rails.update_itinerary_item(trip_id, orig_dp_id, item_id, data)
         except Exception as e:
             logger.warning("[optimize] PATCH failed for item %s: %s", item_id, e)
 
@@ -7172,6 +7190,14 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
     except Exception as e:
         logger.error("[build] Failed to fetch trip %d: %s", trip_id, e)
         return {"error": str(e), "places_created": 0}
+
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[build] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode", "places_created": 0}
 
     day_plans = []
     existing_items = []
@@ -9172,6 +9198,14 @@ async def add_day_trip(
     if not trip:
         return {"error": "Trip not found"}
 
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[add_day_trip] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode"}
+
     profile = trip.get("traveler_profile") or {}
     base_city = (profile.get("main_destination") or {}).get("city") \
         or (profile.get("cities_detected") or [None])[0] or ""
@@ -10440,6 +10474,14 @@ async def refine_itinerary(
         logger.error("[refine] Failed to fetch trip %d: %s", trip_id, e)
         return {"error": str(e), "places_created": 0}
 
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[refine] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode"}
+
     # Build day plan info with existing items
     day_plans = []
     for dp in day_plans_raw:
@@ -10719,20 +10761,39 @@ PORTUGUESE GRAMMAR (MANDATORY): ALL text fields (description, notes, alerts) MUS
         ):
             if field in spec and spec[field] is not None:
                 patch[field] = spec[field]
+        move_to_dp_id: int | None = None
         if "day" in spec and isinstance(spec["day"], int):
             target_dp = next(
                 (dp for dp in target_days if dp["day_number"] == spec["day"]),
                 None,
             )
-            # Locked items cannot change day via refine.
+            # Use the dedicated /move endpoint — day_plan_id is not in
+            # item_params so sending it via update_itinerary_item would
+            # be silently dropped.
             if target_dp and item_id not in locked_ids and target_dp["id"] != original["day_plan_id"]:
-                patch["day_plan_id"] = target_dp["id"]
-        if not patch:
+                move_to_dp_id = target_dp["id"]
+        if not patch and move_to_dp_id is None:
             continue
         try:
-            await rails.update_itinerary_item(
-                trip_id, original["day_plan_id"], item_id, patch,
-            )
+            if move_to_dp_id is not None:
+                # Move atomically to new day (day_plan + position) then
+                # apply content changes on the destination day.
+                new_pos = original.get("position") or 0
+                await rails.move_itinerary_item(
+                    trip_id,
+                    original["day_plan_id"],
+                    item_id,
+                    target_day_plan_id=move_to_dp_id,
+                    position=new_pos,
+                )
+                if patch:
+                    await rails.update_itinerary_item(
+                        trip_id, move_to_dp_id, item_id, patch,
+                    )
+            else:
+                await rails.update_itinerary_item(
+                    trip_id, original["day_plan_id"], item_id, patch,
+                )
             updated += 1
         except Exception as e:
             logger.warning(

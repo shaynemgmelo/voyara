@@ -2,6 +2,7 @@ import { useState } from "react";
 import { categoryIcon, formatDuration } from "../../utils/formatters";
 import { getSuggestSwap } from "../../api/itineraryItems";
 import { useLanguage } from "../../i18n/LanguageContext";
+import { buildItineraryItemPayload } from "../../utils/itineraryItemPayload";
 
 const CATEGORY_LABELS = {
   restaurant: { en: "Restaurant", pt: "Restaurante", color: "bg-orange-100 text-orange-600" },
@@ -64,18 +65,31 @@ export default function ItineraryItem({
   const handleAcceptSwap = (e) => {
     e.stopPropagation();
     if (swapSuggestion && onSwap) {
-      onSwap(item.id, {
-        name: swapSuggestion.name,
-        category: swapSuggestion.category || item.category,
-        latitude: swapSuggestion.latitude,
-        longitude: swapSuggestion.longitude,
-        address: swapSuggestion.address,
-        google_place_id: swapSuggestion.place_id,
-        google_rating: swapSuggestion.rating,
-        time_slot: item.time_slot,
-        duration_minutes: item.duration_minutes,
-        position: item.position,
-      });
+      // Final-review I-1: this used to be a hand-built payload that
+      // dropped reviews_count, photos, phone, website, operating_hours,
+      // pricing_info, vibe_tags — exactly the trip-44 class of bug. The
+      // canonical builder propagates everything Rails accepts. We map
+      // suggestion-side `place_id` to the place dict's `google_place_id`
+      // before passing it through (the builder doesn't know `place_id`).
+      const placeForBuilder = {
+        ...swapSuggestion,
+        google_place_id:
+          swapSuggestion.google_place_id || swapSuggestion.place_id,
+      };
+      onSwap(
+        item.id,
+        buildItineraryItemPayload(placeForBuilder, {
+          // Carry over the slot the swap is REPLACING — the suggestion
+          // doesn't know which slot it'll land on, only the existing
+          // item does.
+          category:
+            (swapSuggestion.category && swapSuggestion.category) || item.category,
+          time_slot: item.time_slot,
+          duration_minutes: item.duration_minutes,
+          position: item.position,
+          origin: "ai_suggested",
+        }),
+      );
       setSwapSuggestion(null);
     }
   };
