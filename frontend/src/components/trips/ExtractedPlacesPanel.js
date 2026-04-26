@@ -241,13 +241,19 @@ export default function ExtractedPlacesPanel({
 
                   {places.map(({ place, globalIndex }) => {
                     const used = usedNames.has(normalize(place.name));
-                    // Same key shape TripMap uses for sync.
-                    const placeKey = place.google_place_id || place.name;
+                    // Use the global pool index as the sync key — names
+                    // and google_place_ids can collide across cards
+                    // (same place mentioned in two different videos).
+                    // Trip 41 surfaced this: hovering "Barrio Chino"
+                    // (#2) highlighted both pins #2 and #8 because both
+                    // cards shared the same name. The pool index is
+                    // unique per card and matches the `poolIndex` the
+                    // parent attaches to every unassigned place before
+                    // handing it to TripMap, so panel↔map sync is 1:1.
+                    const placeKey = String(globalIndex);
                     const isHighlighted =
-                      placeKey && (
-                        placeKey === highlightedPlaceKey
-                        || placeKey === hoveredPlaceKey
-                      );
+                      placeKey === highlightedPlaceKey
+                      || placeKey === hoveredPlaceKey;
                     return (
                       <Draggable
                         key={`${place.name}-${globalIndex}`}

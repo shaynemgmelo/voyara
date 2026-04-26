@@ -123,11 +123,13 @@ export default function TripMap({
   // When the panel highlights an unassigned place (e.g. user clicked a
   // card), pan smoothly to that pin so the user actually SEES it. We
   // do NOT zoom — that would be jarring on a multi-city map and the
-  // user can manually zoom if they want.
+  // user can manually zoom if they want. The lookup matches by pool
+  // index (same key the panel uses), so duplicates with the same name
+  // don't collide.
   useEffect(() => {
     if (!mapRef.current || !highlightedUnassignedKey) return;
     const target = geocodedUnassigned.find(
-      (p) => (p.google_place_id || p.name) === highlightedUnassignedKey,
+      (p) => String(p.poolIndex) === highlightedUnassignedKey,
     );
     if (!target) return;
     const lat = parseFloat(target.latitude);
@@ -253,11 +255,14 @@ export default function TripMap({
       {!selectedDayNumber && geocodedUnassigned.map((place, idx) => {
         // 1-indexed for display — humans count from 1.
         const pinNumber = (place.poolIndex ?? idx) + 1;
-        // Stable key matches what ExtractedPlacesPanel emits when the
-        // user hovers a card. The panel must produce the SAME key so
-        // hover sync card→pin works.
-        const placeKey = place.google_place_id || place.name;
-        const itemKey = `unassigned-${placeKey || idx}`;
+        // Use the pool index as the sync key — google_place_id and
+        // name can collide across cards when the same place was
+        // mentioned in two different videos (each video produces its
+        // own card with its own pin). The pool index is the unique
+        // global index that ExtractedPlacesPanel uses too, so panel↔
+        // map highlight stays 1:1 even when names match.
+        const placeKey = String(place.poolIndex ?? idx);
+        const itemKey = `unassigned-${placeKey}`;
         // Three triggers for highlight:
         //  1. internal hover on the pin itself
         //  2. user clicked the matching card in the panel (sticky
