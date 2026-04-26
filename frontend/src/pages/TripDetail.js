@@ -195,11 +195,23 @@ export default function TripDetail() {
 
     const places = trip?.traveler_profile?.places_mentioned || [];
     if (places.length === 0) return;
+    // Two reasons to reenrich:
+    //   a) Place has google_place_id but no editorial_summary/reviews
+    //      (cheap Google Places details fetch, cached 24h)
+    //   b) Place lacks both editorial_summary AND creator_note AND
+    //      rich_description — Haiku will generate a guide-style blurb
+    //      + practical tips so the modal stops looking bare.
     const needsBackfill = places.some(
       (p) =>
-        p?.google_place_id
-        && !p?.editorial_summary
-        && !(Array.isArray(p?.top_reviews) && p.top_reviews.length > 0),
+        (p?.google_place_id
+          && !p?.editorial_summary
+          && !(Array.isArray(p?.top_reviews) && p.top_reviews.length > 0))
+        || (
+          (p?.name || "").trim()
+          && !(p?.editorial_summary || "").trim()
+          && !(p?.creator_note || "").trim()
+          && !(p?.rich_description || "").trim()
+        ),
     );
     if (!needsBackfill) return;
 

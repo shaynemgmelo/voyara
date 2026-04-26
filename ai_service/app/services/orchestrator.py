@@ -1813,27 +1813,77 @@ async def reenrich_trip_places(trip_id: int, http_client=None) -> dict:
     if not places:
         return {"backfilled": 0, "skipped": "no_places"}
 
-    # Cheap pre-check: if every place already has the new fields, no
-    # need to spin up a Places client at all.
-    needs_backfill = sum(
+    # Two backfills run in sequence:
+    #
+    #   1. _backfill_place_extras → cheap (Google Places details, cached
+    #      24h). Pulls editorial_summary + top_reviews + opening_hours
+    #      onto places that lack them.
+    #
+    #   2. _generate_rich_descriptions_batch → Haiku (paid). Pulls
+    #      rich_description + practical_tips onto places that ALSO lack
+    #      a creator_note (so old trips' "experience cards" stop looking
+    #      bare). Grouped by source_url, batched per video → ~1 Haiku
+    #      call per source video, not per place.
+    #
+    # Both are idempotent: places that already carry the field are
+    # skipped, so calling reenrich repeatedly doesn't rerun the work.
+
+    needs_google_backfill = sum(
         1 for p in places
         if p.get("google_place_id")
         and not p.get("editorial_summary")
         and not p.get("top_reviews")
     )
-    if needs_backfill == 0:
+    needs_rich_descriptions = sum(
+        1 for p in places
+        if (p.get("name") or "").strip()
+        and not (p.get("creator_note") or "").strip()
+        and not (p.get("editorial_summary") or "").strip()
+        and not (p.get("rich_description") or "").strip()
+    )
+    if needs_google_backfill == 0 and needs_rich_descriptions == 0:
         return {"backfilled": 0, "skipped": "all_current"}
 
-    places_client = GooglePlacesClient(http_client=http_client)
-    try:
-        updated, count = await _backfill_place_extras(places, places_client)
-    finally:
-        try:
-            await places_client.close()
-        except Exception:
-            pass
+    updated = list(places)
+    google_count = 0
+    rich_count = 0
 
-    if count == 0:
+    if needs_google_backfill > 0:
+        places_client = GooglePlacesClient(http_client=http_client)
+        try:
+            updated, google_count = await _backfill_place_extras(updated, places_client)
+        finally:
+            try:
+                await places_client.close()
+            except Exception:
+                pass
+
+    if needs_rich_descriptions > 0:
+        # Pull the Link records' content_text so Haiku can ground each
+        # description in what was actually said in the source video.
+        link_contents: list[dict] = []
+        for link in (trip.get("links") or []):
+            url = link.get("url")
+            content = ((link.get("extracted_data") or {}).get("content_text") or "")
+            if url and content:
+                link_contents.append({"url": url, "content_text": content})
+        if link_contents:
+            # CostTracker is keyed by link_id by design; we don't have one
+            # here (the work spans every link in the trip), so leave it
+            # blank and the tracker will still aggregate token counts.
+            cost = CostTracker()
+            try:
+                updated, rich_count = await _generate_rich_descriptions_batch(
+                    updated,
+                    trip.get("destination") or "",
+                    link_contents,
+                    cost,
+                )
+            except Exception:
+                logger.exception("[reenrich] rich-desc generation failed (non-fatal)")
+
+    total_filled = google_count + rich_count
+    if total_filled == 0:
         return {"backfilled": 0, "skipped": "no_new_data"}
 
     profile["places_mentioned"] = updated
@@ -1844,10 +1894,164 @@ async def reenrich_trip_places(trip_id: int, http_client=None) -> dict:
         return {"backfilled": 0, "skipped": "persist_failed"}
 
     logger.info(
-        "[reenrich] trip=%d backfilled %d/%d places with editorial+reviews",
-        trip_id, count, len(places),
+        "[reenrich] trip=%d google=%d rich-desc=%d (of %d places)",
+        trip_id, google_count, rich_count, len(places),
     )
-    return {"backfilled": count, "total_places": len(places)}
+    return {
+        "backfilled": total_filled,
+        "google_backfilled": google_count,
+        "rich_descriptions_generated": rich_count,
+        "total_places": len(places),
+    }
+
+
+async def _generate_rich_descriptions_batch(
+    places: list[dict],
+    trip_destination: str,
+    link_contents: list[dict],
+    cost: CostTracker,
+) -> tuple[list[dict], int]:
+    """For places that have NO creator_note and NO editorial_summary,
+    ask Haiku to generate a 2-3 sentence rich description plus 2-3
+    practical tips, grounded in the source video transcripts where each
+    place was mentioned.
+
+    The user complained that old trips' modal looked bare ("This
+    experience was mentioned in the source video. Watch it for
+    details") — that fallback was firing because trip 41's places
+    have neither field. This backfill turns the bare cards into rich
+    travel-guide cards: "Sunset cruise on the Río de la Plata. Local
+    favorite for golden-hour photos. Tip: book the 18:30 departure
+    in summer — earlier ones can hit fog. Bring a light jacket."
+
+    Batched: ONE Haiku call per ~10 places (so a 30-place trip costs
+    3 calls instead of 30). Idempotent — places that already have
+    rich content are skipped.
+
+    `link_contents` is a list of {url, content_text} from the trip's
+    extracted Link records. Used to ground each place's description
+    in what was actually said in that video.
+
+    Returns (updated_places, count_filled).
+    """
+    if not places or not link_contents:
+        return places, 0
+
+    needs_rich = [
+        p for p in places
+        if (p.get("name") or "").strip()
+        and not (p.get("creator_note") or "").strip()
+        and not (p.get("editorial_summary") or "").strip()
+        and not (p.get("rich_description") or "").strip()
+    ]
+    if not needs_rich:
+        return places, 0
+
+    # Map source_url → content_text for fast lookup.
+    by_url = {
+        c.get("url"): (c.get("content_text") or "")
+        for c in link_contents
+        if c.get("url")
+    }
+
+    # Group places by source_url so each Haiku call sees the whole
+    # transcript context for the videos those places came from.
+    groups: dict[str, list[dict]] = {}
+    for p in needs_rich:
+        url = p.get("source_url") or ""
+        groups.setdefault(url, []).append(p)
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    filled_count = 0
+    by_name_updates: dict[str, dict] = {}
+
+    for url, group_places in groups.items():
+        content = by_url.get(url, "")
+        # Build a numbered list of places — Haiku returns a parallel array.
+        names_block = "\n".join(
+            f"  {i + 1}. {p.get('name')}" for i, p in enumerate(group_places)
+        )
+        # Guard against an enormous content_text crashing token budget.
+        content_clamped = content[:8000] if content else ""
+
+        prompt = f"""Você é um guia de viagem especialista. Para cada lugar listado abaixo, gere:
+1. Uma DESCRIÇÃO rica de 2-3 frases em português (pt-BR) que conta o que é o lugar, sua história ou o que o torna especial. Não invente fatos — use o conteúdo do vídeo de origem + conhecimento geral confiável.
+2. Uma lista de 2-4 DICAS práticas (cada uma de 1 frase curta): melhor horário, o que levar, reservas necessárias, pegadinhas comuns, custo aproximado, como chegar. Cada dica deve ser ACIONÁVEL — algo que o viajante possa fazer.
+
+Destino: {trip_destination}
+
+Conteúdo do vídeo de origem (transcript + caption + texto na tela):
+{content_clamped if content_clamped else "(sem conteúdo do vídeo disponível — use apenas conhecimento geral)"}
+
+Lugares para descrever (RESPOSTA DEVE CONTER OS {len(group_places)} EM ORDEM):
+{names_block}
+
+Retorne APENAS um JSON array com {len(group_places)} objetos na MESMA ordem dos lugares acima:
+[{{"description": "...", "tips": ["dica 1", "dica 2", "dica 3"]}}, ...]
+
+Regras:
+- description: pt-BR, 2-3 frases, factual, evita superlativos vazios ("incrível", "imperdível").
+- tips: cada dica é uma frase prática. Sem repetir info da description.
+- Se não tiver informação confiável sobre o lugar, retorne description="" e tips=[] (preferimos vazio a inventar).
+- NUNCA cite o vídeo no texto ("o creator falou", "no vídeo X") — escreva como guia direto."""
+
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=4096,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=45.0,
+                    )
+                ),
+                timeout=50.0,
+            )
+            cost.record_usage(response.usage)
+        except (asyncio.TimeoutError, Exception):
+            logger.exception("[rich-desc] Haiku call failed for url=%s", url)
+            continue
+
+        raw = response.content[0].text if response.content else "[]"
+        parsed = _parse_json_response(raw)
+        if not isinstance(parsed, list):
+            logger.warning("[rich-desc] non-list response for url=%s — skipping", url)
+            continue
+
+        # Map by position. Trust Haiku to return the same order; if the
+        # length doesn't match, take what we can.
+        for i, p in enumerate(group_places):
+            if i >= len(parsed):
+                break
+            entry = parsed[i]
+            if not isinstance(entry, dict):
+                continue
+            description = (entry.get("description") or "").strip()
+            tips = entry.get("tips") or []
+            if not isinstance(tips, list):
+                tips = []
+            tips = [(t or "").strip() for t in tips if (t or "").strip()][:4]
+            if not description and not tips:
+                continue
+            by_name_updates[(p.get("name") or "").strip().lower()] = {
+                "rich_description": description,
+                "practical_tips": tips,
+            }
+            filled_count += 1
+
+    if filled_count == 0:
+        return places, 0
+
+    # Apply updates — match by lowercased name (same dedup key the
+    # rest of the pipeline uses).
+    updated = []
+    for p in places:
+        key = (p.get("name") or "").strip().lower()
+        if key in by_name_updates:
+            updated.append({**p, **by_name_updates[key]})
+        else:
+            updated.append(p)
+    return updated, filled_count
 
 
 def _classify_place_category(types: list[str]) -> str:

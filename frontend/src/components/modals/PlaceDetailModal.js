@@ -68,6 +68,14 @@ export default function PlaceDetailModal({
   const pricing = place.pricing;
   const editorialSummary = (place.editorial_summary || "").trim();
   const creatorNote = (place.creator_note || "").trim();
+  // rich_description + practical_tips come from a Haiku batch run
+  // (during /reenrich-places) for places that lack both an editorial
+  // summary AND a creator note. Old trips show these instead of the
+  // bare "this experience was mentioned in the source video" fallback.
+  const richDescription = (place.rich_description || "").trim();
+  const practicalTips = Array.isArray(place.practical_tips)
+    ? place.practical_tips.filter((t) => (t || "").trim())
+    : [];
   const topReviews = Array.isArray(place.top_reviews) ? place.top_reviews : [];
   const isExperience = place.kind === "experience";
   const operatingHours = place.operating_hours || {};
@@ -136,14 +144,26 @@ export default function PlaceDetailModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4"
+      // Backdrop: full screen on mobile (so the bottom sheet has
+      // something to pop up against), transparent on desktop (the
+      // slide-out drawer doesn't need to dim the underlying map —
+      // the user wants to keep referencing it).
+      className="fixed inset-0 z-[70] bg-black/40 sm:bg-transparent flex items-end sm:items-stretch sm:justify-end"
       onClick={onClose}
     >
       <div
-        // Mobile: full-width bottom sheet pinned to the bottom of the
-        // screen with rounded-t corners + slide-up animation.
-        // Desktop: centered card with rounded corners on all sides.
-        className="bg-white w-full sm:max-w-md sm:w-full sm:rounded-2xl rounded-t-3xl shadow-2xl overflow-hidden max-h-[92vh] sm:max-h-[90vh] flex flex-col animate-[slideUp_0.2s_ease-out] sm:animate-none"
+        // Mobile (< sm): bottom sheet pinned to the bottom of the
+        //   screen, rounded-t-3xl, slide-up animation.
+        // Desktop (≥ sm): right-side slide-out drawer, full height,
+        //   slide-right animation. Matches ItemDetail's geometry so
+        //   both detail surfaces feel like one consistent UI — the
+        //   user explicitly asked for the lateral drawer instead of
+        //   the centered popup.
+        className={
+          "bg-white shadow-2xl flex flex-col overflow-hidden " +
+          "w-full max-h-[92vh] rounded-t-3xl animate-[slideUp_0.22s_ease-out] " +
+          "sm:max-h-none sm:h-full sm:w-[440px] sm:rounded-none sm:animate-[slideRight_0.22s_ease-out]"
+        }
         onClick={(e) => e.stopPropagation()}
       >
         {/* Mobile drag handle — visual cue this is a bottom sheet you
@@ -225,12 +245,50 @@ export default function PlaceDetailModal({
             )}
           </div>
 
-          {/* About this place — Google editorial summary */}
-          {editorialSummary && (
+          {/* About this place — preference order:
+                1. richDescription (Haiku-generated guide blurb,
+                   grounded in the source video transcript). Used when
+                   Google has no editorial summary AND the creator
+                   didn't leave a specific note. Trip 41 surfaced this
+                   as missing — old experience cards used to show only
+                   the bare "this experience was mentioned in the
+                   source video" fallback.
+                2. editorialSummary (Google's curated 1-2 sentences).
+              We prefer richDescription because it carries video-context
+              + travel-guide framing, where editorialSummary is more
+              encyclopedic. Both surfaced when present. */}
+          {richDescription && (
+            <Card title={pt ? "Sobre este lugar" : "About this place"} accent="amber">
+              <p className="text-sm text-gray-800 leading-relaxed">
+                {richDescription}
+              </p>
+            </Card>
+          )}
+          {editorialSummary && !richDescription && (
             <Card title={pt ? "Sobre este lugar" : "About this place"} accent="amber">
               <p className="text-sm text-gray-800 leading-relaxed">
                 {editorialSummary}
               </p>
+            </Card>
+          )}
+
+          {/* Practical tips — actionable bullets generated alongside
+              richDescription by the Haiku batch run during reenrich.
+              Hidden when empty so trips that haven't backfilled yet
+              don't render an empty box. */}
+          {practicalTips.length > 0 && (
+            <Card title={pt ? "💡 Dicas práticas" : "💡 Practical tips"} accent="emerald">
+              <ul className="space-y-1.5">
+                {practicalTips.map((tip, i) => (
+                  <li
+                    key={`tip-${i}`}
+                    className="flex gap-2 text-sm text-gray-800 leading-relaxed"
+                  >
+                    <span className="text-emerald-500 flex-shrink-0 mt-0.5">✓</span>
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
             </Card>
           )}
 
@@ -489,11 +547,14 @@ export default function PlaceDetailModal({
   );
 }
 
-// Reusable section card with colored accent (coral/amber).
+// Reusable section card with colored accent. Each accent is a preset
+// (bg + border + title color) so the modal stays visually consistent.
 function Card({ title, accent = "gray", children }) {
   const palette = {
     coral: { bg: "bg-coral-50", border: "border-coral-100", title: "text-coral-700" },
     amber: { bg: "bg-amber-50", border: "border-amber-100", title: "text-amber-700" },
+    emerald: { bg: "bg-emerald-50", border: "border-emerald-100", title: "text-emerald-700" },
+    blue: { bg: "bg-blue-50", border: "border-blue-100", title: "text-blue-700" },
     gray: { bg: "bg-gray-50", border: "border-gray-100", title: "text-gray-700" },
   }[accent] || { bg: "bg-gray-50", border: "border-gray-100", title: "text-gray-700" };
   return (

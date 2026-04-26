@@ -204,6 +204,45 @@ class TestReenrichTripPlaces:
         assert result["skipped"] == "trip_not_found"
 
     @pytest.mark.asyncio
+    async def test_rich_descriptions_skipped_when_no_link_content(self):
+        """Without any extracted Link content the rich-description
+        backfill can't ground its prompts in the source video — so it
+        should bail without calling Haiku at all (no spurious cost)."""
+        from app.services.orchestrator import _generate_rich_descriptions_batch
+        from app.ai.cost_tracker import CostTracker
+
+        places = [{"name": "Caminito"}]  # no creator_note, no editorial_summary
+        cost = CostTracker()
+        with patch("app.services.orchestrator.anthropic.Anthropic") as anth:
+            updated, count = await _generate_rich_descriptions_batch(
+                places, "Buenos Aires", [], cost,
+            )
+        assert count == 0
+        assert updated == places
+        anth.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rich_descriptions_skip_places_already_filled(self):
+        """Places that already have any of the rich fields are skipped."""
+        from app.services.orchestrator import _generate_rich_descriptions_batch
+        from app.ai.cost_tracker import CostTracker
+
+        places = [
+            {"name": "Has Editorial", "editorial_summary": "ok"},
+            {"name": "Has Note", "creator_note": "ok"},
+            {"name": "Has Rich", "rich_description": "ok"},
+        ]
+        link_contents = [{"url": "https://x", "content_text": "stuff"}]
+        cost = CostTracker()
+        with patch("app.services.orchestrator.anthropic.Anthropic") as anth:
+            updated, count = await _generate_rich_descriptions_batch(
+                places, "Buenos Aires", link_contents, cost,
+            )
+        # All three skipped → no Haiku call.
+        assert count == 0
+        anth.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_persists_merged_profile_when_backfill_happens(self):
         from app.services.orchestrator import reenrich_trip_places
 

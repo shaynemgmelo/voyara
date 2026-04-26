@@ -52,8 +52,13 @@ export default function ItemDetail({
 
   // Build community_notes list from the enriched place (when present),
   // falling back to the item's own creator_note, then to nothing. We
-  // also fold in editorial_summary as the "About this place" block.
+  // also fold in editorial_summary + Haiku-generated rich_description
+  // as the "About this place" block, plus practical_tips bullets.
   const editorialSummary = (enrichedPlace?.editorial_summary || "").trim();
+  const richDescription = (enrichedPlace?.rich_description || "").trim();
+  const practicalTips = Array.isArray(enrichedPlace?.practical_tips)
+    ? enrichedPlace.practical_tips.filter((t) => (t || "").trim())
+    : [];
   const communityNotes = (() => {
     const raw = enrichedPlace?.community_notes;
     if (Array.isArray(raw) && raw.length > 0) {
@@ -211,10 +216,23 @@ export default function ItemDetail({
           </div>
         )}
 
-        {/* About this place — Google's curated editorial summary, when
-            the place was enriched via Google Places. Falls back silently
-            when there's no editorial blurb available for this venue. */}
-        {editorialSummary && (
+        {/* About this place — preference order:
+              1. richDescription (Haiku-generated, source-video-grounded)
+              2. editorialSummary (Google's curated blurb)
+            richDescription wins when present because it's tailored to
+            the trip's source videos; editorialSummary is the fallback
+            for places that never went through the Haiku batch run. */}
+        {richDescription && (
+          <div className="rounded-xl bg-amber-50 border border-amber-100 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700 mb-1.5">
+              {pt ? "Sobre este lugar" : "About this place"}
+            </div>
+            <p className="text-sm text-gray-800 leading-relaxed">
+              {richDescription}
+            </p>
+          </div>
+        )}
+        {editorialSummary && !richDescription && (
           <div className="rounded-xl bg-amber-50 border border-amber-100 p-3">
             <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700 mb-1.5">
               {pt ? "Sobre este lugar" : "About this place"}
@@ -222,6 +240,26 @@ export default function ItemDetail({
             <p className="text-sm text-gray-800 leading-relaxed">
               {editorialSummary}
             </p>
+          </div>
+        )}
+
+        {/* Practical tips — actionable bullets generated alongside
+            richDescription by the Haiku batch run during reenrich.
+            Hidden when empty so trips that haven't backfilled don't
+            show an empty box. */}
+        {practicalTips.length > 0 && (
+          <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 mb-1.5">
+              💡 {pt ? "Dicas práticas" : "Practical tips"}
+            </div>
+            <ul className="space-y-1.5">
+              {practicalTips.map((tip, i) => (
+                <li key={`tip-${i}`} className="flex gap-2 text-sm text-gray-800 leading-relaxed">
+                  <span className="text-emerald-500 flex-shrink-0 mt-0.5">✓</span>
+                  <span>{tip}</span>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
