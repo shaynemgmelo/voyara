@@ -1,5 +1,6 @@
 class Api::V1::TripsController < ApplicationController
   include JsonColumnMerge
+  include ProfileFieldGuard
 
   before_action :authenticate_user!, except: [:shared]
   before_action :set_trip, only: [:show, :update, :destroy, :share, :unshare, :build]
@@ -41,8 +42,14 @@ class Api::V1::TripsController < ApplicationController
     permitted = trip_params
     if permitted[:traveler_profile].present?
       permitted = permitted.to_h
+      # Determine if this PATCH came from a user (request) or from the
+      # AI service (uses service_api_key auth via service_request?).
+      # AI service is allowed to write ANYTHING; user requests get the
+      # backend-owned fields stripped.
+      incoming_profile = permitted["traveler_profile"]
+      incoming_profile = strip_backend_owned_profile_fields(incoming_profile) unless service_request?
       permitted["traveler_profile"] = merge_json_column(
-        @trip.traveler_profile, permitted["traveler_profile"],
+        @trip.traveler_profile, incoming_profile,
       )
     end
 

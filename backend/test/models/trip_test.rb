@@ -212,4 +212,31 @@ class TripTest < ActiveSupport::TestCase
     assert_equal "walkable_urban",
                  final["destination_classification"]["destination_type"]
   end
+
+  test "strip_backend_owned_profile_fields removes places_mentioned from incoming hash" do
+    controller = Api::V1::TripsController.new
+    result = controller.send(:strip_backend_owned_profile_fields, {
+      "travel_style" => "x",
+      "places_mentioned" => [{ "name" => "A" }],
+      "day_plans_from_links" => [{ "day" => 1 }],
+      "external_research" => "blob",
+    })
+    assert_equal "x", result["travel_style"]
+    assert_nil result["places_mentioned"]
+    assert_nil result["day_plans_from_links"]
+    assert_nil result["external_research"]
+  end
+
+  test "strip_backend_owned_profile_fields keeps all user fields" do
+    controller = Api::V1::TripsController.new
+    fields = {
+      "travel_style" => "a",
+      "interests" => ["b"],
+      "pace" => "moderado",
+      "profile_description" => "text",
+      "main_destination" => { "city" => "Paris" },
+    }
+    result = controller.send(:strip_backend_owned_profile_fields, fields)
+    fields.each { |k, v| assert_equal v, result[k] }
+  end
 end
