@@ -370,11 +370,15 @@ class TestBuildAssistItem:
         assert item["name"] == "Casa Rosada"
         assert item["latitude"] == -34.6
         assert item["google_place_id"] == "ChIJ..."
-        assert item["rating"] == 4.4
+        # Rails permits `google_rating`, NOT `rating` — tested in
+        # TestBuildAssistItemPayload below for the full contract.
+        assert item["google_rating"] == 4.4
         assert item["category"] == "attraction"
         # Source provenance preserved so smart-assist can group by video later.
         assert item["source_url"] == "https://vt.tiktok.com/abc"
-        assert item["origin"] == "ai_assist_manual"
+        # Origin is the Rails-valid "ai_suggested" — see
+        # TestBuildAssistItemPayload for the full set of valid values.
+        assert item["origin"] == "ai_suggested"
         assert item["source"] == "link"
 
     def test_no_source_url_marks_source_as_ai(self):
@@ -771,3 +775,88 @@ class TestGeocodePlacesForManual:
         has_naked = any(p.get("latitude") is None and p["name"] in ("A", "B") for p in out)
         has_enriched = any(p.get("latitude") == 1.0 for p in out)
         assert has_naked and has_enriched
+
+
+# ---------------------------------------------------------------------------
+# _build_assist_item — Rails payload shape contract
+# ---------------------------------------------------------------------------
+
+class TestBuildAssistItemPayload:
+    """Trip 41 surfaced this as a real bug: the orchestrator was sending
+    fields Rails rejects (`origin: ai_assist_manual`, `category: place`,
+    `rating`, `reviews_count`), so EVERY ai-assist item silently 422'd
+    and the button looked like a no-op. These tests pin the payload
+    shape to the Rails permit list."""
+
+    def test_origin_is_valid_rails_value(self):
+        from app.services.orchestrator import _build_assist_item
+        # Mirrors ItineraryItem::ORIGINS = %w[extracted_from_video ai_suggested user_added]
+        VALID_ORIGINS = {"extracted_from_video", "ai_suggested", "user_added"}
+        out = _build_assist_item({"name": "X", "category": "attraction"})
+        assert out["origin"] in VALID_ORIGINS
+
+    def test_category_is_valid_rails_value_even_when_input_is_place(self):
+        """`_classify_place_category` returns "place" as a fallback. Rails
+        does NOT accept "place" — it must be mapped to something in
+        CATEGORY_OPTIONS."""
+        from app.services.orchestrator import _build_assist_item
+        VALID_CATEGORIES = {
+            "restaurant", "attraction", "hotel", "transport", "activity",
+            "shopping", "cafe", "nightlife", "other",
+        }
+        for input_cat in ("place", "", None, "weird_unknown_value"):
+            out = _build_assist_item({"name": "X", "category": input_cat})
+            assert out["category"] in VALID_CATEGORIES, (
+                f"category {input_cat!r} → {out['category']!r} not in Rails permit list"
+            )
+
+    def test_known_categories_pass_through(self):
+        from app.services.orchestrator import _build_assist_item
+        for cat in ("restaurant", "attraction", "cafe", "shopping", "nightlife"):
+            out = _build_assist_item({"name": "X", "category": cat})
+            assert out["category"] == cat
+
+    def test_rating_fields_use_google_prefix(self):
+        """Rails permit list uses `google_rating` / `google_reviews_count`,
+        not `rating` / `reviews_count`. Trip 41 surfaced "Unpermitted
+        parameters: :rating, :reviews_count" warnings before the 422."""
+        from app.services.orchestrator import _build_assist_item
+        out = _build_assist_item({
+            "name": "X",
+            "rating": 4.7,
+            "reviews_count": 1234,
+        })
+        assert "rating" not in out
+        assert "reviews_count" not in out
+        assert out["google_rating"] == 4.7
+        assert out["google_reviews_count"] == 1234
+
+    def test_no_extraneous_fields_that_rails_rejects(self):
+        """Belt-and-suspenders: the keys we DO emit are all on the Rails
+        permit list. If we add a new field, we add it here too."""
+        from app.services.orchestrator import _build_assist_item
+        # From itinerary_items_controller.rb permit list.
+        ALLOWED = {
+            "name", "description", "category", "time_slot", "duration_minutes",
+            "position", "latitude", "longitude", "address", "google_place_id",
+            "google_rating", "google_reviews_count", "pricing_info", "phone",
+            "website", "notes", "source_url", "personal_notes",
+            "alternative_group", "source", "origin", "source_video_url",
+            "source_video_creator", "extraction_method", "priority",
+            "item_status", "best_turn", "region", "activity_model",
+            "visit_mode", "item_role", "operating_hours", "photos",
+            "vibe_tags", "alerts",
+        }
+        out = _build_assist_item({
+            "name": "X",
+            "category": "attraction",
+            "source_url": "https://x",
+            "address": "addr",
+            "latitude": 1,
+            "longitude": 1,
+            "google_place_id": "gp",
+            "rating": 4.5,
+            "reviews_count": 100,
+        })
+        unknown = set(out.keys()) - ALLOWED
+        assert not unknown, f"emitted fields not in Rails permit list: {unknown}"

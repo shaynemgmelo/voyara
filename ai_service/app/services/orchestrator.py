@@ -2223,23 +2223,58 @@ async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
 
 
 def _build_assist_item(p: dict) -> dict:
-    """Shape a places_mentioned entry into the itinerary_item payload Rails
-    expects. Carries through Google data so the new item visually matches
-    the day it lands on (vs. a bare-name stub)."""
+    """Shape a places_mentioned entry into the itinerary_item payload
+    Rails expects. Carries through Google data so the new item
+    visually matches the day it lands on (vs. a bare-name stub).
+
+    Field-name discipline (trip 41 surfaced all three of these as 422
+    errors that silently dropped EVERY ai-assist item, so the button
+    looked like a no-op):
+      - `category` must be in CATEGORY_OPTIONS — `"place"` (the value
+        _classify_place_category falls back to) is NOT valid; map it
+        to "attraction" which IS.
+      - `origin` must be in ORIGINS — `"ai_assist_manual"` is NOT valid;
+        use `"ai_suggested"` since the AI is doing the placement.
+      - Rails permit list uses `google_rating` / `google_reviews_count`,
+        NOT `rating` / `reviews_count` (the names from Google Places
+        client). Map them.
+    """
+    raw_category = p.get("category") or ""
     return {
         "name": p.get("name") or "",
-        "category": p.get("category") or "attraction",
+        "category": _normalize_item_category(raw_category),
         "source": "link" if p.get("source_url") else "ai",
-        "origin": "ai_assist_manual",
+        "origin": "ai_suggested",
         "source_url": p.get("source_url"),
         "address": p.get("address"),
         "latitude": p.get("latitude"),
         "longitude": p.get("longitude"),
         "google_place_id": p.get("google_place_id"),
-        "rating": p.get("rating"),
-        "reviews_count": p.get("reviews_count"),
+        "google_rating": p.get("rating"),
+        "google_reviews_count": p.get("reviews_count"),
         "duration_minutes": 90,
     }
+
+
+# Rails ItineraryItem.CATEGORY_OPTIONS — keep in sync with the Ruby
+# enum. Anything not in this set is rejected with a 422 by the
+# validates :category, inclusion: validator.
+_VALID_ITEM_CATEGORIES = {
+    "restaurant", "attraction", "hotel", "transport", "activity",
+    "shopping", "cafe", "nightlife", "other",
+}
+
+
+def _normalize_item_category(category: str) -> str:
+    """Map our internal place categories (which include "place" as a
+    catch-all from `_classify_place_category`) to the strict Rails
+    CATEGORY_OPTIONS set. Unknown values fall back to "attraction"
+    rather than nil so the card has a sensible icon."""
+    cat = (category or "").strip().lower()
+    if cat in _VALID_ITEM_CATEGORIES:
+        return cat
+    # "place" is our generic bucket — render as a tourist attraction.
+    return "attraction"
 
 
 def _cluster_by_proximity(places: list[dict], num_clusters: int) -> list[list[dict]]:
