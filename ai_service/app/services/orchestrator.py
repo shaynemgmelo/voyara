@@ -7191,6 +7191,14 @@ async def build_trip_itinerary(trip_id: int, http_client=None) -> dict:
         logger.error("[build] Failed to fetch trip %d: %s", trip_id, e)
         return {"error": str(e), "places_created": 0}
 
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[build] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode", "places_created": 0}
+
     day_plans = []
     existing_items = []
     for dp in day_plans_raw:
@@ -9190,6 +9198,14 @@ async def add_day_trip(
     if not trip:
         return {"error": "Trip not found"}
 
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[add_day_trip] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode"}
+
     profile = trip.get("traveler_profile") or {}
     base_city = (profile.get("main_destination") or {}).get("city") \
         or (profile.get("cities_detected") or [None])[0] or ""
@@ -10457,6 +10473,14 @@ async def refine_itinerary(
     except Exception as e:
         logger.error("[refine] Failed to fetch trip %d: %s", trip_id, e)
         return {"error": str(e), "places_created": 0}
+
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[refine] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode"}
 
     # Build day plan info with existing items
     day_plans = []
