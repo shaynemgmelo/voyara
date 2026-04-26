@@ -1,4 +1,6 @@
 class Api::V1::ItineraryItemsController < Api::V1::BaseController
+  include JsonColumnMerge
+
   GOOGLE_API_KEY = ENV["GOOGLE_PLACES_API_KEY"]
 
   COMPLEMENTARY_TYPES = {
@@ -34,7 +36,19 @@ class Api::V1::ItineraryItemsController < Api::V1::BaseController
   end
 
   def update
-    if @item.update(item_params)
+    permitted = item_params.to_h
+    # operating_hours is a HASH JSON column — deep-merge so a swap-path
+    # PATCH (or any partial update) doesn't wipe the previously-stored
+    # weekly schedule. The other JSON columns (photos, vibe_tags, alerts)
+    # are ARRAYS — Rails default replace is correct for them. The known
+    # GeoReviewModal alerts-clobber and swap-path operating_hours-wipe
+    # are mitigated by adding the deep-merge here.
+    if permitted["operating_hours"].present?
+      permitted["operating_hours"] = merge_json_column(
+        @item.operating_hours, permitted["operating_hours"],
+      )
+    end
+    if @item.update(permitted)
       render json: ItineraryItemSerializer.new(@item, expanded: true).as_json
     else
       render json: { errors: @item.errors.full_messages }, status: :unprocessable_entity

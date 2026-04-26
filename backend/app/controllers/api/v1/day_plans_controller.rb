@@ -1,4 +1,6 @@
 class Api::V1::DayPlansController < Api::V1::BaseController
+  include JsonColumnMerge
+
   GOOGLE_API_KEY = ENV["GOOGLE_PLACES_API_KEY"]
 
   before_action :set_trip
@@ -25,7 +27,17 @@ class Api::V1::DayPlansController < Api::V1::BaseController
   end
 
   def update
-    if @day_plan.update(day_plan_params)
+    permitted = day_plan_params.to_h
+    # pattern_signature is a HASH JSON column — deep-merge so a
+    # partial PATCH (e.g. only updating conflict_alerts) doesn't
+    # wholesale-replace the existing planning vibe data.
+    # conflict_alerts is an ARRAY — Rails default replace is correct.
+    if permitted["pattern_signature"].present?
+      permitted["pattern_signature"] = merge_json_column(
+        @day_plan.pattern_signature, permitted["pattern_signature"],
+      )
+    end
+    if @day_plan.update(permitted)
       render json: DayPlanSerializer.new(@day_plan).as_json
     else
       render json: { errors: @day_plan.errors.full_messages }, status: :unprocessable_entity
