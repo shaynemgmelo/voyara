@@ -122,7 +122,74 @@ params.require(:trip).permit(:name, :destination, :num_days, :status, :ai_mode, 
 
 ---
 
-### 1.5 Model Enums — Trip
+### 1.5 DayPlansController — Create/Update Permit List
+
+**File:** `backend/app/controllers/api/v1/day_plans_controller.rb:248`
+
+```ruby
+params.require(:day_plan).permit(
+  :day_number, :date, :notes, :city,
+  :origin, :rigidity, :day_type, :primary_region,
+  :source_video_url, :source_creator_handle, :estimated_pace,
+  pattern_signature: {},
+  conflict_alerts: [[:type, :day, :message, :item_id, :severity, :created_at]]
+)
+```
+
+**Permit List for DayPlan (11 scalar fields + 2 complex fields):**
+
+| Field Name | Type | Required? | Notes |
+|---|---|---|---|
+| day_number | integer | no | |
+| date | string | no | |
+| notes | string | no | |
+| city | string | no | |
+| origin | string | no | Must be in ORIGINS (see enum below) |
+| rigidity | string | no | Must be in RIGIDITIES (see enum below) |
+| day_type | string | no | Must be in DAY_TYPES (see enum below) |
+| primary_region | string | no | |
+| source_video_url | string | no | |
+| source_creator_handle | string | no | |
+| estimated_pace | string | no | Must be in PACES (see enum below) |
+| pattern_signature | hash | no | Accepts any key-value pairs |
+| conflict_alerts | array of hashes | no | Each hash: type, day, message, item_id, severity, created_at |
+
+---
+
+### 1.6 LinksController — Create/Update Permit Lists
+
+**File:** `backend/app/controllers/api/v1/links_controller.rb:54-59`
+
+Two separate permit lists:
+
+**1.6a — link_params (Create):**
+
+```ruby
+params.require(:link).permit(:url)
+```
+
+**Permit List for Link Create (1 scalar field):**
+
+| Field Name | Type | Required? | Notes |
+|---|---|---|---|
+| url | string | yes | |
+
+**1.6b — link_update_params (Update):**
+
+```ruby
+params.require(:link).permit(:status, extracted_data: {})
+```
+
+**Permit List for Link Update (1 scalar field + 1 complex field):**
+
+| Field Name | Type | Required? | Notes |
+|---|---|---|---|
+| status | string | no | Must be in STATUS_OPTIONS (see enum below) |
+| extracted_data | hash | no | Accepts any key-value pairs |
+
+---
+
+### 1.7 Model Enums — Trip
 
 **File:** `backend/app/models/trip.rb:2-6`
 
@@ -133,7 +200,7 @@ params.require(:trip).permit(:name, :destination, :num_days, :status, :ai_mode, 
 
 ---
 
-### 1.6 Model Enums — Link
+### 1.8 Model Enums — Link
 
 **File:** `backend/app/models/link.rb:2-3`
 
@@ -183,6 +250,7 @@ These are the mutation callsites where Python constructs payloads and sends them
 | 10788 | `build_trip_itinerary()` | `update_day_plan()` | 1+ | Day plan updates |
 | 10959 | `build_trip_itinerary()` | `update_day_plan()` | 1+ | Day plan updates |
 | 10991 | `extract_media()` | `update_link()` | 1x | `status="failed"`, `extracted_data={"error": str}` |
+| 9825 | `suggest_day_trips()` | `update_day_plan()` | 1+ | Via `_one_patch()` helper — fires parallel PATCHes for rigidity/origin/day_type/city updates |
 
 ### 2.2 Critical Callsite: `_build_assist_item()` (line 2225)
 
@@ -254,9 +322,9 @@ These are the POST/PATCH endpoints that the frontend calls to trigger AI operati
 
 The frontend constructs itinerary_item payloads in multiple places. Each callsite sends a subset of the Rails permit list.
 
-### 4.1 Extracted Places → Drag-Drop (line 274)
+### 4.1 Extracted Places → Drag-Drop (line 394 — `handleDragEnd`)
 
-**Context:** User drags a place from the ExtractedPlacesPanel onto a day. Resolves the place from `trip.traveler_profile.places_mentioned` to get full enriched data.
+**Context:** User drags a place from the ExtractedPlacesPanel onto a day. Resolves the place from `trip.traveler_profile.places_mentioned` to get full enriched data. Called from the `handleDragEnd` callback that processes drop events on the day cells.
 
 **Payload:**
 ```javascript
@@ -284,9 +352,9 @@ The frontend constructs itinerary_item payloads in multiple places. Each callsit
 
 ---
 
-### 4.2 Place Detail Modal → Add to Day (line 274 variant)
+### 4.2 Place Detail Modal → Add to Day (line 261 — `handleAddPlaceToDay`)
 
-**Context:** User opens a place card from the extracted panel and clicks "Add to Day X" button in the modal. Same payload structure as 4.1.
+**Context:** User opens a place card from the extracted panel and clicks "Add to Day X" button in the modal. Called from the detail drawer's action button. Same payload structure as 4.1.
 
 **Payload:** Identical to 4.1 above.
 
@@ -294,7 +362,22 @@ The frontend constructs itinerary_item payloads in multiple places. Each callsit
 
 ---
 
-### 4.3 Add Item Form (line 326)
+### 4.3 Add Item Form (line 41-46 — ItemForm.js payload construction)
+
+**File:** `frontend/src/components/itinerary/ItemForm.js:41-46`
+
+**Context:** User fills in the manual form to add a new item. The form constructs a payload by parsing form fields and coercing types.
+
+```javascript
+const data = {
+  ...form,
+  duration_minutes: form.duration_minutes ? parseInt(form.duration_minutes) : null,
+  latitude: form.latitude ? parseFloat(form.latitude) : null,
+  longitude: form.longitude ? parseFloat(form.longitude) : null,
+};
+```
+
+**Field set:** Depends on the form structure, but at minimum: name, category, duration_minutes, latitude, longitude. The `...form` spread includes all form field names.
 
 **Context:** User clicks "Add Item" form button and fills in fields manually. The form invokes `handleAddItem()` which calls `addItem(dayPlanId, data)`.
 
@@ -340,15 +423,19 @@ The frontend constructs itinerary_item payloads in multiple places. Each callsit
 
 ## Summary of Callsites
 
+**Python ↔ Rails callsites (including new additions):**
+- **Total:** 28 callsites (1 new: orchestrator.py:9825 in suggest_day_trips)
+
 **Frontend payload callsites:**
 
-| Location | Route | Endpoint Called | Field Count | Notes |
+| Location | Function | Endpoint Called | Field Count | Notes |
 |---|---|---|---|---|
-| TripDetail.js:274 (extracted drop) | N/A | createItem() | 16 | Drag-drop from extracted panel |
-| TripDetail.js:327 (form add) | N/A | createItem() | Variable | Manual form; subset of 16 |
-| TripDetail.js:1078 (nearby add) | N/A | createItem() | 16+ | From nearby_suggestions |
-| TripDetail.js:1107 (smart suggest) | N/A | createItem() | 16+ | From smart suggestions modal |
-| useTripDetail.js:361 (addItem hook) | N/A | itemsApi.createItem() | Passthrough | Generic wrapper |
+| TripDetail.js:394 (`handleDragEnd`) | Drag-drop from extracted panel | createItem() | 16 | Extracts place from trip.traveler_profile.places_mentioned |
+| TripDetail.js:261 (`handleAddPlaceToDay`) | Place detail modal → Add to Day | createItem() | 16 | Modal action button dispatch |
+| ItemForm.js:41-46 (payload construction) | Manual form add | createItem() | Variable | Parses + coerces form fields (duration_minutes, latitude, longitude) |
+| TripDetail.js:1078 (nearby add) | Nearby suggestions | createItem() | 16+ | From nearby_suggestions API |
+| TripDetail.js:1107 (smart suggest) | Smart suggestions modal | createItem() | 16+ | From smart suggestions component |
+| useTripDetail.js:361 (addItem hook) | Generic wrapper | itemsApi.createItem() | Passthrough | Delegates to API layer |
 
 ---
 
@@ -392,6 +479,8 @@ The frontend constructs itinerary_item payloads in multiple places. Each callsit
 
 - `backend/app/controllers/api/v1/itinerary_items_controller.rb`
 - `backend/app/controllers/api/v1/trips_controller.rb`
+- `backend/app/controllers/api/v1/day_plans_controller.rb` (NEW — Gap 1)
+- `backend/app/controllers/api/v1/links_controller.rb` (NEW — Gap 1)
 - `backend/app/models/itinerary_item.rb`
 - `backend/app/models/day_plan.rb`
 - `backend/app/models/trip.rb`
@@ -399,6 +488,7 @@ The frontend constructs itinerary_item payloads in multiple places. Each callsit
 - `ai_service/app/services/orchestrator.py`
 - `ai_service/app/api/routes.py`
 - `frontend/src/pages/TripDetail.js`
+- `frontend/src/components/itinerary/ItemForm.js` (NEW — Gap 3)
 - `frontend/src/hooks/useTripDetail.js`
 - `frontend/src/api/itineraryItems.js`
 
