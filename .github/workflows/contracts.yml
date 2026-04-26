@@ -88,3 +88,29 @@ jobs:
           text: "🚨 Silent-except linter FAILED on main — error-swallowing regression just landed"
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ai_service
+        working-directory: ai_service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install mypy
+      - name: Run mypy on strict modules
+        working-directory: ai_service
+        run: mypy app/services/rails_client.py
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,workflow
+          text: "🚨 mypy --strict FAILED on main — type-safety regression just landed"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
