@@ -158,12 +158,23 @@ export default function TripDetail() {
 
   // Silent auto-enrichment for trips built BEFORE the experience feature
   // existed. If the trip has items but none are tagged "experiencia", we
-  // fire a background enrich + optimize once per session. Zero UI chrome —
-  // the user just sees new cards appear naturally after the next poll tick.
+  // fire a background enrich + optimize once per session.
+  //
+  // CRITICAL: this NEVER runs in manual mode. Trip 44 surfaced a real
+  // bug here — the user dragged ONE card ("Woolfox") to Day 1 and the
+  // auto-enrich saw "trip has items, none have the 'experiencia' tag",
+  // then silently added 4 AI-generated activities (Harry Potter Studio
+  // Tour in Watford, Thames cruise, etc.) the user never asked for.
+  // The whole point of manual mode is "the user organizes; the AI shuts
+  // up unless explicitly summoned". Auto-enrich + auto-optimize would
+  // also rewrite time slots and reorder items the user just placed.
   useEffect(() => {
     if (!trip || !id) return;
     if (autoEnrichedRef.current) return;
     if (pipelinePhase === "generating" || pipelinePhase === "analyzing") return;
+    // Manual mode is a TERMINAL "user owns it" state — no AI may touch
+    // the itinerary unless the user clicks "Assistência IA" explicitly.
+    if (trip.ai_mode === "manual") return;
 
     const items = (trip.day_plans || []).flatMap(
       (dp) => dp.itinerary_items || []
@@ -250,12 +261,33 @@ export default function TripDetail() {
   const handleAddPlaceToDay = useCallback(
     async (place, dayPlanId) => {
       if (!place || !dayPlanId) return;
+      // Same field-set the drag-drop path now sends — must propagate
+      // every Google-Places field so the new itinerary_item gets a map
+      // pin + rich card. Trip 44 surfaced the bug where dragged items
+      // landed without lat/lng and the pin silently disappeared.
+      const VALID_CATS = new Set([
+        "restaurant", "attraction", "hotel", "transport", "activity",
+        "shopping", "cafe", "nightlife", "other",
+      ]);
+      const rawCat = (place.category || "").trim().toLowerCase();
+      const category = VALID_CATS.has(rawCat) ? rawCat : "attraction";
       await addItem(dayPlanId, {
         name: place.name,
-        category: place.category || "attraction",
+        category,
         source: "link",
         origin: "extracted_from_video",
         source_url: place.source_url || null,
+        latitude: place.latitude ?? null,
+        longitude: place.longitude ?? null,
+        address: place.address ?? null,
+        google_place_id: place.google_place_id ?? null,
+        google_rating: place.rating ?? null,
+        google_reviews_count: place.reviews_count ?? null,
+        photos: Array.isArray(place.photos) ? place.photos : (place.photo_url ? [place.photo_url] : []),
+        phone: place.phone ?? null,
+        website: place.website ?? null,
+        operating_hours: place.operating_hours ?? {},
+        pricing_info: place.pricing ?? null,
       });
       // Brief visual confirmation in the modal before it closes.
       setTimeout(() => closePlaceDetail(), 600);
@@ -333,19 +365,52 @@ export default function TripDetail() {
     if (source.droppableId === ExtractedPlacesPanel.DROPPABLE_ID) {
       const destDayId = parseInt(destination.droppableId);
       if (Number.isNaN(destDayId)) return;
-      // Format: "extracted::<name>::<index>"
+      // Format: "extracted::<name>::<index>::<globalIndex?>". We prefer
+      // the index when present so duplicate names don't collide on lookup.
       const parts = draggableId.split("::");
       const name = parts[1] || "";
+      const idxFromDrag = parts[2] != null ? Number(parts[2]) : NaN;
       if (!name) return;
-      // Reuse the source_url from the profile if we have it.
-      const place = (trip?.traveler_profile?.places_mentioned || [])
-        .find((p) => p.name === name);
+      // Pull the FULL enriched place from the profile so we propagate
+      // lat/lng + google_place_id + photos + address to Rails. Trip 44
+      // surfaced a real bug here: the previous version of this handler
+      // sent only {name, category, source, origin, source_url}, which
+      // meant the new itinerary_item had no coordinates and so the map
+      // pin silently disappeared. Match by globalIndex when it lines
+      // up; fall back to the first name match.
+      const candidates = (trip?.traveler_profile?.places_mentioned || []);
+      const place =
+        (!Number.isNaN(idxFromDrag) && candidates[idxFromDrag])
+        || candidates.find((p) => (p?.name || "") === name);
+      // Mirror category to a valid Rails CATEGORY_OPTIONS value (the
+      // panel/Google may emit "place" which Rails rejects). Falls back
+      // to "attraction" — same default _build_assist_item uses.
+      const VALID = new Set([
+        "restaurant", "attraction", "hotel", "transport", "activity",
+        "shopping", "cafe", "nightlife", "other",
+      ]);
+      const rawCat = (place?.category || "").trim().toLowerCase();
+      const category = VALID.has(rawCat) ? rawCat : "attraction";
       addItem(destDayId, {
         name,
-        category: "attraction",
+        category,
         source: "link",
         origin: "extracted_from_video",
         source_url: place?.source_url || null,
+        // Geo + Google Places fields — these are what make the pin
+        // appear on the map and the rich card render properly. Rails
+        // accepts every key here via the itinerary_items permit list.
+        latitude: place?.latitude ?? null,
+        longitude: place?.longitude ?? null,
+        address: place?.address ?? null,
+        google_place_id: place?.google_place_id ?? null,
+        google_rating: place?.rating ?? null,
+        google_reviews_count: place?.reviews_count ?? null,
+        photos: Array.isArray(place?.photos) ? place.photos : (place?.photo_url ? [place.photo_url] : []),
+        phone: place?.phone ?? null,
+        website: place?.website ?? null,
+        operating_hours: place?.operating_hours ?? {},
+        pricing_info: place?.pricing ?? null,
       });
       return;
     }

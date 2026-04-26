@@ -6861,6 +6861,22 @@ async def enrich_trip_with_experiences(
     except Exception as e:
         return {"error": f"Failed to load trip: {e}", "added": 0}
 
+    # Manual mode is a "user owns the itinerary, AI shuts up" contract.
+    # Refuse this entire enrichment pass, even when called from a stale
+    # auto-trigger on the front-end — trip 44 surfaced this when the
+    # user dragged ONE card and the auto-trigger silently added 4
+    # AI-fabricated activities (Harry Potter Studio Tour outside London,
+    # Thames cruise, food tour, pub jantar). The frontend now skips the
+    # call too, but a defensive backend check means stale browser tabs
+    # or third-party callers can't bypass it either.
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[experiences] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode", "added": 0}
+
     destination = trip.get("destination") or ""
     if not destination:
         return {"error": "Trip has no destination", "added": 0}
@@ -6947,6 +6963,18 @@ async def optimize_trip_routing(trip_id: int, http_client=None) -> dict:
         day_plans_raw = await rails.get_day_plans(trip_id)
     except Exception as e:
         return {"error": f"Failed to load trip: {e}", "changed": 0}
+
+    # Manual mode contract: AI does not move things the user placed.
+    # Optimizer rewrites position + day + time_slot, which is exactly
+    # what the user explicitly does NOT want. Refuse here so a stale
+    # browser tab can't accidentally reorder a hand-built itinerary.
+    ai_mode = (trip.get("ai_mode") or "").strip().lower()
+    if ai_mode == "manual":
+        logger.info(
+            "[optimize] trip=%d skipped — ai_mode=manual (user owns itinerary)",
+            trip_id,
+        )
+        return {"skipped": "manual_mode", "changed": 0}
 
     # Flatten current items + remember their original (day, position, slot)
     # so we can detect what actually moved. CRITICAL: capture the original
