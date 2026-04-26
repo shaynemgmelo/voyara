@@ -39,3 +39,25 @@ jobs:
       - name: Run canonical-payload tests
         working-directory: frontend
         run: npm test -- --watchAll=false --testPathPattern=itineraryItemPayload
+
+  silent-excepts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ai_service
+        working-directory: ai_service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-asyncio
+      - name: Lint silent excepts (test the linter itself)
+        working-directory: ai_service
+        run: pytest tests/test_lint_silent_excepts.py -v
+      # Don't fail the build on existing findings yet — Tier 2 baseline
+      # acknowledges they exist. Future-tighten by adding `|| exit 1`.
+      - name: Surface silent-except findings
+        working-directory: ai_service
+        run: python scripts/lint_silent_excepts.py app/ || true
