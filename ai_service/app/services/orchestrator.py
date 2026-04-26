@@ -1149,11 +1149,16 @@ Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
 "cities_detected": ["City1", "City2"],
 "profile_description": "MINIMUM 40 WORDS in PERFECT Brazilian Portuguese (pt-BR) with flawless grammar — proper accents (á, é, ã, õ, ô, ç, à), punctuation, and cedilla. MUST reference 2-3 specific places by NAME from the content. Example tone: 'Viajante com olhar curioso para bairros autênticos — o interesse por Palermo Soho e as ruas históricas de San Telmo revela alguém que valoriza descobertas locais e atmosfera. O estilo é urbano e ritmado, com espaço para cafés especiais e experiências gastronômicas.' Not a generic line; a vivid mini-portrait.",
 "profile_description_en": "Same 40+ word portrait in English. Equally warm, specific, and rich.",
-"places_mentioned": [{{"name": "Exact Place Name", "source_url": "https://...", "day": null}}],
+"places_mentioned": [{{"name": "Exact Place Name OR Experience", "source_url": "https://...", "day": null, "kind": "place" | "experience"}}],
 "day_plans_from_links": [{{"day": 1, "places": ["Place A", "Place B", "Place C"], "source_url": "https://..."}}]}}
 
 IMPORTANT:
-- places_mentioned: Extract EVERY specific named place from the content — restaurants, attractions, cafes, parks, markets, hotels, bars, viewpoints, beaches, neighborhoods worth visiting, etc. Map each to its source URL (use the "--- Source: URL ---" headers in the content). Be THOROUGH — if a place is named in the content, it MUST appear here. Generic descriptions like "a nice cafe" or "the beach" don't count — only specifically named places (e.g., "In-N-Out Burger", "Griffith Observatory", "Café de Flore"). This list is critical — it tells the user which itinerary items came from their saved links. If a place is assigned to a specific day in the content, include "day": <number>.
+- places_mentioned: Extract ABSOLUTELY EVERYTHING the creator mentions or shows — both named PLACES and named EXPERIENCES. This list is the spine of the user's manual itinerary; anything missing here can never appear as a card. BE EXHAUSTIVE — pass through transcript AND on-screen text twice if needed. A typical 1-minute travel video has 8-15 entries; a 3-minute one has 20-30+. If you returned fewer than what's clearly named, you missed some.
+   • PLACES (kind="place"): restaurants, cafes, attractions, parks, markets, hotels, bars, viewpoints, beaches, neighborhoods, museums, monuments, shops, plazas, bridges, churches, theaters, etc. Use the EXACT name shown ("In-N-Out Burger", "Griffith Observatory", "Café de Flore"). Generic mentions like "a nice cafe" don't count.
+   • EXPERIENCES (kind="experience"): bookable activities the creator highlighted — "experiência de tango", "passeio de barco ao pôr do sol com open bar", "aula de culinária", "show no Café Tortoni", "tour guiado pelo Cemitério da Recoleta", "trilha noturna", "passeio de balão", "jantar gourmet com música ao vivo". These deserve their own card because they're concrete things the user can book or do, even when there isn't a single physical address. Name them descriptively in the same language as the source ("Passeio de barco ao pôr do sol no Rio de la Plata", not "boat ride").
+   • Map each entry to its source URL (use the "--- Source: URL ---" headers in the content).
+   • If the same place appears across multiple videos, include it ONCE with the first source URL — dedup is downstream's job, but yours is to not skip.
+   • If a place/experience is assigned to a specific day in the content, include "day": <number>.
 - day_plans_from_links: If the content contains a PRE-PLANNED day-by-day itinerary (e.g., "Day 1: visit X, Y, Z" or "First day: we went to A, B, C"), extract the COMPLETE day structure here. Each entry = one day with its ordered list of place names. This is CRITICAL — when someone shares a complete travel plan, we MUST respect their exact day grouping. If the content is NOT organized by days (just a list of recommendations), leave this as an empty array [].
 - cities_detected: List ONLY truly distinct cities/destinations that are far apart and require separate travel days (e.g., "Las Vegas" and "Zion National Park", or "Los Angeles" and "Joshua Tree").
   CRITICAL: Neighborhoods, districts, and nearby areas within the SAME metro area are NOT separate cities. For example: Venice, Santa Monica, Beverly Hills, Hollywood, Malibu are all part of "Los Angeles" — do NOT list them separately. Similarly, Brooklyn and Manhattan are both "New York City". Only list a place as a separate city if it's truly a different destination requiring 1+ hour of travel (like a national park, another city, etc.).
@@ -1173,12 +1178,16 @@ Content from multiple sources:
                 asyncio.to_thread(
                     lambda: client.messages.create(
                         model="claude-haiku-4-5-20251001",
-                        max_tokens=2048,
+                        # 4096 (was 2048) so a video with 25-30 named places +
+                        # experiences doesn't get truncated mid-list. Trip 41
+                        # surfaced this: video had ~32 mentions, only 23 made
+                        # it to places_mentioned because the JSON ended early.
+                        max_tokens=4096,
                         messages=[{"role": "user", "content": prompt}],
-                        timeout=35.0,
+                        timeout=45.0,
                     )
                 ),
-                timeout=40.0,
+                timeout=50.0,
             )
             cost.record_usage(response.usage)
             raw = response.content[0].text if response.content else "{}"
@@ -1364,20 +1373,29 @@ async def _geocode_places_for_manual(
                     details = None
 
         # Merge — prefer details (more complete) then fall back to search.
+        # Persist EVERYTHING the PlaceDetailModal might want to render so
+        # the user can inspect a card without an extra round trip. Skipping
+        # any of these fields means the detail modal silently degrades and
+        # the user sees half a card.
         merged = dict(p)
+        d = details or {}
         merged["google_place_id"] = place_id
-        merged["latitude"] = (details or {}).get("latitude") or best.get("latitude")
-        merged["longitude"] = (details or {}).get("longitude") or best.get("longitude")
-        merged["address"] = (details or {}).get("address") or best.get("address")
-        merged["rating"] = (details or {}).get("rating") or best.get("rating")
+        merged["latitude"] = d.get("latitude") or best.get("latitude")
+        merged["longitude"] = d.get("longitude") or best.get("longitude")
+        merged["address"] = d.get("address") or best.get("address")
+        merged["rating"] = d.get("rating") or best.get("rating")
         merged["reviews_count"] = (
-            (details or {}).get("reviews_count") or best.get("user_ratings_total")
+            d.get("reviews_count") or best.get("user_ratings_total")
         )
-        merged["pricing"] = (details or {}).get("pricing")
-        photos = (details or {}).get("photos") or []
+        merged["pricing"] = d.get("pricing")
+        photos = d.get("photos") or []
         merged["photo_url"] = photos[0] if photos else None
-        merged["google_maps_url"] = (details or {}).get("google_maps_url")
-        types = (details or {}).get("types") or best.get("types") or []
+        merged["photos"] = photos  # full list for future use
+        merged["google_maps_url"] = d.get("google_maps_url")
+        merged["phone"] = d.get("phone")
+        merged["website"] = d.get("website")
+        merged["operating_hours"] = d.get("operating_hours") or {}
+        types = d.get("types") or best.get("types") or []
         merged["category"] = _classify_place_category(types)
         return merged
 
@@ -1409,6 +1427,197 @@ def _classify_place_category(types: list[str]) -> str:
     } & type_set:
         return "attraction"
     return "place"
+
+
+async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
+    """Manual-mode "Assistência IA" — completes a partially user-organized
+    trip without ever touching items the user already placed.
+
+    Algorithm:
+      1. Read current state — which items are on which day, plus the full
+         pool of extracted places (places_mentioned, post-enrichment).
+      2. For each day the user populated, find the dominant source video
+         (most user items from that URL on that day) and add the rest of
+         that video's places that aren't yet placed elsewhere.
+      3. Empty days get the leftover pool, split into N geographic
+         clusters (one cluster per empty day) so each day stays tight.
+      4. Items the user placed are NEVER moved or deleted. Duplicates
+         are filtered by normalized name before insert.
+
+    Returns {"added": N, "days_filled": M}. Idempotent — running twice
+    won't double-add (the dedup check kicks in on the second pass).
+    """
+    rails = RailsClient(client=http_client)
+    try:
+        trip = await rails.get_trip(trip_id)
+    except Exception as e:
+        return {"error": f"Failed to fetch trip: {e}", "added": 0}
+
+    profile = trip.get("traveler_profile") or {}
+    pool: list[dict] = profile.get("places_mentioned") or []
+    day_plans: list[dict] = trip.get("day_plans") or []
+    if not pool:
+        return {"added": 0, "days_filled": 0, "note": "no extracted places"}
+    if not day_plans:
+        return {"added": 0, "days_filled": 0, "note": "no day_plans"}
+
+    # Normalize once and use throughout.
+    def _norm(s: str) -> str:
+        return _normalize_place_name(s or "")
+
+    # Index the pool by source_url so we can look up "what else came from
+    # this video?" quickly.
+    pool_by_source: dict[str, list[dict]] = {}
+    for p in pool:
+        src = p.get("source_url") or "__no_source__"
+        pool_by_source.setdefault(src, []).append(p)
+
+    # Set of names already placed anywhere on the trip — never re-add.
+    placed_names: set[str] = set()
+    items_by_day: dict[int, list[dict]] = {}
+    for dp in day_plans:
+        items = dp.get("itinerary_items") or []
+        items_by_day[dp["day_number"]] = items
+        for it in items:
+            placed_names.add(_norm(it.get("name") or ""))
+
+    # PASS 1 — populated days: fill from the dominant video's pool.
+    added_total = 0
+    days_filled = 0
+    for dp in day_plans:
+        items = items_by_day.get(dp["day_number"]) or []
+        if not items:
+            continue
+        # Tally source_url across the items the user placed today.
+        src_counts: dict[str, int] = {}
+        for it in items:
+            src = it.get("source_url")
+            if src:
+                src_counts[src] = src_counts.get(src, 0) + 1
+        if not src_counts:
+            continue
+        dominant_src = max(src_counts, key=src_counts.get)
+        # Candidates from that video, not already placed.
+        candidates = [
+            p for p in pool_by_source.get(dominant_src, [])
+            if _norm(p.get("name") or "") not in placed_names
+        ]
+        if not candidates:
+            continue
+        # Cap per day — don't pile 25 items into a day the user only
+        # seeded with 1. Default rhythm is 5 daytime + 1-2 night, so
+        # leave headroom: aim for ~7 total including what's already there.
+        TARGET_PER_DAY = 7
+        slots = max(0, TARGET_PER_DAY - len(items))
+        candidates = candidates[:slots]
+        if not candidates:
+            continue
+        for p in candidates:
+            try:
+                await rails.create_itinerary_item(
+                    trip_id, dp["id"], _build_assist_item(p),
+                )
+                placed_names.add(_norm(p.get("name") or ""))
+                added_total += 1
+            except Exception:
+                logger.exception(
+                    "[manual-assist] failed to create item %r on day %d",
+                    p.get("name"), dp["day_number"],
+                )
+        days_filled += 1
+
+    # PASS 2 — empty days: distribute leftover by geographic proximity.
+    leftover = [
+        p for p in pool
+        if _norm(p.get("name") or "") not in placed_names
+        and p.get("latitude") is not None
+        and p.get("longitude") is not None
+    ]
+    # Also include leftovers without geo at the tail — better to land them
+    # somewhere than to drop them entirely.
+    leftover_no_geo = [
+        p for p in pool
+        if _norm(p.get("name") or "") not in placed_names
+        and (p.get("latitude") is None or p.get("longitude") is None)
+    ]
+    empty_dps = [dp for dp in day_plans if not (items_by_day.get(dp["day_number"]) or [])]
+    if empty_dps and (leftover or leftover_no_geo):
+        groups = _cluster_by_proximity(leftover, len(empty_dps))
+        # Spread no-geo leftovers round-robin across the same buckets.
+        for i, p in enumerate(leftover_no_geo):
+            groups[i % len(groups)].append(p)
+        TARGET_PER_DAY = 7
+        for dp, group in zip(empty_dps, groups):
+            for p in group[:TARGET_PER_DAY]:
+                try:
+                    await rails.create_itinerary_item(
+                        trip_id, dp["id"], _build_assist_item(p),
+                    )
+                    placed_names.add(_norm(p.get("name") or ""))
+                    added_total += 1
+                except Exception:
+                    logger.exception(
+                        "[manual-assist] failed to create item %r on empty day %d",
+                        p.get("name"), dp["day_number"],
+                    )
+            if group:
+                days_filled += 1
+
+    logger.info(
+        "[manual-assist] trip=%d added=%d days_filled=%d (pool=%d, leftover=%d)",
+        trip_id, added_total, days_filled, len(pool),
+        len(leftover) + len(leftover_no_geo),
+    )
+    return {"added": added_total, "days_filled": days_filled, "pool_size": len(pool)}
+
+
+def _build_assist_item(p: dict) -> dict:
+    """Shape a places_mentioned entry into the itinerary_item payload Rails
+    expects. Carries through Google data so the new item visually matches
+    the day it lands on (vs. a bare-name stub)."""
+    return {
+        "name": p.get("name") or "",
+        "category": p.get("category") or "attraction",
+        "source": "link" if p.get("source_url") else "ai",
+        "origin": "ai_assist_manual",
+        "source_url": p.get("source_url"),
+        "address": p.get("address"),
+        "latitude": p.get("latitude"),
+        "longitude": p.get("longitude"),
+        "google_place_id": p.get("google_place_id"),
+        "rating": p.get("rating"),
+        "reviews_count": p.get("reviews_count"),
+        "duration_minutes": 90,
+    }
+
+
+def _cluster_by_proximity(places: list[dict], num_clusters: int) -> list[list[dict]]:
+    """Lightweight geographic clustering — sort places by latitude and split
+    into N roughly equal contiguous groups. Good enough for "fill empty
+    days with nearby items" without pulling in scipy/sklearn.
+
+    Returns N lists (some may be empty if num_clusters > len(places)).
+    Places without lat/lng are excluded — caller handles them separately.
+    """
+    if num_clusters <= 0:
+        return []
+    if not places:
+        return [[] for _ in range(num_clusters)]
+    sortable = sorted(
+        [p for p in places if p.get("latitude") is not None],
+        key=lambda p: (float(p["latitude"]), float(p.get("longitude") or 0)),
+    )
+    if not sortable:
+        return [[] for _ in range(num_clusters)]
+    # Even-ish split — first clusters get the remainder.
+    base, rem = divmod(len(sortable), num_clusters)
+    out: list[list[dict]] = []
+    cursor = 0
+    for i in range(num_clusters):
+        size = base + (1 if i < rem else 0)
+        out.append(sortable[cursor:cursor + size])
+        cursor += size
+    return out
 
 
 def _proportional_distribution(num_days: int, cities: list[str]) -> dict[str, int]:

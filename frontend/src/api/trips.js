@@ -119,6 +119,19 @@ export async function fetchDayTripSuggestions(city, country = "") {
   return resp.json();
 }
 
+// Manual-mode "Assistência IA" — the user has placed some items by hand
+// and wants the AI to fill the rest. Calls the dedicated manual-assist
+// endpoint that respects user-placed items (never moves/deletes them),
+// completes populated days with same-source video items, and fills empty
+// days with the leftover pool clustered by proximity. Sync — small op.
+export async function manualAssist(tripId) {
+  const resp = await fetch(`${AI_URL}/manual-assist/${tripId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  return resp.json();
+}
+
 // User-confirmed multi-base distribution. Resumes the paused extract-and-build
 // pipeline on the AI service — backend sets city_distribution.status="confirmed"
 // and re-enters extract_profile_and_build, which now skips the pause and runs

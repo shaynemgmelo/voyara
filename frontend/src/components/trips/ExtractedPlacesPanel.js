@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Droppable, Draggable } from "@hello-pangea/dnd";
 import { useLanguage } from "../../i18n/LanguageContext";
+import PlaceDetailModal from "../modals/PlaceDetailModal";
 
 /**
  * Manual-mode-only side panel showing every place we extracted from the
@@ -66,6 +67,11 @@ const CATEGORY_ICONS = {
 export default function ExtractedPlacesPanel({ trip }) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
+  // Click-to-open detail modal. Holds the currently expanded place
+  // (or null when nothing's open). Drag still wins over click — the
+  // dnd library cancels the click handler when a real drag started,
+  // so the modal won't open mid-drag.
+  const [detailPlace, setDetailPlace] = useState(null);
 
   const profile = trip?.traveler_profile || {};
   const placesMentioned = profile.places_mentioned || [];
@@ -200,17 +206,38 @@ export default function ExtractedPlacesPanel({ trip }) {
                           const hasGeo = place.latitude != null && place.longitude != null;
                           const cat = place.category || "place";
                           const shortAddress = (place.address || "").split(",")[0] || "";
+                          // onClick fires only when no drag happened — dnd
+                          // intercepts the click during real drags.
+                          const handleCardClick = (e) => {
+                            if (used) return;
+                            // Don't trigger when the click is on the drag
+                            // handle (dnd reuses the same div for handle +
+                            // body, so we filter on data-drag attribute).
+                            if (snapshot.isDragging || snapshot.isDropAnimating) return;
+                            e.stopPropagation();
+                            setDetailPlace(place);
+                          };
                           return (
                             <div
                               ref={p.innerRef}
                               {...p.draggableProps}
                               {...p.dragHandleProps}
+                              onClick={handleCardClick}
+                              role={used ? undefined : "button"}
+                              tabIndex={used ? -1 : 0}
+                              onKeyDown={(e) => {
+                                if (used) return;
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setDetailPlace(place);
+                                }
+                              }}
                               className={`rounded-lg border overflow-hidden text-sm transition select-none ${
                                 used
                                   ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
                                   : snapshot.isDragging
                                     ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
-                                    : "border-gray-200 bg-white hover:border-coral-300 cursor-grab"
+                                    : "border-gray-200 bg-white hover:border-coral-300 cursor-grab focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral-300"
                               }`}
                             >
                               <div className="flex gap-2 p-2">
@@ -275,6 +302,13 @@ export default function ExtractedPlacesPanel({ trip }) {
           </div>
         )}
       </Droppable>
+
+      {detailPlace && (
+        <PlaceDetailModal
+          place={detailPlace}
+          onClose={() => setDetailPlace(null)}
+        />
+      )}
     </aside>
   );
 }

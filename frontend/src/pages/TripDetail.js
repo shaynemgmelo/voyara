@@ -8,6 +8,7 @@ import GeoReviewModal, { collectFlaggedItems } from "../components/itinerary/Geo
 import ItemDetail from "../components/itinerary/ItemDetail";
 import ItemForm from "../components/itinerary/ItemForm";
 import LinkInput from "../components/links/LinkInput";
+import AiAssistBanner from "../components/trips/AiAssistBanner";
 import LinkList from "../components/links/LinkList";
 import TripMap from "../components/map/TripMap";
 import HotelMapInput from "../components/map/HotelMapInput";
@@ -21,7 +22,7 @@ import AskDestinationModal from "../components/modals/AskDestinationModal";
 import CityDistributionModal from "../components/modals/CityDistributionModal";
 import AddDayTripModal from "../components/modals/AddDayTripModal";
 import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
-import { updateTrip, triggerBuild, confirmCityDistribution, addDayTrip } from "../api/trips";
+import { updateTrip, triggerBuild, confirmCityDistribution, addDayTrip, manualAssist } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -377,6 +378,15 @@ export default function TripDetail() {
     (dp) => (dp.itinerary_items || []).length > 0,
   );
   const showAiAssistButton = isManualMode && !hasItemsForAssist;
+  // Stats fed to the AI Assist banner so the explanation feels grounded
+  // in the user's data (X placed by you, Y empty days, etc.).
+  const placedCount = (trip?.day_plans || []).reduce(
+    (sum, dp) => sum + ((dp.itinerary_items || []).length),
+    0,
+  );
+  const emptyDayCount = (trip?.day_plans || []).filter(
+    (dp) => (dp.itinerary_items || []).length === 0,
+  ).length;
   // Manual-mode: places extracted from videos that haven't been dragged
   // onto a day yet. Each one already has lat/lng (geocoded by the backend
   // during extract-and-build) so the map can drop a gray pin for it.
@@ -401,9 +411,15 @@ export default function TripDetail() {
     if (aiAssistRunning) return;
     setAiAssistRunning(true);
     try {
-      await retryBuild();
+      // New manual-aware endpoint — respects user-placed items, fills
+      // populated days from same-source video, fills empty days from the
+      // leftover pool clustered by proximity. Returns synchronously.
+      await manualAssist(trip.id);
+      await fetchTrip();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[ai-assist] failed:", e);
     } finally {
-      // Polling will pick up the new items + flip to AI-organized view.
       setAiAssistRunning(false);
     }
   };
@@ -522,25 +538,9 @@ export default function TripDetail() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {showAiAssistButton && (
-            <button
-              onClick={handleAiAssist}
-              disabled={aiAssistRunning}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-500 hover:to-amber-600 disabled:opacity-60 text-white text-sm font-semibold transition-colors shadow-sm"
-              title={
-                lang === "pt-BR"
-                  ? "Deixar a IA organizar seus lugares nos dias"
-                  : "Let the AI organize your places into days"
-              }
-            >
-              <span className="text-base leading-none">🪄</span>
-              <span className="hidden sm:inline">
-                {aiAssistRunning
-                  ? (lang === "pt-BR" ? "Organizando..." : "Organizing...")
-                  : (lang === "pt-BR" ? "Assistência IA" : "AI Assist")}
-              </span>
-            </button>
-          )}
+          {/* AI Assist button moved out of the header into the AiAssistBanner
+              that lives between the link input and the days list — that's
+              where the user is asking "what now?" after pasting videos. */}
           <button
             onClick={() => setShowShareModal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:text-gray-900 hover:border-gray-400 transition-colors"
@@ -603,6 +603,21 @@ export default function TripDetail() {
               <LinkList links={trip.links} onDelete={(linkId) => removeLink(linkId)} />
             )}
           </div>
+
+          {/* AI Assist banner — sits between the link input and the days
+              list precisely because that's where the user is asking
+              "what now?" after pasting links. Hidden when items already
+              exist (would duplicate) or when there's nothing extracted
+              for the AI to work with. */}
+          {showAiAssistButton && (
+            <AiAssistBanner
+              running={aiAssistRunning}
+              onAssist={handleAiAssist}
+              totalPlaces={(trip?.traveler_profile?.places_mentioned || []).length}
+              placedCount={placedCount}
+              emptyDayCount={emptyDayCount}
+            />
+          )}
 
           {/* Processing status feedback */}
           <ProcessingStatus trip={trip} />

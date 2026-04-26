@@ -34,6 +34,7 @@ from app.services.orchestrator import (
     enrich_trip_with_experiences,
     suggest_day_trips,
     add_day_trip,
+    manual_assist_organize,
     FlexibleResearchUnavailable,
 )
 
@@ -944,6 +945,33 @@ async def handle_optimize_trip(trip_id: int):
     except Exception as e:
         logger.exception("[optimize-trip] Trip %d failed", trip_id)
         return {"error": str(e), "changed": 0}
+
+
+_manual_assist_inflight: set[int] = set()
+
+
+@router.post("/manual-assist/{trip_id}")
+async def handle_manual_assist(trip_id: int):
+    """Manual-mode "Assistência IA" button. Completes a trip the user is
+    organizing by hand: respects every item they already placed, fills
+    populated days with the rest of the same source video's day, and
+    fills empty days with the leftover pool clustered by proximity.
+
+    Synchronous because the user is staring at a spinner — the work is
+    a few Rails inserts and some geo math, no AI calls. Dedup-guarded
+    against double-clicks.
+    """
+    if trip_id in _manual_assist_inflight:
+        return {"status": "already_running", "added": 0}
+    _manual_assist_inflight.add(trip_id)
+    try:
+        result = await manual_assist_organize(trip_id)
+        return result
+    except Exception as e:
+        logger.exception("[manual-assist] trip=%d failed", trip_id)
+        return {"error": str(e), "added": 0}
+    finally:
+        _manual_assist_inflight.discard(trip_id)
 
 
 @router.post("/clear-build/{trip_id}")
