@@ -232,8 +232,10 @@ export default function TripMap({
             }}
             icon={{
               path: window.google.maps.SymbolPath.CIRCLE,
-              fillColor: isHovered ? "#525252" : "#737373",
-              fillOpacity: 0.95,
+              // Black to match the badge on each card in the sidebar so the
+              // pool number ↔ pin pairing reads as clearly visually linked.
+              fillColor: "#000000",
+              fillOpacity: 1,
               strokeColor: "#ffffff",
               strokeWeight: isHovered ? 3 : 2,
               scale: isHovered ? 13 : 10,

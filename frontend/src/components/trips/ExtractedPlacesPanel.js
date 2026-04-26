@@ -267,7 +267,7 @@ export default function ExtractedPlacesPanel({ trip }) {
                                       user can pair card ↔ pin visually. */}
                                   {hasGeo && !used && (
                                     <span
-                                      className="absolute -top-1.5 -left-1.5 min-w-[20px] h-[20px] px-1 rounded-full bg-gray-700 text-white text-[10px] font-bold flex items-center justify-center shadow-sm border-2 border-white"
+                                      className="absolute -top-1.5 -left-1.5 min-w-[20px] h-[20px] px-1 rounded-full bg-black text-white text-[10px] font-bold flex items-center justify-center shadow-sm border-2 border-white"
                                       title={pt ? `#${globalIndex + 1} no mapa` : `#${globalIndex + 1} on the map`}
                                     >
                                       {globalIndex + 1}
