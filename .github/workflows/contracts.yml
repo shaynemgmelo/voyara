@@ -23,6 +23,15 @@ jobs:
       - name: Run contract tests
         working-directory: ai_service
         run: pytest -m contracts -v
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,workflow
+          text: "🚨 Python contract tests FAILED on main — silent 422 risk just landed"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   frontend-contracts:
     runs-on: ubuntu-latest
@@ -39,6 +48,15 @@ jobs:
       - name: Run canonical-payload tests
         working-directory: frontend
         run: npm test -- --watchAll=false --testPathPattern=itineraryItemPayload
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,workflow
+          text: "🚨 Frontend contract tests FAILED on main — canonical payload regression just landed"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   silent-excepts:
     runs-on: ubuntu-latest
@@ -61,3 +79,12 @@ jobs:
       - name: Surface silent-except findings
         working-directory: ai_service
         run: python scripts/lint_silent_excepts.py app/ || true
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,workflow
+          text: "🚨 Silent-except linter FAILED on main — error-swallowing regression just landed"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
