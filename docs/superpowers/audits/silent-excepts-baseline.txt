@@ -1,0 +1,56 @@
+Silent-except baseline — 2026-04-26
+===================================
+
+Tool: ai_service/scripts/lint_silent_excepts.py
+Scope: ai_service/app/ (recursive, *.py)
+
+Total findings: 19
+
+Why this file exists
+--------------------
+Trip 41 + trip 43 both burned hours debugging production issues that
+turned out to be silent `except Exception: pass` blocks swallowing the
+real error. Tier 2 of the bug-proofing plan adds an AST linter that
+catches the pattern. Tier 3 will gate CI on "no NEW silent excepts" —
+this file is the baseline we diff against.
+
+We are NOT fixing all 19 in this commit. They were intentional or
+not-yet-prioritized; cleaning each one needs a per-call-site judgment
+(swallow vs log vs re-raise vs surface to caller). What we ARE doing
+is freezing the count: any future commit that adds a silent except
+must justify itself or be rejected.
+
+Findings (file:line)
+--------------------
+app/vision/frame_analyzer.py:68
+app/ai/tool_handlers.py:114
+app/ai/agent.py:167
+app/ai/agent.py:317
+app/api/routes.py:750
+app/api/routes.py:831
+app/api/routes.py:912
+app/extractors/youtube.py:149
+app/extractors/instagram.py:104
+app/extractors/tiktok.py:153
+app/extractors/tiktok.py:217
+app/services/whatsapp_client.py:114
+app/services/whatsapp_handler.py:354
+app/services/orchestrator.py:1858
+app/services/orchestrator.py:6255
+app/services/orchestrator.py:6621
+app/services/orchestrator.py:6827
+app/services/orchestrator.py:7179
+app/services/rails_client.py:170
+
+How to refresh this baseline
+----------------------------
+    cd ai_service && source .venv/bin/activate
+    python scripts/lint_silent_excepts.py app/ | wc -l
+    python scripts/lint_silent_excepts.py app/   # full list
+
+If the count goes UP, the offending commit must either:
+  1) log the exception with context, or
+  2) re-raise (optionally as a domain error using `from e`), or
+  3) catch a narrower exception (e.g. `except KeyError:`), or
+  4) document why this site is genuinely fire-and-forget and update
+     this baseline in the same commit.
