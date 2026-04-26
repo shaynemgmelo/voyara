@@ -104,3 +104,70 @@ async def test_merge_link_preserves_existing_enriched_places():
     # And the new note grew on community_notes (the dedup-aggregation rule).
     assert any("sunrise" in (n.get("note") or "")
                for n in final[0].get("community_notes", []))
+
+
+@pytest.mark.asyncio
+async def test_reenrich_does_not_clobber_existing_creator_notes():
+    """reenrich_trip_places adds editorial_summary + top_reviews to
+    places that lack them. It must NOT remove the creator_note that
+    Haiku already attached. Otherwise the modal's "Notes from the
+    Community" section silently empties on the next reenrich tick."""
+    from app.services.orchestrator import reenrich_trip_places
+
+    enriched = [{
+        "name": "Café de Flore",
+        "google_place_id": "ChIJ...",
+        "latitude": 48.85, "longitude": 2.33,
+        "creator_note": "Recomenda sentar na terrasse",
+        "community_notes": [{
+            "note": "Famoso café histórico",
+            "source_url": "https://video1",
+            "source_platform": "tiktok",
+        }],
+    }]
+    rails = FakeRails({
+        "id": 9, "destination": "Paris", "ai_mode": "manual",
+        "profile_status": "confirmed",
+        "traveler_profile": {"places_mentioned": enriched},
+        "links": [],
+    })
+    # Stub Google Places to "succeed" but return no editorial_summary
+    # — i.e. the reenrich finds nothing new but should preserve everything.
+    class StubClient:
+        async def get_details(self, _): return {"editorial_summary": ""}
+        async def close(self): pass
+    with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+         patch("app.services.orchestrator.GooglePlacesClient", return_value=StubClient()):
+        await reenrich_trip_places(9)
+
+    if rails.updates:
+        # If a write happened, it must preserve creator_note + community_notes.
+        final = rails.updates[-1]["traveler_profile"]["places_mentioned"]
+        assert final[0]["creator_note"] == "Recomenda sentar na terrasse"
+        assert final[0]["community_notes"][0]["note"] == "Famoso café histórico"
+
+
+@pytest.mark.asyncio
+async def test_manual_assist_does_not_strip_geo_from_existing_items():
+    """manual_assist_organize moves places into days. The lat/lng/photo
+    on each place must survive the conversion into itinerary_item
+    payloads — otherwise the item lands without coords and the map pin
+    silently disappears (trip 44 bug class)."""
+    from app.services.orchestrator import _build_assist_item
+
+    place = {
+        "name": "Caminito",
+        "category": "attraction",
+        "source_url": "https://x",
+        "latitude": -34.6, "longitude": -58.37,
+        "google_place_id": "ChIJ...",
+        "rating": 4.5, "reviews_count": 100,
+        "address": "Caminito, BA",
+    }
+    item = _build_assist_item(place)
+    assert item["latitude"] == -34.6
+    assert item["longitude"] == -58.37
+    assert item["google_place_id"] == "ChIJ..."
+    assert item["google_rating"] == 4.5
+    assert item["google_reviews_count"] == 100
+    assert item["address"] == "Caminito, BA"
