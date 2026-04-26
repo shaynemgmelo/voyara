@@ -8,6 +8,29 @@
   }
 }
 
+/* Slide-up animation for mobile bottom sheets — used by
+   PlaceDetailModal + ItemDetail when they're acting as a sheet
+   on small screens. Custom keyframes (instead of Tailwind's
+   built-in `animate-fade-in`) so we can target specifically
+   the bottom-anchored entrance. */
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideRight {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;

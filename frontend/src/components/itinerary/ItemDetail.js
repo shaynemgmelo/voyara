@@ -26,13 +26,52 @@ function mapsEmbedUrl(item) {
   return null;
 }
 
-export default function ItemDetail({ item, tripId, onClose, onUpdate, onDelete, onAddNearby }) {
-  const { t } = useLanguage();
+export default function ItemDetail({
+  item,
+  tripId,
+  onClose,
+  onUpdate,
+  onDelete,
+  onAddNearby,
+  // Optional: the matching entry from trip.traveler_profile.places_mentioned.
+  // When provided, we surface its `community_notes` (aggregated creator
+  // notes from every video that mentioned this place) and editorial summary.
+  // The parent passes this so the user sees the same rich Wanderlog-style
+  // notes here as they do in the PlaceDetailModal — paid the cost of the
+  // Haiku extraction once, surface it everywhere.
+  enrichedPlace = null,
+}) {
+  const { t, lang } = useLanguage();
+  const pt = lang === "pt-BR";
   const [personalNotes, setPersonalNotes] = useState(item.personal_notes || "");
   const [nearby, setNearby] = useState([]);
   const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const gmapsLink = mapsUrl(item);
   const embedUrl = mapsEmbedUrl(item);
+
+  // Build community_notes list from the enriched place (when present),
+  // falling back to the item's own creator_note, then to nothing. We
+  // also fold in editorial_summary as the "About this place" block.
+  const editorialSummary = (enrichedPlace?.editorial_summary || "").trim();
+  const communityNotes = (() => {
+    const raw = enrichedPlace?.community_notes;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.filter((n) => n && (n.note || "").trim());
+    }
+    const fallback = (enrichedPlace?.creator_note || item.creator_note || "").trim();
+    if (fallback) {
+      return [{
+        note: fallback,
+        source_url: enrichedPlace?.source_url || item.source_url,
+        source_platform: detectPlatform(enrichedPlace?.source_url || item.source_url),
+      }];
+    }
+    return [];
+  })();
+  const uniqueSources = Array.from(
+    new Set(communityNotes.map((n) => n.source_url).filter(Boolean)),
+  );
 
   useEffect(() => {
     if (!item.latitude || !tripId) return;
@@ -44,21 +83,41 @@ export default function ItemDetail({ item, tripId, onClose, onUpdate, onDelete, 
   }, [item.id, item.latitude, item.day_plan_id, tripId]);
 
   return (
-    <div className="fixed inset-y-0 right-0 w-full sm:w-[440px] bg-white shadow-2xl z-50 overflow-y-auto">
-      {/* Header */}
-      <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-gray-200 p-4 flex items-center justify-between z-10">
-        <h2 className="font-bold text-lg text-gray-900 truncate pr-4">
-          {categoryIcon(item.category)} {item.name}
-        </h2>
-        <button
-          onClick={onClose}
-          className="text-gray-500 hover:text-gray-900 text-xl"
-        >
-          ✕
-        </button>
-      </div>
+    <div
+      className="fixed inset-0 z-50 bg-black/40 sm:bg-transparent flex items-end sm:items-stretch sm:justify-end"
+      onClick={onClose}
+    >
+      <div
+        className={
+          // Mobile: bottom sheet pinned to the bottom edge with rounded
+          // top corners and slide-up animation. Desktop: full-height
+          // slide-out drawer pinned to the right edge.
+          "bg-white shadow-2xl flex flex-col overflow-hidden " +
+          "w-full max-h-[92vh] rounded-t-3xl animate-[slideUp_0.22s_ease-out] " +
+          "sm:max-h-none sm:h-full sm:w-[440px] sm:rounded-none sm:animate-[slideRight_0.22s_ease-out]"
+        }
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Mobile drag handle */}
+        <div className="sm:hidden flex justify-center py-2 flex-shrink-0">
+          <div className="w-10 h-1 rounded-full bg-gray-300" />
+        </div>
 
-      <div className="p-4 space-y-4">
+        {/* Header */}
+        <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-gray-200 p-4 flex items-center justify-between z-10 flex-shrink-0">
+          <h2 className="font-bold text-lg text-gray-900 truncate pr-4">
+            {categoryIcon(item.category)} {item.name}
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-900 text-xl"
+            aria-label={pt ? "Fechar" : "Close"}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4 overflow-y-auto overscroll-contain">
         {/* Photos */}
         {item.photos && item.photos.length > 0 && (
           <div className="grid grid-cols-2 gap-2">
@@ -149,6 +208,85 @@ export default function ItemDetail({ item, tripId, onClose, onUpdate, onDelete, 
         {item.description && (
           <div>
             <p className="text-gray-700 text-sm leading-relaxed">{item.description}</p>
+          </div>
+        )}
+
+        {/* About this place — Google's curated editorial summary, when
+            the place was enriched via Google Places. Falls back silently
+            when there's no editorial blurb available for this venue. */}
+        {editorialSummary && (
+          <div className="rounded-xl bg-amber-50 border border-amber-100 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700 mb-1.5">
+              {pt ? "Sobre este lugar" : "About this place"}
+            </div>
+            <p className="text-sm text-gray-800 leading-relaxed">
+              {editorialSummary}
+            </p>
+          </div>
+        )}
+
+        {/* Notes from Community — aggregated bullets from EVERY video
+            that mentioned this place. Each note carries an inline
+            source-link icon, and a "Show sources • N" toggle expands
+            the full list of source videos at the bottom. Mirrors the
+            Wanderlog detail-card pattern the user explicitly asked for. */}
+        {communityNotes.length > 0 && (
+          <div className="rounded-xl bg-coral-50 border border-coral-100 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-coral-700 mb-1.5">
+              {pt ? "Notas da Comunidade" : "Notes from the Community"}
+            </div>
+            <ul className="space-y-2">
+              {communityNotes.map((n, i) => (
+                <li key={i} className="flex gap-2 text-sm text-gray-800 leading-relaxed">
+                  <span className="text-coral-400 flex-shrink-0 mt-0.5">•</span>
+                  <div className="flex-1 min-w-0">
+                    <span>{n.note}</span>
+                    {n.source_url && (
+                      <a
+                        href={n.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="ml-1.5 inline-flex items-center text-coral-600 hover:text-coral-700 text-[11px] align-middle"
+                        title={n.source_url}
+                      >
+                        {sourceIconForUrl(n.source_url)}
+                      </a>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {uniqueSources.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSourcesExpanded(!sourcesExpanded)}
+                className="mt-3 inline-flex items-center gap-2 text-[11px] font-semibold text-coral-700 hover:text-coral-800"
+              >
+                <span>
+                  {sourcesExpanded
+                    ? (pt ? "Ocultar fontes" : "Hide sources")
+                    : (pt ? `Mostrar fontes • ${uniqueSources.length}` : `Show sources • ${uniqueSources.length}`)}
+                </span>
+                <span className={`transition-transform ${sourcesExpanded ? "rotate-180" : ""}`}>▾</span>
+              </button>
+            )}
+            {sourcesExpanded && uniqueSources.length > 0 && (
+              <div className="mt-2 space-y-1.5 border-t border-coral-100 pt-2">
+                {uniqueSources.map((s, i) => (
+                  <a
+                    key={i}
+                    href={s}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2 text-xs text-gray-600 hover:text-coral-600 truncate"
+                  >
+                    <span className="text-base flex-shrink-0">{sourceIconForUrl(s)}</span>
+                    <span className="truncate">{shortSourceLabel(s)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -350,7 +488,40 @@ export default function ItemDetail({ item, tripId, onClose, onUpdate, onDelete, 
             {t("itemDetail.delete")}
           </button>
         </div>
+        </div>
       </div>
     </div>
   );
+}
+
+// Helper: detect platform from a URL for the Notes from Community
+// section's source-icon row.
+function detectPlatform(url) {
+  if (!url) return "other";
+  if (url.includes("tiktok")) return "tiktok";
+  if (url.includes("instagram")) return "instagram";
+  if (url.includes("youtube") || url.includes("youtu.be")) return "youtube";
+  return "other";
+}
+
+function sourceIconForUrl(url) {
+  if (!url) return "🔗";
+  if (url.includes("tiktok")) return "🎵";
+  if (url.includes("instagram")) return "📸";
+  if (url.includes("youtube") || url.includes("youtu.be")) return "▶️";
+  return "🔗";
+}
+
+function shortSourceLabel(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host.includes("tiktok")) return "TikTok";
+    if (host.includes("instagram")) return "Instagram";
+    if (host.includes("youtube") || host.includes("youtu.be")) return "YouTube";
+    return host;
+  } catch {
+    return url.length > 40 ? `${url.slice(0, 40)}…` : url;
+  }
 }

@@ -6,13 +6,17 @@ already built. It must:
      (the regular extract_profile_and_build pipeline owns that state).
   2. Extract the link's content, pass it to Haiku, and append the new
      places to the existing traveler_profile.places_mentioned.
-  3. Dedupe: a place name that ALREADY exists in the trip's profile
-     is silently skipped (no duplicate cards on the panel).
+  3. Dedupe with AGGREGATION: a place that ALREADY exists in the trip's
+     profile gets its new creator_note grafted onto its community_notes
+     list (so the modal can show "Notes from the Community" with bullets
+     from EVERY video that mentioned this place). Same-text notes are
+     deduped so re-running on the same link is a no-op.
   4. Force the new entries' source_url to the URL we just processed,
      so the panel groups them under the right "from this video" header.
   5. In manual mode, geocode the brand-new places (Google Places) so
      the cards have photo/rating + map pin immediately.
-  6. NEVER touch existing places_mentioned entries — race-preservation.
+  6. NEVER touch existing places_mentioned fields other than
+     community_notes — race-preservation for lat/lng/photo/rating.
 
 All Anthropic, Rails, Google Places calls are mocked. Network is
 already blocked by conftest.py's autouse fixture.
@@ -218,7 +222,11 @@ class TestMergeAppendsAndDedupes:
         assert sum(1 for n in names if n.lower().strip() == "caminito") == 1
 
     @pytest.mark.asyncio
-    async def test_all_duplicates_results_in_no_op(self):
+    async def test_all_duplicates_with_no_notes_is_noop(self):
+        """When every place from the new link is a duplicate AND none
+        of them carry a new creator_note, merge_link should return
+        all_duplicates without writing to Rails — there's no value to
+        add (nothing to graft onto community_notes either)."""
         from app.services.orchestrator import merge_link_into_existing_trip
 
         existing = [{"name": "Obelisco"}]
@@ -276,6 +284,168 @@ class TestMergeAppendsAndDedupes:
 # ---------------------------------------------------------------------------
 # Behavior — manual mode geocoding
 # ---------------------------------------------------------------------------
+
+class TestCommunityNotesAggregation:
+    """The Wanderlog-inspired pattern: when video #2 mentions a place
+    that was already extracted from video #1, we don't drop the new
+    info — we ATTACH the new creator_note to the existing place's
+    `community_notes` list, tagged with its source URL. The modal
+    then renders "Notes from the Community" with bullets from each."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_with_creator_note_grows_community_notes(self):
+        from app.services.orchestrator import merge_link_into_existing_trip
+
+        # Video #1 already extracted "Caminito" with one note.
+        existing = [{
+            "name": "Caminito",
+            "source_url": "https://video1",
+            "creator_note": "Best pedestrian street in Buenos Aires.",
+            "community_notes": [{
+                "note": "Best pedestrian street in Buenos Aires.",
+                "source_url": "https://video1",
+                "source_platform": "tiktok",
+            }],
+        }]
+        rails = FakeRails(_trip_built(existing, ai_mode="eco"))
+        # Video #2 mentions Caminito with a DIFFERENT note.
+        haiku = AsyncMock(return_value={
+            "places_mentioned": [{
+                "name": "Caminito",
+                "creator_note": "Go at sunrise to avoid crowds.",
+            }],
+        })
+        with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+             patch("app.services.orchestrator._extract_content",
+                   new=AsyncMock(return_value="x")), \
+             patch("app.services.orchestrator._analyze_profile", new=haiku):
+            result = await merge_link_into_existing_trip(
+                link_id=42, trip_id=7, url="https://video2", platform="instagram",
+            )
+
+        assert result["places_added"] == 0  # no NEW places
+        assert result["community_notes_added"] == 1
+        assert result["total_places"] == 1
+
+        merged = rails.updates[0]["payload"]["traveler_profile"]["places_mentioned"]
+        notes = merged[0]["community_notes"]
+        assert len(notes) == 2
+        assert notes[0]["note"] == "Best pedestrian street in Buenos Aires."
+        assert notes[1]["note"] == "Go at sunrise to avoid crowds."
+        assert notes[1]["source_url"] == "https://video2"
+        assert notes[1]["source_platform"] == "instagram"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_with_same_note_text_does_not_double_add(self):
+        """If the same creator note is extracted twice (e.g. two videos
+        say the same thing, or the same link is processed twice), we
+        dedup by note text — community_notes shouldn't grow on re-run."""
+        from app.services.orchestrator import merge_link_into_existing_trip
+
+        existing = [{
+            "name": "Caminito",
+            "community_notes": [{
+                "note": "Best pedestrian street.",
+                "source_url": "https://video1",
+                "source_platform": "tiktok",
+            }],
+        }]
+        rails = FakeRails(_trip_built(existing, ai_mode="eco"))
+        haiku = AsyncMock(return_value={
+            "places_mentioned": [{
+                "name": "Caminito",
+                "creator_note": "best pedestrian street.",  # same text, different case
+            }],
+        })
+        with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+             patch("app.services.orchestrator._extract_content",
+                   new=AsyncMock(return_value="x")), \
+             patch("app.services.orchestrator._analyze_profile", new=haiku):
+            result = await merge_link_into_existing_trip(
+                link_id=42, trip_id=7, url="https://video2", platform="instagram",
+            )
+
+        # When the only "new" note text matches what's already there,
+        # we treat it as fully duplicate — no write, no community_notes
+        # bump. The test verifies the skipped sentinel + zero rails writes.
+        assert result["skipped"] == "all_duplicates"
+        assert rails.updates == []
+
+    @pytest.mark.asyncio
+    async def test_new_place_seeds_community_notes_with_first_creator_note(self):
+        """A brand-new place that has a creator_note should have its
+        community_notes seeded with that note (so subsequent merges
+        can append more)."""
+        from app.services.orchestrator import merge_link_into_existing_trip
+
+        rails = FakeRails(_trip_built([], ai_mode="eco"))
+        haiku = AsyncMock(return_value={
+            "places_mentioned": [{
+                "name": "Casa Rosada",
+                "creator_note": "Watch the changing of the guard at noon.",
+            }],
+        })
+        with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+             patch("app.services.orchestrator._extract_content",
+                   new=AsyncMock(return_value="x")), \
+             patch("app.services.orchestrator._analyze_profile", new=haiku):
+            await merge_link_into_existing_trip(
+                link_id=42, trip_id=7, url="https://video1", platform="youtube",
+            )
+
+        merged = rails.updates[0]["payload"]["traveler_profile"]["places_mentioned"]
+        new_place = merged[0]
+        assert new_place["name"] == "Casa Rosada"
+        assert new_place["community_notes"] == [{
+            "note": "Watch the changing of the guard at noon.",
+            "source_url": "https://video1",
+            "source_platform": "youtube",
+        }]
+
+    @pytest.mark.asyncio
+    async def test_existing_geo_data_preserved_when_only_notes_grow(self):
+        """When the only change is a community_notes append, the
+        existing place's enriched fields (lat/lng/photo/rating) must
+        survive the write-back unchanged."""
+        from app.services.orchestrator import merge_link_into_existing_trip
+
+        existing = [{
+            "name": "Obelisco",
+            "google_place_id": "gp-obe",
+            "latitude": -34.6037,
+            "longitude": -58.3816,
+            "photo_url": "https://photo/obelisco.jpg",
+            "rating": 4.6,
+            "creator_note": "Iconic at night.",
+            "community_notes": [{
+                "note": "Iconic at night.",
+                "source_url": "https://video1",
+                "source_platform": "tiktok",
+            }],
+        }]
+        rails = FakeRails(_trip_built(existing, ai_mode="eco"))
+        haiku = AsyncMock(return_value={
+            "places_mentioned": [{
+                "name": "Obelisco",
+                "creator_note": "Catch the sunset from a nearby rooftop.",
+            }],
+        })
+        with patch("app.services.orchestrator.RailsClient", return_value=rails), \
+             patch("app.services.orchestrator._extract_content",
+                   new=AsyncMock(return_value="x")), \
+             patch("app.services.orchestrator._analyze_profile", new=haiku):
+            await merge_link_into_existing_trip(
+                link_id=42, trip_id=7, url="https://video2", platform="instagram",
+            )
+
+        merged = rails.updates[0]["payload"]["traveler_profile"]["places_mentioned"]
+        place = merged[0]
+        assert place["latitude"] == -34.6037
+        assert place["longitude"] == -58.3816
+        assert place["photo_url"] == "https://photo/obelisco.jpg"
+        assert place["rating"] == 4.6
+        assert len(place["community_notes"]) == 2
+
 
 class TestMergeManualModeGeocodes:
     @pytest.mark.asyncio

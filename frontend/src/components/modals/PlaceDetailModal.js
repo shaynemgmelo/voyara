@@ -2,28 +2,36 @@ import { useEffect, useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
 
 /**
- * Detail modal for a place card in the manual-mode extracted-places
- * panel. Shows the rich Google Places data we already pre-geocoded:
- * photo, rating, review count, address, category, opening hours, link
- * to Google Maps, editorial summary, and top reviews. Click outside
- * or hit Esc to close.
+ * Rich detail card for a place — opened from either:
+ *   - a card click in ExtractedPlacesPanel (the panel side)
+ *   - a pin click in TripMap (the map side)
  *
- * Triggered from two surfaces — both deliver the same modal:
- *   - Card click in ExtractedPlacesPanel (the panel side)
- *   - Pin click in TripMap (the map side)
+ * Layout adapts to viewport:
+ *   - Mobile (< sm): bottom sheet sliding up from the bottom edge,
+ *     full-width with rounded top corners, drag handle at top.
+ *     Inspired by Wanderlog / Atlas Obscura style detail sheets.
+ *   - Desktop (≥ sm): centered modal card, max-w-md, slight scale-in.
+ *
+ * Content sections (in order of importance):
+ *   1. Photo header — full bleed, with overlaid title + close button.
+ *   2. Quick facts row — rating, reviews, category, price, hours-now.
+ *   3. About this place — editorial_summary (Google's curated blurb).
+ *   4. Notes from Community — aggregated creator_notes from EVERY
+ *      video that mentioned this place, each with its source link.
+ *   5. Address + mini map.
+ *   6. Hours (collapsed-by-default to save space).
+ *   7. Phone + website.
+ *   8. Top reviews from Google.
+ *   9. Quick-add to a day (when in manual mode + has dayPlans).
+ *  10. Footer actions: Open in Google Maps, Watch source video.
  *
  * Props:
- *   place        — the places_mentioned entry (rich, post-enrichment)
- *   sourceUrl    — the video URL (override; defaults to place.source_url)
- *   onClose      — closes the modal
- *   dayPlans     — optional: passing these enables the "Add to day X"
- *                  button row at the bottom. Without this, the modal is
- *                  read-only (matches the legacy behaviour).
- *   onAddToDay   — async (dayPlanId) => void. Called when the user
- *                  picks a day to add this place to.
- *   alreadyOnDayId — optional: when the place is already in the trip,
- *                  the matching day button is highlighted "added" so the
- *                  user knows where it lives.
+ *   place           — the places_mentioned entry (rich, post-enrichment)
+ *   sourceUrl       — override for the video URL (defaults to place.source_url)
+ *   onClose         — closes the modal
+ *   dayPlans        — optional: enables "Add to day X" buttons
+ *   onAddToDay      — async (dayPlanId) => void
+ *   alreadyOnDayId  — optional: highlights the day where this place lives
  */
 export default function PlaceDetailModal({
   place,
@@ -37,6 +45,8 @@ export default function PlaceDetailModal({
   const pt = lang === "pt-BR";
   const [adding, setAdding] = useState(false);
   const [addedDayId, setAddedDayId] = useState(null);
+  const [hoursExpanded, setHoursExpanded] = useState(false);
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -60,11 +70,55 @@ export default function PlaceDetailModal({
   const creatorNote = (place.creator_note || "").trim();
   const topReviews = Array.isArray(place.top_reviews) ? place.top_reviews : [];
   const isExperience = place.kind === "experience";
+  const operatingHours = place.operating_hours || {};
+  const hasHours = Object.keys(operatingHours).length > 0;
+
+  // Build the unified community_notes list. The backend now persists
+  // a `community_notes: [{note, source_url, source_platform}]` array
+  // when a place is mentioned in multiple videos. For trips/places
+  // built before that field existed, fall back to the single
+  // `creator_note` string with the place's own source_url.
+  const communityNotes = (() => {
+    const explicit = Array.isArray(place.community_notes)
+      ? place.community_notes.filter((n) => n && (n.note || "").trim())
+      : [];
+    if (explicit.length > 0) return explicit;
+    if (creatorNote) {
+      return [{
+        note: creatorNote,
+        source_url: url,
+        source_platform: detectPlatform(url),
+      }];
+    }
+    return [];
+  })();
+
+  // De-dupe sources for the "Show sources • N" pill.
+  const uniqueSources = Array.from(
+    new Set(
+      communityNotes
+        .map((n) => n.source_url)
+        .filter(Boolean),
+    ),
+  );
+
   const gmapsUrl =
     place.google_maps_url
     || (place.google_place_id
       ? `https://www.google.com/maps/place/?q=place_id:${place.google_place_id}`
       : null);
+
+  const mapsEmbedUrl = (() => {
+    const key = process.env.REACT_APP_GOOGLE_MAPS_API_KEY;
+    if (!key) return null;
+    if (place.google_place_id) {
+      return `https://www.google.com/maps/embed/v1/place?key=${key}&q=place_id:${place.google_place_id}&zoom=15`;
+    }
+    if (hasGeo) {
+      return `https://www.google.com/maps/embed/v1/place?key=${key}&q=${place.latitude},${place.longitude}&zoom=15`;
+    }
+    return null;
+  })();
 
   const handleAddToDay = async (dayPlanId) => {
     if (!onAddToDay || adding) return;
@@ -82,30 +136,49 @@ export default function PlaceDetailModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4"
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden max-h-[90vh] flex flex-col"
+        // Mobile: full-width bottom sheet pinned to the bottom of the
+        // screen with rounded-t corners + slide-up animation.
+        // Desktop: centered card with rounded corners on all sides.
+        className="bg-white w-full sm:max-w-md sm:w-full sm:rounded-2xl rounded-t-3xl shadow-2xl overflow-hidden max-h-[92vh] sm:max-h-[90vh] flex flex-col animate-[slideUp_0.2s_ease-out] sm:animate-none"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Photo header — full bleed when available, gradient when not. */}
+        {/* Mobile drag handle — visual cue this is a bottom sheet you
+            could swipe down to dismiss (touch swipe support not wired
+            yet but the visual affords the gesture). Hidden on desktop. */}
+        <div className="sm:hidden flex justify-center py-2 flex-shrink-0">
+          <div className="w-10 h-1 rounded-full bg-gray-300" />
+        </div>
+
+        {/* Photo header — full-bleed when available, gradient placeholder
+            otherwise. The close button overlays the photo on desktop;
+            on mobile it's also there but the drag handle reinforces
+            "swipe down to close". */}
         {photo ? (
-          <div className="relative h-48 w-full bg-gray-100 flex-shrink-0">
+          <div className="relative h-44 sm:h-48 w-full bg-gray-100 flex-shrink-0">
             <img
               src={photo}
               alt=""
               className="w-full h-full object-cover"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent pointer-events-none" />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent pointer-events-none" />
             <button
               type="button"
               onClick={onClose}
-              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/40 hover:bg-black/60 text-white flex items-center justify-center backdrop-blur-sm"
+              className="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/90 hover:bg-white text-gray-700 flex items-center justify-center shadow-md backdrop-blur"
               aria-label={pt ? "Fechar" : "Close"}
             >
               ✕
             </button>
+            {/* Title overlay on photo */}
+            <div className="absolute bottom-0 left-0 right-0 p-4 text-white">
+              <h2 className="text-xl font-bold leading-tight drop-shadow-md">
+                {place.name}
+              </h2>
+            </div>
           </div>
         ) : (
           <div className="relative h-32 w-full bg-gradient-to-br from-amber-100 to-orange-100 flex items-center justify-center text-5xl flex-shrink-0">
@@ -113,132 +186,212 @@ export default function PlaceDetailModal({
             <button
               type="button"
               onClick={onClose}
-              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/80 hover:bg-white text-gray-700 flex items-center justify-center"
+              className="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/90 hover:bg-white text-gray-700 flex items-center justify-center shadow-md"
               aria-label={pt ? "Fechar" : "Close"}
             >
               ✕
             </button>
+            <div className="absolute bottom-0 left-0 right-0 p-4">
+              <h2 className="text-xl font-bold text-gray-900 leading-tight">
+                {place.name}
+              </h2>
+            </div>
           </div>
         )}
 
-        <div className="p-5 space-y-3 overflow-y-auto">
-          <div>
-            <h2 className="text-lg font-bold text-gray-900 leading-tight">
-              {place.name}
-            </h2>
-            {/* Category + rating row */}
-            <div className="flex items-center gap-2 mt-1.5 text-xs text-gray-500 flex-wrap">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 font-medium">
-                {CATEGORY_EMOJI[cat] || "📍"} {translateCategory(cat, pt)}
+        <div className="p-4 sm:p-5 space-y-4 overflow-y-auto overscroll-contain">
+          {/* Quick facts row — rating, category, price */}
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 font-semibold">
+              {CATEGORY_EMOJI[cat] || "📍"} {translateCategory(cat, pt)}
+            </span>
+            {rating != null && (
+              <span className="inline-flex items-center gap-1 text-amber-600 font-bold">
+                ★ {Number(rating).toFixed(1)}
+                {reviewsCount > 0 && (
+                  <span className="text-gray-400 font-normal">
+                    ({reviewsCount.toLocaleString()})
+                  </span>
+                )}
               </span>
-              {rating != null && (
-                <span className="inline-flex items-center gap-1 text-amber-600 font-semibold">
-                  ★ {Number(rating).toFixed(1)}
-                  {reviewsCount > 0 && (
-                    <span className="text-gray-400 font-normal">
-                      ({reviewsCount.toLocaleString()})
-                    </span>
-                  )}
-                </span>
-              )}
-              {pricing && (
-                <span className="text-gray-600 font-semibold">{pricing}</span>
-              )}
-            </div>
+            )}
+            {pricing && (
+              <span className="text-emerald-600 font-bold">{pricing}</span>
+            )}
+            {isExperience && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold text-[11px]">
+                ✨ {pt ? "Experiência" : "Experience"}
+              </span>
+            )}
           </div>
 
-          {/* Creator note — what the person in the source video actually
-              SAID about this place. This is the highest-signal text on
-              the modal because it's the user's specific reason for being
-              interested in this place (they saved THIS video). Goes
-              above the editorial summary on purpose. */}
-          {creatorNote && (
-            <div className="rounded-lg bg-coral-50 border border-coral-100 p-3">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-coral-600 mb-1 flex items-center gap-1">
-                <span>{sourceIconForUrl(url)}</span>
-                {pt ? "Do criador do vídeo" : "From the video creator"}
-              </div>
-              <p className="text-sm text-gray-800 leading-relaxed italic">
-                “{creatorNote}”
-              </p>
-            </div>
-          )}
-
-          {/* Editorial summary — Google's curated 1-2 sentence blurb.
-              When present, this is the most useful "what is this place?"
-              text. Falls back to nothing (we don't fabricate) when
-              Google has no summary for this venue. */}
+          {/* About this place — Google editorial summary */}
           {editorialSummary && (
-            <div className="rounded-lg bg-amber-50 border border-amber-100 p-3">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-600 mb-1">
-                {pt ? "Sobre o lugar" : "About this place"}
-              </div>
+            <Card title={pt ? "Sobre este lugar" : "About this place"} accent="amber">
               <p className="text-sm text-gray-800 leading-relaxed">
                 {editorialSummary}
               </p>
-            </div>
+            </Card>
           )}
 
-          {/* Friendly fallback when we have NEITHER creator note nor
-              editorial summary — beats showing a bare card with just
-              address + phone. Tells the user where to look for more. */}
-          {!creatorNote && !editorialSummary && (
-            <div className="rounded-lg bg-gray-50 border border-gray-100 p-3 text-xs text-gray-600 leading-relaxed">
-              {isExperience
-                ? (pt
-                    ? "Essa experiência foi citada no vídeo do criador. Veja o vídeo de origem para o contexto exato — o que recomendou, melhor horário, dicas práticas."
-                    : "This experience was mentioned in the source video. Check the original video for context — recommendations, best time, practical tips.")
-                : (pt
-                    ? "Sem descrição editorial pra esse lugar. Veja o vídeo de origem — o criador certamente comentou algo específico — ou abra no Google Maps pra reviews completos e fotos."
-                    : "No editorial description for this place. Watch the source video for the creator's take, or open it on Google Maps for full reviews and photos.")}
-            </div>
-          )}
-
-          {address && (
-            <Section icon="📍" label={pt ? "Endereço" : "Address"}>
-              {address}
-            </Section>
-          )}
-
-          {place.operating_hours && Object.keys(place.operating_hours).length > 0 && (
-            <Section icon="🕒" label={pt ? "Horários" : "Hours"}>
-              <ul className="space-y-0.5">
-                {Object.entries(place.operating_hours).map(([day, hours]) => (
-                  <li key={day} className="text-xs text-gray-600">
-                    <span className="font-medium text-gray-700">{day}:</span>{" "}
-                    {hours}
+          {/* Notes from Community — aggregated creator notes from every
+              video that mentioned this place. The Wanderlog-inspired
+              section the user explicitly asked for. Each note is a
+              bullet with the source video link inline. */}
+          {communityNotes.length > 0 && (
+            <Card title={pt ? "Notas da Comunidade" : "Notes from the Community"} accent="coral">
+              <ul className="space-y-2">
+                {communityNotes.map((n, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-gray-800 leading-relaxed">
+                    <span className="text-coral-400 flex-shrink-0 mt-0.5">•</span>
+                    <div className="flex-1 min-w-0">
+                      <span>{n.note}</span>
+                      {n.source_url && (
+                        <a
+                          href={n.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="ml-1.5 inline-flex items-center text-coral-600 hover:text-coral-700 text-[11px] align-middle"
+                          title={n.source_url}
+                        >
+                          {sourceIconForUrl(n.source_url)}
+                        </a>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ul>
-            </Section>
+              {/* Show sources pill — Wanderlog-style "Show sources • N" */}
+              {uniqueSources.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSourcesExpanded(!sourcesExpanded)}
+                  className="mt-3 inline-flex items-center gap-2 text-[11px] font-semibold text-coral-700 hover:text-coral-800"
+                >
+                  <span>
+                    {sourcesExpanded
+                      ? (pt ? "Ocultar fontes" : "Hide sources")
+                      : (pt ? `Mostrar fontes • ${uniqueSources.length}` : `Show sources • ${uniqueSources.length}`)}
+                  </span>
+                  <span className={`transition-transform ${sourcesExpanded ? "rotate-180" : ""}`}>▾</span>
+                </button>
+              )}
+              {sourcesExpanded && uniqueSources.length > 0 && (
+                <div className="mt-2 space-y-1.5 border-t border-coral-100 pt-2">
+                  {uniqueSources.map((s, i) => (
+                    <a
+                      key={i}
+                      href={s}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-2 text-xs text-gray-600 hover:text-coral-600 truncate"
+                    >
+                      <span className="text-base flex-shrink-0">{sourceIconForUrl(s)}</span>
+                      <span className="truncate">{shortSourceLabel(s)}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </Card>
           )}
 
-          {place.phone && (
-            <Section icon="📞" label={pt ? "Telefone" : "Phone"}>
-              {place.phone}
-            </Section>
+          {/* Friendly fallback when we have NEITHER editorial nor notes */}
+          {!editorialSummary && communityNotes.length === 0 && (
+            <div className="rounded-xl bg-gray-50 border border-gray-100 p-3 text-xs text-gray-600 leading-relaxed">
+              {isExperience
+                ? (pt
+                    ? "Essa experiência foi citada no vídeo de origem. Veja o vídeo para detalhes — o que recomendou, melhor horário, dicas práticas."
+                    : "This experience was mentioned in the source video. Watch it for details — recommendations, best time, practical tips.")
+                : (pt
+                    ? "Sem descrição editorial pra esse lugar ainda. Veja o vídeo de origem ou abra no Google Maps pra reviews completos."
+                    : "No editorial description yet. Check the source video or open on Google Maps for full reviews.")}
+            </div>
           )}
 
-          {place.website && (
-            <Section icon="🌐" label={pt ? "Site" : "Website"}>
-              <a
-                href={place.website}
-                target="_blank"
-                rel="noreferrer"
-                className="text-coral-600 hover:underline truncate block"
+          {/* Address + mini map */}
+          {address && (
+            <div className="space-y-2">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                {pt ? "Endereço" : "Address"}
+              </div>
+              <p className="text-sm text-gray-700 leading-relaxed">{address}</p>
+              {mapsEmbedUrl && (
+                <div className="rounded-xl overflow-hidden border border-gray-200">
+                  <iframe
+                    title={`Map of ${place.name}`}
+                    src={mapsEmbedUrl}
+                    width="100%"
+                    height="160"
+                    style={{ border: 0 }}
+                    loading="lazy"
+                    referrerPolicy="no-referrer-when-downgrade"
+                    allowFullScreen
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Hours (collapsible — 7-day list takes a lot of space) */}
+          {hasHours && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setHoursExpanded(!hoursExpanded)}
+                className="w-full flex items-center justify-between text-left"
               >
-                {place.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-              </a>
-            </Section>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                  🕒 {pt ? "Horários" : "Hours"}
+                </span>
+                <span className={`text-gray-400 text-xs transition-transform ${hoursExpanded ? "rotate-180" : ""}`}>▾</span>
+              </button>
+              {hoursExpanded && (
+                <ul className="mt-2 space-y-0.5 bg-gray-50 rounded-lg p-2.5">
+                  {Object.entries(operatingHours).map(([day, hours]) => (
+                    <li key={day} className="flex justify-between text-xs text-gray-700">
+                      <span className="font-medium">{day}</span>
+                      <span>{hours}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
 
-          {/* Top reviews — what real visitors said, capped at 3 by the
-              backend so we don't drown the modal in opinions. Each review
-              is a quote-card with author + rating + relative time. */}
+          {/* Phone + website */}
+          {(place.phone || place.website) && (
+            <div className="space-y-1.5">
+              {place.phone && (
+                <a
+                  href={`tel:${place.phone}`}
+                  className="flex items-center gap-2 text-sm text-coral-600 hover:underline"
+                >
+                  <span>📞</span>
+                  <span>{place.phone}</span>
+                </a>
+              )}
+              {place.website && (
+                <a
+                  href={place.website}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 text-sm text-coral-600 hover:underline"
+                >
+                  <span>🌐</span>
+                  <span className="truncate">
+                    {place.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                  </span>
+                </a>
+              )}
+            </div>
+          )}
+
+          {/* Top reviews from Google */}
           {topReviews.length > 0 && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
-                {pt ? "O que dizem" : "What people say"}
+                {pt ? "Reviews do Google" : "Google reviews"}
               </div>
               {topReviews.map((r, i) => (
                 <div
@@ -260,22 +413,15 @@ export default function PlaceDetailModal({
                       </span>
                     )}
                   </div>
-                  <p className="text-gray-700 leading-snug line-clamp-3">
-                    {r.text}
-                  </p>
+                  <p className="text-gray-700 leading-snug line-clamp-3">{r.text}</p>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Quick-add buttons — when the parent passes dayPlans + onAddToDay,
-              the user can drop this place onto any day with a single click,
-              right from the modal. Replaces the "drag from map" gesture
-              that's awkward when the pin is far from the day list.
-              The day this place already belongs to (if any) shows as added,
-              so the user gets immediate feedback the click landed. */}
+          {/* Quick-add to a day (manual mode) */}
           {dayPlans && dayPlans.length > 0 && onAddToDay && (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
                 {pt ? "Adicionar a um dia" : "Add to a day"}
               </div>
@@ -289,7 +435,7 @@ export default function PlaceDetailModal({
                       type="button"
                       onClick={() => handleAddToDay(dp.id)}
                       disabled={adding || isHere}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1 ${
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 ${
                         isHere
                           ? "bg-emerald-500 text-white cursor-default"
                           : "bg-coral-500 hover:bg-coral-600 text-white shadow-sm"
@@ -313,13 +459,13 @@ export default function PlaceDetailModal({
           )}
 
           {/* Footer actions */}
-          <div className="flex flex-col gap-2 pt-2 border-t border-gray-100">
+          <div className="flex flex-col gap-2 pt-3 border-t border-gray-100 sticky bottom-0 bg-white">
             {gmapsUrl && (
               <a
                 href={gmapsUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+                className="inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold transition-colors shadow-sm"
               >
                 <span>🗺️</span>
                 {pt ? "Abrir no Google Maps" : "Open in Google Maps"}
@@ -330,35 +476,32 @@ export default function PlaceDetailModal({
                 href={url}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-700 text-sm font-medium transition-colors"
+                className="inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-700 text-sm font-semibold transition-colors"
               >
                 <span>{sourceIconForUrl(url)}</span>
                 {pt ? "Ver vídeo de origem" : "Watch source video"}
               </a>
             )}
           </div>
-
-          <p className="text-[10px] text-gray-400 text-center pt-1">
-            {pt
-              ? "Arraste o card pra um dia pra adicionar ao roteiro."
-              : "Drag the card onto a day to add it to the itinerary."}
-          </p>
         </div>
       </div>
     </div>
   );
 }
 
-function Section({ icon, label, children }) {
+// Reusable section card with colored accent (coral/amber).
+function Card({ title, accent = "gray", children }) {
+  const palette = {
+    coral: { bg: "bg-coral-50", border: "border-coral-100", title: "text-coral-700" },
+    amber: { bg: "bg-amber-50", border: "border-amber-100", title: "text-amber-700" },
+    gray: { bg: "bg-gray-50", border: "border-gray-100", title: "text-gray-700" },
+  }[accent] || { bg: "bg-gray-50", border: "border-gray-100", title: "text-gray-700" };
   return (
-    <div className="flex gap-2 text-sm">
-      <span className="text-base leading-none flex-shrink-0 mt-0.5">{icon}</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-0.5">
-          {label}
-        </div>
-        <div className="text-gray-700 text-xs leading-relaxed">{children}</div>
+    <div className={`rounded-xl ${palette.bg} border ${palette.border} p-3`}>
+      <div className={`text-[10px] font-bold uppercase tracking-wider ${palette.title} mb-1.5`}>
+        {title}
       </div>
+      {children}
     </div>
   );
 }
@@ -393,4 +536,26 @@ function sourceIconForUrl(url) {
   if (url.includes("instagram")) return "📸";
   if (url.includes("youtube") || url.includes("youtu.be")) return "▶️";
   return "🔗";
+}
+
+function detectPlatform(url) {
+  if (!url) return "other";
+  if (url.includes("tiktok")) return "tiktok";
+  if (url.includes("instagram")) return "instagram";
+  if (url.includes("youtube") || url.includes("youtu.be")) return "youtube";
+  return "other";
+}
+
+function shortSourceLabel(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host.includes("tiktok")) return "TikTok";
+    if (host.includes("instagram")) return "Instagram";
+    if (host.includes("youtube") || host.includes("youtu.be")) return "YouTube";
+    return host;
+  } catch {
+    return url.length > 40 ? `${url.slice(0, 40)}…` : url;
+  }
 }

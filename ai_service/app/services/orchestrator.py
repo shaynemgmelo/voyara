@@ -5921,33 +5921,78 @@ async def merge_link_into_existing_trip(
         logger.info("[merge-link] no places extracted from new link %s", url)
         return {"places_added": 0, "skipped": "no_places"}
 
-    # 5. Dedup against the existing list. Match key = lowercase name.
-    # We're conservative: same name = same place, even if source_url
-    # differs (e.g. the same museum mentioned in two videos). The user
-    # would prefer one card linked to multiple sources over two duplicate
-    # cards on the panel.
-    existing_keys = {
-        (p.get("name") or "").strip().lower()
+    # 5. Two-pass merge:
+    #     a) Place is BRAND NEW (name not in existing) → add to merged_new.
+    #     b) Place is a duplicate (name matches existing) → AGGREGATE its
+    #        creator_note into the existing place's community_notes list.
+    #        This is what lets the modal show "Notes from the Community"
+    #        with multiple bullets, each tagged with its source video.
+    #
+    # Match key = lowercased trimmed name. Same name = same place, even
+    # when the source_url differs.
+    by_lower_name: dict[str, dict] = {
+        (p.get("name") or "").strip().lower(): p
         for p in existing_places
         if (p.get("name") or "").strip()
     }
     merged_new: list[dict] = []
+    duplicate_notes_added = 0
+
     for p in new_places_raw:
         if not isinstance(p, dict):
             continue
         name = (p.get("name") or "").strip()
-        if not name or name.lower() in existing_keys:
+        if not name:
             continue
-        # Force source_url to this link so the Panel groups it under
-        # the right "from this video" bucket — Haiku may have parroted
-        # a different value back.
-        merged = dict(p)
-        merged["source_url"] = url
-        merged_new.append(merged)
-        existing_keys.add(name.lower())
+        key = name.lower()
+        new_note = (p.get("creator_note") or "").strip()
 
-    if not merged_new:
-        logger.info("[merge-link] all %d places already in trip — nothing new", len(new_places_raw))
+        if key in by_lower_name:
+            # Duplicate path: graft the new creator_note onto the existing
+            # place as a community note (if there's actually one to add
+            # AND it's not already recorded — dedup by note text).
+            if new_note:
+                existing = by_lower_name[key]
+                notes = list(existing.get("community_notes") or [])
+                already_have = {
+                    (n.get("note") or "").strip().lower()
+                    for n in notes
+                    if isinstance(n, dict)
+                }
+                if new_note.lower() not in already_have:
+                    notes.append({
+                        "note": new_note,
+                        "source_url": url,
+                        "source_platform": platform,
+                    })
+                    existing["community_notes"] = notes
+                    duplicate_notes_added += 1
+            continue
+
+        # New-place path.
+        merged = dict(p)
+        # Force source_url to this link so the Panel groups it under the
+        # right "from this video" bucket — Haiku may have parroted back
+        # a different URL.
+        merged["source_url"] = url
+        # Seed community_notes with the first note (it'll grow if other
+        # videos mention the same place later).
+        if new_note:
+            merged["community_notes"] = [{
+                "note": new_note,
+                "source_url": url,
+                "source_platform": platform,
+            }]
+        merged_new.append(merged)
+        # Add to lookup so duplicates within the SAME haiku response
+        # collapse together too.
+        by_lower_name[key] = merged
+
+    if not merged_new and duplicate_notes_added == 0:
+        logger.info(
+            "[merge-link] all %d places already in trip with no new notes",
+            len(new_places_raw),
+        )
         return {"places_added": 0, "skipped": "all_duplicates"}
 
     # 6. Manual mode: geocode the new places so cards + map pins look
@@ -5971,10 +6016,9 @@ async def merge_link_into_existing_trip(
             except Exception:
                 pass
 
-    # 7. Write the merged list back. Append (don't insert at the front)
-    # so the existing card numbering stays stable for the user — the
-    # new cards appear at the bottom of the panel under their own
-    # video group.
+    # 7. Write the merged list back. Existing entries were mutated in
+    # place (community_notes grew on duplicates), and brand-new entries
+    # are appended at the end (preserves stable card numbering).
     final_places = list(existing_places) + merged_new
     profile["places_mentioned"] = final_places
     try:
@@ -5984,10 +6028,15 @@ async def merge_link_into_existing_trip(
         return {"places_added": 0, "skipped": "persist_failed"}
 
     logger.info(
-        "[merge-link] trip=%d link=%d added %d new place(s) (was %d, now %d)",
-        trip_id, link_id, len(merged_new), len(existing_places), len(final_places),
+        "[merge-link] trip=%d link=%d: %d new place(s) + %d community note(s) added (was %d, now %d)",
+        trip_id, link_id, len(merged_new), duplicate_notes_added,
+        len(existing_places), len(final_places),
     )
-    return {"places_added": len(merged_new), "total_places": len(final_places)}
+    return {
+        "places_added": len(merged_new),
+        "community_notes_added": duplicate_notes_added,
+        "total_places": len(final_places),
+    }
 
 
 async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:

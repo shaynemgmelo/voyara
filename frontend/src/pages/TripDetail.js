@@ -965,11 +965,24 @@ export default function TripDetail() {
       </div>}
 
 
-      {/* Item detail slide-out */}
+      {/* Item detail slide-out (drawer on desktop, bottom sheet on mobile).
+          enrichedPlace cross-references the item to its entry in the
+          trip-level traveler_profile.places_mentioned, which carries
+          editorial_summary + community_notes (aggregated from EVERY
+          video that mentioned this place). The lookup matches on
+          name (case-insensitive trim) — same dedup key used in the
+          backend merge_link path. */}
       {expandedItem && (
         <ItemDetail
           item={expandedItem}
           tripId={trip.id}
+          enrichedPlace={(() => {
+            const target = (expandedItem.name || "").trim().toLowerCase();
+            if (!target) return null;
+            return (trip?.traveler_profile?.places_mentioned || []).find(
+              (p) => (p.name || "").trim().toLowerCase() === target,
+            ) || null;
+          })()}
           onClose={() => {
             setExpandedItem(null);
             setSelectedItemId(null);
