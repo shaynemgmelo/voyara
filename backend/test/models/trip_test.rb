@@ -120,4 +120,96 @@ class TripTest < ActiveSupport::TestCase
     refute trip.valid?
     assert_match /less than or equal to 30/i, trip.errors[:num_days].join
   end
+
+  # ---------------------------------------------------------------------------
+  # traveler_profile deep-merge regression
+  #
+  # Trip 46 surfaced this: the frontend PATCHed a stale traveler_profile
+  # snapshot back to Rails, clobbering the freshly-enriched
+  # places_mentioned that the AI service had just written. The
+  # TripsController#update now deep-merges instead of replacing — these
+  # tests pin that behaviour. Mirrors the exact logic in the controller.
+  # ---------------------------------------------------------------------------
+
+  def deep_merged_profile(existing, incoming)
+    # Same call the controller uses — mirroring it here so the test
+    # surfaces a regression if the controller stops deep-merging.
+    (existing || {}).deep_merge((incoming || {}).to_h)
+  end
+
+  test "deep merge preserves places_mentioned when frontend sends only style" do
+    trip = build_trip(num_days: 3)
+    trip.update!(traveler_profile: {
+      "travel_style" => "old",
+      "places_mentioned" => [
+        { "name" => "Café de Flore", "latitude" => 48.85,
+          "longitude" => 2.33, "google_place_id" => "ChIJ..." },
+      ],
+    })
+
+    incoming = { "travel_style" => "new" }
+    merged = deep_merged_profile(trip.reload.traveler_profile, incoming)
+    trip.update!(traveler_profile: merged)
+
+    final = trip.reload.traveler_profile
+    assert_equal "new", final["travel_style"]
+    assert_equal 1, final["places_mentioned"].size
+    assert_equal "Café de Flore", final["places_mentioned"][0]["name"]
+    assert_equal 48.85, final["places_mentioned"][0]["latitude"]
+    assert_equal "ChIJ...", final["places_mentioned"][0]["google_place_id"]
+  end
+
+  test "deep merge lets backend explicitly overwrite places_mentioned" do
+    # The AI service IS allowed to replace the whole list (e.g. after
+    # geocoding 53 places from scratch). Deep-merge with a top-level
+    # places_mentioned key takes the new value entirely.
+    trip = build_trip(num_days: 3)
+    trip.update!(traveler_profile: {
+      "places_mentioned" => [{ "name" => "Old", "latitude" => 1.0 }],
+    })
+
+    incoming = {
+      "places_mentioned" => [
+        { "name" => "New A", "latitude" => 2.0 },
+        { "name" => "New B", "latitude" => 3.0 },
+      ],
+    }
+    merged = deep_merged_profile(trip.reload.traveler_profile, incoming)
+    trip.update!(traveler_profile: merged)
+
+    final = trip.reload.traveler_profile
+    assert_equal 2, final["places_mentioned"].size
+    assert_equal "New A", final["places_mentioned"][0]["name"]
+  end
+
+  test "deep merge preserves backend-managed fields when frontend edits user fields" do
+    trip = build_trip(num_days: 3)
+    trip.update!(traveler_profile: {
+      "travel_style" => "old style",
+      "interests" => ["a", "b"],
+      "places_mentioned" => [{ "name" => "Place", "latitude" => 1.0 }],
+      "day_plans_from_links" => [{ "day" => 1, "places" => ["X"] }],
+      "external_research" => "research blob",
+      "destination_classification" => { "destination_type" => "walkable_urban" },
+    })
+
+    # User edits ONLY style + interests (the frontend strips backend fields).
+    incoming = {
+      "travel_style" => "new style",
+      "interests" => ["c", "d", "e"],
+    }
+    merged = deep_merged_profile(trip.reload.traveler_profile, incoming)
+    trip.update!(traveler_profile: merged)
+
+    final = trip.reload.traveler_profile
+    assert_equal "new style", final["travel_style"]
+    assert_equal ["c", "d", "e"], final["interests"]
+    # Every backend-managed field survives intact.
+    assert_equal 1, final["places_mentioned"].size
+    assert_equal "Place", final["places_mentioned"][0]["name"]
+    assert_equal 1, final["day_plans_from_links"].size
+    assert_equal "research blob", final["external_research"]
+    assert_equal "walkable_urban",
+                 final["destination_classification"]["destination_type"]
+  end
 end

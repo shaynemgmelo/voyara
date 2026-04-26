@@ -555,8 +555,30 @@ export default function useTripDetail(tripId) {
 
   const updateProfile = async (profileData, action) => {
     const status = action === "reject" ? "rejected" : "confirmed";
+    // CRITICAL: strip backend-managed fields before PATCHing. Trip 46
+    // surfaced this — the frontend sent back a stale `places_mentioned`
+    // (snapshot taken BEFORE backend enrichment finished) and clobbered
+    // the freshly-geocoded data Rails had just received from the AI
+    // service. Result: cards showed "no data", map pins disappeared.
+    //
+    // The frontend OWNS: travel_style, interests, pace, country_detected,
+    // cities_detected, profile_description, main_destination,
+    // needs_destination, and the *_en variants. Everything else is
+    // computed by the AI pipeline and must NEVER round-trip through
+    // a frontend PATCH.
+    const FRONTEND_OWNED = new Set([
+      "travel_style", "travel_style_en",
+      "interests", "interests_en",
+      "pace",
+      "country_detected", "cities_detected",
+      "profile_description", "profile_description_en",
+      "main_destination", "needs_destination",
+    ]);
+    const safeProfile = Object.fromEntries(
+      Object.entries(profileData || {}).filter(([k]) => FRONTEND_OWNED.has(k)),
+    );
     const updated = await tripsApi.updateTrip(tripId, {
-      traveler_profile: profileData,
+      traveler_profile: safeProfile,
       profile_status: status,
     });
     setTrip((prev) => ({

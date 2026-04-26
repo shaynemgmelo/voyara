@@ -25,7 +25,25 @@ class Api::V1::TripsController < ApplicationController
   end
 
   def update
-    if @trip.update(trip_params)
+    # Deep-merge traveler_profile instead of replacing it. Trip 46
+    # surfaced this: the frontend PATCHed a stale traveler_profile
+    # snapshot (taken BEFORE the AI service finished geocoding) which
+    # clobbered the freshly-enriched places_mentioned. Result: cards
+    # showed "no data", map pins disappeared.
+    #
+    # The frontend now sends only fields it OWNS (travel_style,
+    # interests, etc.), and Rails merges those into the existing
+    # traveler_profile JSON without touching backend-managed keys
+    # (places_mentioned, day_plans_from_links, external_research, etc.).
+    permitted = trip_params
+    if permitted[:traveler_profile].present? && @trip.traveler_profile.present?
+      permitted = permitted.to_h
+      permitted["traveler_profile"] = @trip.traveler_profile.deep_merge(
+        permitted["traveler_profile"].to_h,
+      )
+    end
+
+    if @trip.update(permitted)
       render json: TripSerializer.new(@trip, include_details: true).as_json
     else
       render json: { errors: @trip.errors.full_messages }, status: :unprocessable_entity
