@@ -363,3 +363,37 @@ class TestRailsPermitParser:
         path = self._write_controller(tmp_path, body)
         with pytest.raises(AssertionError, match="requested index"):
             t._rails_permit_list(path, "fake", match_index=5)
+
+
+class TestFrontendBackendProfileFieldsParity:
+    """Both the Rails ProfileFieldGuard and frontend profileFields.js
+    list the same set of "backend-owned" profile keys. Drift between
+    them re-introduces the trip 46 bug class — frontend strips one set,
+    Rails accepts another, gap = clobber. This test catches drift."""
+
+    def test_backend_owned_sets_match(self):
+        # Read the Rails concern.
+        rails_path = REPO_ROOT / "backend/app/controllers/concerns/profile_field_guard.rb"
+        rails_text = rails_path.read_text()
+        rails_match = re.search(
+            r"BACKEND_OWNED_PROFILE_FIELDS\s*=\s*%w\[([^\]]+)\]", rails_text,
+        )
+        assert rails_match, "BACKEND_OWNED_PROFILE_FIELDS not found in Rails concern"
+        rails_fields = set(rails_match.group(1).split())
+
+        # Read the JS module.
+        js_path = REPO_ROOT / "frontend/src/utils/profileFields.js"
+        js_text = js_path.read_text()
+        js_match = re.search(
+            r"BACKEND_OWNED_PROFILE_FIELDS\s*=\s*new\s+Set\(\[([^\]]+)\]",
+            js_text, re.DOTALL,
+        )
+        assert js_match, "BACKEND_OWNED_PROFILE_FIELDS not found in JS module"
+        # The JS list contains "string", "literals". Extract them.
+        js_fields = set(re.findall(r'"([^"]+)"', js_match.group(1)))
+
+        assert rails_fields == js_fields, (
+            f"Backend-owned profile field drift!\n"
+            f"  Rails only: {sorted(rails_fields - js_fields)}\n"
+            f"  JS only: {sorted(js_fields - rails_fields)}"
+        )
