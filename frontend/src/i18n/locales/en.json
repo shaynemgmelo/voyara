@@ -86,7 +86,8 @@
     }
   },
   "tripCreate": {
-    "title": "Create a New Trip"
+    "title": "Create a New Trip",
+    "subtitle": "Pick the city, paste your videos, and we'll extract the places for you to drag onto days. Want the AI to organize it? One click does it later."
   },
   "tripForm": {
     "name": "Trip Name *",

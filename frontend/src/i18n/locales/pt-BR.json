@@ -86,7 +86,8 @@
     }
   },
   "tripCreate": {
-    "title": "Criar Nova Viagem"
+    "title": "Criar Nova Viagem",
+    "subtitle": "Escolhe a cidade, cola seus vídeos e a gente extrai os lugares pra você arrastar nos dias. Se quiser, a IA monta tudo num clique depois."
   },
   "tripForm": {
     "name": "Nome da Viagem *",

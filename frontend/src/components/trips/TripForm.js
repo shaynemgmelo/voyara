@@ -29,7 +29,13 @@ export default function TripForm({ onSubmit, initial }) {
 
   const [name, setName] = useState(initial?.name || "");
   const [numDays, setNumDays] = useState(initial?.num_days || 5);
-  const [aiMode, setAiMode] = useState(initial?.ai_mode || "eco");
+  // Default to manual: every new trip lands on the manual layout (cards
+  // grouped by source video + map pins + drag-and-drop). The AI only
+  // organizes when the user explicitly clicks the "Assistência IA"
+  // button on the trip page. No more upfront mode choice — it confused
+  // users and led to silent AI builds when "manual" was actually picked
+  // (see commit 1db0c95).
+  const [aiMode] = useState(initial?.ai_mode || "manual");
   const [linkText, setLinkText] = useState("");
   const [links, setLinks] = useState([]); // [{url, platform, valid}]
   const [submitting, setSubmitting] = useState(false);
@@ -81,10 +87,6 @@ export default function TripForm({ onSubmit, initial }) {
       setError(pt ? "Dá um nome pra viagem." : "Give the trip a name.");
       return;
     }
-    if (aiMode !== "manual" && links.length === 0) {
-      setError(pt ? "Cola pelo menos um link, ou escolha o modo manual." : "Paste at least one link, or pick manual mode.");
-      return;
-    }
     if (links.some((l) => !l.valid)) {
       setError(pt ? "Tem link inválido na lista — remove antes de continuar." : "There's an invalid link — remove it first.");
       return;
@@ -114,9 +116,10 @@ export default function TripForm({ onSubmit, initial }) {
   };
 
   const hasInvalid = links.some((l) => !l.valid);
-  const generateLabel = aiMode === "manual"
-    ? (pt ? "Criar viagem" : "Create trip")
-    : (pt ? "Gerar roteiro" : "Generate itinerary");
+  // Manual is the default mode — the trip page lets the user drag places
+  // into days, with an explicit "Assistência IA" button to opt into AI
+  // organization. No need for a separate "Generate" CTA here.
+  const generateLabel = pt ? "Criar viagem" : "Create trip";
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -184,62 +187,13 @@ export default function TripForm({ onSubmit, initial }) {
         </div>
       </div>
 
-      {/* AI vs manual */}
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">
-          {pt ? "Como você quer montar?" : "How do you want to build it?"}
-        </label>
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            type="button"
-            onClick={() => setAiMode("eco")}
-            className={`text-left rounded-xl border-2 p-4 transition ${
-              aiMode === "eco"
-                ? "border-coral-500 bg-coral-50"
-                : "border-gray-200 hover:border-gray-300 bg-white"
-            }`}
-          >
-            <div className="text-2xl mb-1">✨</div>
-            <div className="font-bold text-gray-900 text-sm">
-              {pt ? "IA monta pra mim" : "AI builds it"}
-            </div>
-            <div className="text-xs text-gray-500 mt-1 leading-snug">
-              {pt
-                ? "A gente lê os vídeos, identifica os lugares e monta os dias."
-                : "We read the videos, identify places, and build the days."}
-            </div>
-          </button>
-          <button
-            type="button"
-            onClick={() => setAiMode("manual")}
-            className={`text-left rounded-xl border-2 p-4 transition ${
-              aiMode === "manual"
-                ? "border-coral-500 bg-coral-50"
-                : "border-gray-200 hover:border-gray-300 bg-white"
-            }`}
-          >
-            <div className="text-2xl mb-1">✏️</div>
-            <div className="font-bold text-gray-900 text-sm">
-              {pt ? "Eu monto manual" : "I'll build manually"}
-            </div>
-            <div className="text-xs text-gray-500 mt-1 leading-snug">
-              {pt
-                ? "Extraímos os lugares dos vídeos, você arrasta nos dias."
-                : "We extract places from videos, you drag them into days."}
-            </div>
-          </button>
-        </div>
-      </div>
-
       {/* Links */}
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
           {pt ? "Links (TikTok, Instagram, YouTube ou blog)" : "Links (TikTok, Instagram, YouTube or blog)"}
-          {aiMode === "manual" && (
-            <span className="text-gray-400 font-normal text-xs ml-2">
-              {pt ? "(opcional no manual)" : "(optional in manual)"}
-            </span>
-          )}
+          <span className="text-gray-400 font-normal text-xs ml-2">
+            {pt ? "(opcional)" : "(optional)"}
+          </span>
         </label>
         <div className="flex gap-2">
           <input
