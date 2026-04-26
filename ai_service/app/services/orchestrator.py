@@ -6180,6 +6180,38 @@ async def analyze_trip(trip_id: int, http_client=None) -> dict:
                 if existing_profile.get(preserve_key) and not profile.get(preserve_key):
                     profile[preserve_key] = existing_profile[preserve_key]
 
+            # CRITICAL: don't overwrite enriched places_mentioned. When
+            # extract-and-build ran for a manual trip its Phase 2 enriched
+            # every entry with lat/lng/photo/rating. Then Rails' Link
+            # callback fires /analyze-trip, which ends up here with a fresh
+            # NAKED Haiku output that would wipe the enrichment. Trip 42
+            # hit this: 23/23 enriched → 19/14 after the race → cards
+            # render "no data", pins fall back to Tokyo.
+            #
+            # Rule: if the existing places_mentioned already has majority
+            # geocoded entries, KEEP them as-is. The other profile fields
+            # (style, interests, cities, country, description) still get
+            # the fresh values from this Haiku call — those are stateless
+            # and idempotent. Only places_mentioned is the load-bearing
+            # piece we can't afford to lose.
+            #
+            # A merge approach (carry over geo for matched names) was
+            # tried first but lost places when fresh Haiku returned slightly
+            # different names ("Rua 9 de Julho" vs "Calle 9 de Julio"). The
+            # absolute-preserve rule is dumber but safer.
+            existing_places = existing_profile.get("places_mentioned") or []
+            if existing_places:
+                enriched_count = sum(
+                    1 for p in existing_places if p.get("latitude") is not None
+                )
+                if enriched_count >= max(3, len(existing_places) // 2):
+                    profile["places_mentioned"] = existing_places
+                    logger.info(
+                        "[analyze] Preserved %d enriched places_mentioned "
+                        "(skipped race-overwrite from fresh Haiku call)",
+                        enriched_count,
+                    )
+
             # Auto-confirm — the user can edit the profile inline on the trip
             # page now (Phase 3 of the deferred-extraction redesign). No more
             # confirmation modal blocking the build.

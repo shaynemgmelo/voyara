@@ -411,6 +411,171 @@ class FakePlacesClient:
         return self.details_result
 
 
+class TestAnalyzeTripRacePreservation:
+    """Trip 42 surfaced a race condition: extract_profile_and_build's
+    Phase 2 enriched 23/23 places with geo+photo via Google Places, then
+    Rails' Link callback fired /analyze-trip an instant later. analyze_trip
+    re-ran the Haiku call and overwrote places_mentioned with NAKED entries
+    — wiping the enrichment, leaving cards "no data" and pins on Tokyo.
+
+    The fix: when analyze_trip is about to write a fresh profile and the
+    EXISTING profile already has majority-enriched places_mentioned,
+    preserve those entries verbatim. Other profile fields (style,
+    interests, country, cities) still get the fresh values.
+    """
+
+    @pytest.mark.asyncio
+    async def test_preserves_enriched_places_on_race(self, monkeypatch):
+        """End-to-end: existing profile has 5/5 enriched places. Fresh
+        analyze_trip Haiku returns 5 NAKED places. After analyze_trip
+        runs, places_mentioned must still have lat/photo/etc."""
+        from app.services import orchestrator as orch
+
+        existing = {
+            "places_mentioned": [
+                {"name": "Casa Rosada", "latitude": -34.6, "longitude": -58.4,
+                 "photo_url": "p1", "rating": 4.5},
+                {"name": "Eiffel Tower", "latitude": 48.85, "longitude": 2.29,
+                 "photo_url": "p2", "rating": 4.8},
+                {"name": "Pantheon", "latitude": 41.9, "longitude": 12.5,
+                 "photo_url": "p3", "rating": 4.7},
+                {"name": "Louvre", "latitude": 48.86, "longitude": 2.34,
+                 "photo_url": "p4", "rating": 4.6},
+                {"name": "Notre-Dame", "latitude": 48.85, "longitude": 2.35,
+                 "photo_url": "p5", "rating": 4.7},
+            ],
+        }
+        fresh_naked_profile = {
+            "travel_style": "urban explorer",
+            "interests": ["arquitetura", "gastronomia"],
+            "places_mentioned": [
+                {"name": "Casa Rosada"},
+                {"name": "Eiffel Tower"},
+                {"name": "Pantheon"},
+                # Slightly different name — wouldn't merge, would drop.
+                {"name": "Some Other Place"},
+            ],
+        }
+        trip = {
+            "id": 1,
+            "destination": "Buenos Aires",
+            "links": [
+                {"url": "https://x", "extracted_data": {"content_text": "x"}},
+            ],
+            "traveler_profile": existing,
+        }
+
+        # Stub RailsClient
+        captured: dict = {"updates": None}
+        class FakeRails:
+            def __init__(self, client=None): pass
+            async def get_trip(self, tid): return trip
+            async def get_links(self, tid): return trip["links"]
+            async def update_trip(self, tid, updates):
+                captured["updates"] = updates
+                return {}
+        monkeypatch.setattr(orch, "RailsClient", FakeRails)
+
+        # Stub the Haiku call to return the naked fresh profile
+        async def fake_analyze(content, dest, cost):
+            return dict(fresh_naked_profile)
+        monkeypatch.setattr(orch, "_analyze_profile", fake_analyze)
+
+        await orch.analyze_trip(1)
+
+        # The update should have preserved the existing enriched places.
+        assert captured["updates"] is not None
+        saved = captured["updates"]["traveler_profile"]
+        saved_places = saved.get("places_mentioned") or []
+        # Should match the EXISTING (5 enriched), not the FRESH naked (4).
+        assert len(saved_places) == 5
+        with_geo = sum(1 for p in saved_places if p.get("latitude") is not None)
+        with_photo = sum(1 for p in saved_places if p.get("photo_url"))
+        assert with_geo == 5
+        assert with_photo == 5
+        # Other profile fields ARE updated (the fresh values win).
+        assert saved.get("travel_style") == "urban explorer"
+
+    @pytest.mark.asyncio
+    async def test_overwrites_when_existing_is_empty(self, monkeypatch):
+        """First-run case: nothing enriched yet. analyze_trip should
+        write the fresh Haiku output normally."""
+        from app.services import orchestrator as orch
+
+        trip = {
+            "id": 2,
+            "destination": "Paris",
+            "links": [
+                {"url": "https://x", "extracted_data": {"content_text": "x"}},
+            ],
+            "traveler_profile": {},  # no existing profile
+        }
+        fresh = {
+            "travel_style": "explorer",
+            "places_mentioned": [{"name": "Eiffel"}, {"name": "Louvre"}],
+        }
+
+        captured: dict = {"updates": None}
+        class FakeRails:
+            def __init__(self, client=None): pass
+            async def get_trip(self, tid): return trip
+            async def get_links(self, tid): return trip["links"]
+            async def update_trip(self, tid, updates):
+                captured["updates"] = updates
+                return {}
+        monkeypatch.setattr(orch, "RailsClient", FakeRails)
+
+        async def fake_analyze(content, dest, cost):
+            return dict(fresh)
+        monkeypatch.setattr(orch, "_analyze_profile", fake_analyze)
+
+        await orch.analyze_trip(2)
+        saved = captured["updates"]["traveler_profile"]
+        # Fresh wins because there's nothing enriched to preserve.
+        assert len(saved["places_mentioned"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_overwrites_when_existing_lacks_geo(self, monkeypatch):
+        """Existing profile has places but they're all naked (no geo).
+        Don't lock that in — the fresh call might get geo this time."""
+        from app.services import orchestrator as orch
+
+        trip = {
+            "id": 3,
+            "destination": "Tokyo",
+            "links": [{"url": "https://x", "extracted_data": {"content_text": "x"}}],
+            "traveler_profile": {
+                "places_mentioned": [
+                    {"name": "X"}, {"name": "Y"}, {"name": "Z"},
+                ],
+            },
+        }
+        fresh = {
+            "places_mentioned": [
+                {"name": "X"}, {"name": "Y"}, {"name": "Z"}, {"name": "Q"},
+            ],
+        }
+
+        captured: dict = {"updates": None}
+        class FakeRails:
+            def __init__(self, client=None): pass
+            async def get_trip(self, tid): return trip
+            async def get_links(self, tid): return trip["links"]
+            async def update_trip(self, tid, updates):
+                captured["updates"] = updates
+                return {}
+        monkeypatch.setattr(orch, "RailsClient", FakeRails)
+
+        async def fake_analyze(content, dest, cost):
+            return dict(fresh)
+        monkeypatch.setattr(orch, "_analyze_profile", fake_analyze)
+
+        await orch.analyze_trip(3)
+        saved = captured["updates"]["traveler_profile"]
+        # Fresh wins (4 entries) — no enrichment to preserve.
+        assert len(saved["places_mentioned"]) == 4
+
+
 class TestGeocodePlacesForManual:
     @pytest.mark.asyncio
     async def test_skips_already_enriched_places(self):
