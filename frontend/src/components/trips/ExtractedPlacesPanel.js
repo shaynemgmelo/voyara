@@ -1,7 +1,6 @@
-import { useMemo, useState } from "react";
+import { useMemo, useEffect, useRef } from "react";
 import { Droppable, Draggable } from "@hello-pangea/dnd";
 import { useLanguage } from "../../i18n/LanguageContext";
-import PlaceDetailModal from "../modals/PlaceDetailModal";
 
 /**
  * Manual-mode-only side panel showing every place we extracted from the
@@ -64,17 +63,46 @@ const CATEGORY_ICONS = {
   place: "📍",
 };
 
-export default function ExtractedPlacesPanel({ trip }) {
+export default function ExtractedPlacesPanel({
+  trip,
+  // Lifted to the parent so the same modal can be opened from a
+  // pin click on the map AND a card click here. The parent owns
+  // <PlaceDetailModal /> rendering.
+  onPlaceClick = null,
+  // Place key to highlight + scroll to (set by the parent when a
+  // pin is clicked on the map). Same key shape as TripMap uses:
+  // google_place_id || name.
+  highlightedPlaceKey = null,
+  // Hover sync: parent passes this when a pin is being hovered.
+  // We use it to add a coral ring to the matching card.
+  hoveredPlaceKey = null,
+  // Optional hover callbacks so card hover propagates back up to
+  // highlight the corresponding pin on the map (and vice-versa).
+  onPlaceHover = null,
+}) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
-  // Click-to-open detail modal. Holds the currently expanded place
-  // (or null when nothing's open). Drag still wins over click — the
-  // dnd library cancels the click handler when a real drag started,
-  // so the modal won't open mid-drag.
-  const [detailPlace, setDetailPlace] = useState(null);
+  // Card refs keyed by the same placeKey scheme — used by the
+  // scroll-into-view effect when the parent highlights a card.
+  const cardRefs = useRef({});
 
   const profile = trip?.traveler_profile || {};
-  const placesMentioned = profile.places_mentioned || [];
+  // Memo'd so the downstream useMemos don't re-run every render due to
+  // the `|| []` fallback creating a new reference each time.
+  const placesMentioned = useMemo(
+    () => profile.places_mentioned || [],
+    [profile.places_mentioned],
+  );
+
+  // When the parent highlights a place (e.g. user clicked the matching
+  // pin on the map), scroll the corresponding card into view smoothly.
+  useEffect(() => {
+    if (!highlightedPlaceKey) return;
+    const el = cardRefs.current[highlightedPlaceKey];
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlightedPlaceKey]);
 
   // Names already in the itinerary (so we can mark which extracted places
   // have been used).
@@ -150,7 +178,11 @@ export default function ExtractedPlacesPanel({ trip }) {
           <div
             ref={provided.innerRef}
             {...provided.droppableProps}
-            className="p-3 space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto"
+            // overscroll-auto (the default, made explicit): once the
+            // inner list reaches its top or bottom edge, the wheel
+            // event chains up to the page so the user keeps scrolling
+            // without having to reposition the cursor off the panel.
+            className="p-3 space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto overscroll-auto"
           >
             {placesMentioned.length === 0 && (
               <div className="px-4 py-8 text-center text-sm text-gray-400">
@@ -198,6 +230,13 @@ export default function ExtractedPlacesPanel({ trip }) {
 
                   {places.map(({ place, globalIndex }) => {
                     const used = usedNames.has(normalize(place.name));
+                    // Same key shape TripMap uses for sync.
+                    const placeKey = place.google_place_id || place.name;
+                    const isHighlighted =
+                      placeKey && (
+                        placeKey === highlightedPlaceKey
+                        || placeKey === hoveredPlaceKey
+                      );
                     return (
                       <Draggable
                         key={`${place.name}-${globalIndex}`}
@@ -211,6 +250,10 @@ export default function ExtractedPlacesPanel({ trip }) {
                           const shortAddress = (place.address || "").split(",")[0] || "";
                           // onClick fires only when no drag happened — dnd
                           // intercepts the click during real drags.
+                          const openDetail = () => {
+                            if (used) return;
+                            if (onPlaceClick) onPlaceClick(place);
+                          };
                           const handleCardClick = (e) => {
                             if (used) return;
                             // Don't trigger when the click is on the drag
@@ -218,21 +261,29 @@ export default function ExtractedPlacesPanel({ trip }) {
                             // body, so we filter on data-drag attribute).
                             if (snapshot.isDragging || snapshot.isDropAnimating) return;
                             e.stopPropagation();
-                            setDetailPlace(place);
+                            openDetail();
+                          };
+                          // Compose the dnd ref with our own card ref so
+                          // the parent can scroll us into view.
+                          const setRef = (node) => {
+                            p.innerRef(node);
+                            if (placeKey) cardRefs.current[placeKey] = node;
                           };
                           return (
                             <div
-                              ref={p.innerRef}
+                              ref={setRef}
                               {...p.draggableProps}
                               {...p.dragHandleProps}
                               onClick={handleCardClick}
+                              onMouseEnter={() => onPlaceHover?.(placeKey)}
+                              onMouseLeave={() => onPlaceHover?.(null)}
                               role={used ? undefined : "button"}
                               tabIndex={used ? -1 : 0}
                               onKeyDown={(e) => {
                                 if (used) return;
                                 if (e.key === "Enter" || e.key === " ") {
                                   e.preventDefault();
-                                  setDetailPlace(place);
+                                  openDetail();
                                 }
                               }}
                               className={`rounded-lg border overflow-hidden text-sm transition select-none ${
@@ -240,7 +291,9 @@ export default function ExtractedPlacesPanel({ trip }) {
                                   ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
                                   : snapshot.isDragging
                                     ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
-                                    : "border-gray-200 bg-white hover:border-coral-300 cursor-grab focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral-300"
+                                    : isHighlighted
+                                      ? "border-coral-500 bg-coral-50 ring-2 ring-coral-200 cursor-grab"
+                                      : "border-gray-200 bg-white hover:border-coral-300 cursor-grab focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral-300"
                               }`}
                             >
                               <div className="flex gap-2 p-2">
@@ -303,6 +356,36 @@ export default function ExtractedPlacesPanel({ trip }) {
                                       </span>
                                     )}
                                   </div>
+                                  {/* Short blurb hierarchy (in order of
+                                      "how user-relevant"):
+                                        1. creator_note — what the person
+                                           in the saved video literally
+                                           said. Highest signal.
+                                        2. editorial_summary — Google's
+                                           curated 1-line description.
+                                        3. top review first sentence —
+                                           a real visitor's take.
+                                      Hidden on used cards to keep them
+                                      compact. */}
+                                  {!used && (
+                                    place.creator_note
+                                      ? (
+                                        <p className="mt-1 text-[11px] text-coral-700 italic leading-snug line-clamp-2">
+                                          “{place.creator_note}”
+                                        </p>
+                                      )
+                                      : place.editorial_summary
+                                        ? (
+                                          <p className="mt-1 text-[11px] text-gray-600 leading-snug line-clamp-2">
+                                            {place.editorial_summary}
+                                          </p>
+                                        )
+                                        : (place.top_reviews?.[0]?.text && (
+                                          <p className="mt-1 text-[11px] text-gray-500 italic leading-snug line-clamp-2">
+                                            “{firstSentence(place.top_reviews[0].text)}”
+                                          </p>
+                                        ))
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -318,15 +401,19 @@ export default function ExtractedPlacesPanel({ trip }) {
           </div>
         )}
       </Droppable>
-
-      {detailPlace && (
-        <PlaceDetailModal
-          place={detailPlace}
-          onClose={() => setDetailPlace(null)}
-        />
-      )}
     </aside>
   );
+}
+
+// Used to render a short, readable snippet from a longer review.
+// Returns the first sentence (split on . ! ?) or the first 110 chars,
+// whichever is shorter — keeps the card compact without losing meaning.
+function firstSentence(text) {
+  if (!text) return "";
+  const trimmed = text.trim();
+  const m = trimmed.match(/^[^.!?]+[.!?]/);
+  const candidate = m ? m[0] : trimmed;
+  return candidate.length > 110 ? `${candidate.slice(0, 110)}…` : candidate;
 }
 
 // Exported so TripDetail's handleDragEnd can detect drops from this panel.

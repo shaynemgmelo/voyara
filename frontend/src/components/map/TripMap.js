@@ -19,6 +19,12 @@ const MAP_OPTIONS = {
   mapTypeControl: false,
   streetViewControl: false,
   fullscreenControl: true,
+  // "cooperative": single-finger / mouse-wheel scroll passes through
+  // to the page (so the user can scroll past the map), and pinch /
+  // ctrl+scroll zooms the map. Default ("auto") swallows wheel events
+  // for zoom which makes the page feel stuck — exactly what the user
+  // complained about.
+  gestureHandling: "cooperative",
 };
 
 // Custom SVG path for hotel marker (house/building shape)
@@ -46,6 +52,16 @@ export default function TripMap({
   // Each needs lat/lng to render as a gray pin. When the user drags one
   // onto a day it'll re-render as a colored day-pin via dayPlans above.
   unassignedPlaces = [],
+  // Click handler for unassigned (gray/black) pins. When provided, the
+  // pin click opens the rich PlaceDetailModal at the parent level
+  // instead of the small in-map InfoWindow. Lets us share the same
+  // detail UI between card-click (panel) and pin-click (map).
+  onUnassignedPlaceClick = null,
+  // Pool key (poolIndex or name) currently highlighted by the user —
+  // either because they hovered the corresponding card in the panel
+  // or because the panel is asking the map to draw attention to a
+  // specific pin (e.g. after card click → "show me on the map").
+  highlightedUnassignedKey = null,
 }) {
   const { t } = useLanguage();
   const { isLoaded } = useJsApiLoader({
@@ -97,6 +113,22 @@ export default function TripMap({
       fitBounds(mapRef.current, allBoundsPoints);
     }
   }, [selectedDayNumber, allBoundsPoints.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When the panel highlights an unassigned place (e.g. user clicked a
+  // card), pan smoothly to that pin so the user actually SEES it. We
+  // do NOT zoom — that would be jarring on a multi-city map and the
+  // user can manually zoom if they want.
+  useEffect(() => {
+    if (!mapRef.current || !highlightedUnassignedKey) return;
+    const target = geocodedUnassigned.find(
+      (p) => (p.google_place_id || p.name) === highlightedUnassignedKey,
+    );
+    if (!target) return;
+    const lat = parseFloat(target.latitude);
+    const lng = parseFloat(target.longitude);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+    mapRef.current.panTo({ lat, lng });
+  }, [highlightedUnassignedKey, geocodedUnassigned]);
 
   function fitBounds(map, points) {
     if (!points.length) return;
@@ -215,8 +247,14 @@ export default function TripMap({
       {!selectedDayNumber && geocodedUnassigned.map((place, idx) => {
         // 1-indexed for display — humans count from 1.
         const pinNumber = (place.poolIndex ?? idx) + 1;
-        const itemKey = `unassigned-${place.google_place_id || place.name || idx}`;
-        const isHovered = hoveredItemId === itemKey;
+        // Stable key matches what ExtractedPlacesPanel emits when the
+        // user hovers a card. The panel must produce the SAME key so
+        // hover sync card→pin works.
+        const placeKey = place.google_place_id || place.name;
+        const itemKey = `unassigned-${placeKey || idx}`;
+        const isHovered =
+          hoveredItemId === itemKey
+          || (highlightedUnassignedKey && highlightedUnassignedKey === placeKey);
         return (
           <Marker
             key={itemKey}
@@ -227,21 +265,31 @@ export default function TripMap({
             label={{
               text: String(pinNumber),
               color: "#fff",
-              fontSize: isHovered ? "13px" : "10px",
+              fontSize: isHovered ? "14px" : "10px",
               fontWeight: "bold",
             }}
             icon={{
               path: window.google.maps.SymbolPath.CIRCLE,
               // Black to match the badge on each card in the sidebar so the
               // pool number ↔ pin pairing reads as clearly visually linked.
-              fillColor: "#000000",
+              // The highlighted state uses coral (matches the card hover
+              // border in ExtractedPlacesPanel) so the user sees the pair
+              // glow together.
+              fillColor: isHovered ? "#f97316" : "#000000",
               fillOpacity: 1,
               strokeColor: "#ffffff",
               strokeWeight: isHovered ? 3 : 2,
-              scale: isHovered ? 13 : 10,
+              scale: isHovered ? 15 : 10,
             }}
             title={`#${pinNumber} ${place.name}`}
             onClick={() => {
+              // Parent owns the modal — pass control up so we can share
+              // the same PlaceDetailModal between card and pin clicks.
+              if (onUnassignedPlaceClick) {
+                onUnassignedPlaceClick(place);
+                return;
+              }
+              // Fallback: legacy InfoWindow path when no callback wired.
               setInfoItem({
                 ...place,
                 id: itemKey,

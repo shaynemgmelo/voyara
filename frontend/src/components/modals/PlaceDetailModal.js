@@ -1,23 +1,42 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useLanguage } from "../../i18n/LanguageContext";
 
 /**
  * Detail modal for a place card in the manual-mode extracted-places
  * panel. Shows the rich Google Places data we already pre-geocoded:
  * photo, rating, review count, address, category, opening hours, link
- * to Google Maps. Click outside or hit Esc to close.
+ * to Google Maps, editorial summary, and top reviews. Click outside
+ * or hit Esc to close.
  *
- * Read-only — actions on the place (drag to a day, remove) live on the
- * card itself, not in here. This modal is purely "what is this place?"
+ * Triggered from two surfaces — both deliver the same modal:
+ *   - Card click in ExtractedPlacesPanel (the panel side)
+ *   - Pin click in TripMap (the map side)
  *
  * Props:
  *   place        — the places_mentioned entry (rich, post-enrichment)
  *   sourceUrl    — the video URL (override; defaults to place.source_url)
  *   onClose      — closes the modal
+ *   dayPlans     — optional: passing these enables the "Add to day X"
+ *                  button row at the bottom. Without this, the modal is
+ *                  read-only (matches the legacy behaviour).
+ *   onAddToDay   — async (dayPlanId) => void. Called when the user
+ *                  picks a day to add this place to.
+ *   alreadyOnDayId — optional: when the place is already in the trip,
+ *                  the matching day button is highlighted "added" so the
+ *                  user knows where it lives.
  */
-export default function PlaceDetailModal({ place, sourceUrl, onClose }) {
+export default function PlaceDetailModal({
+  place,
+  sourceUrl,
+  onClose,
+  dayPlans = null,
+  onAddToDay = null,
+  alreadyOnDayId = null,
+}) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
+  const [adding, setAdding] = useState(false);
+  const [addedDayId, setAddedDayId] = useState(null);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -37,11 +56,29 @@ export default function PlaceDetailModal({ place, sourceUrl, onClose }) {
   const reviewsCount = place.reviews_count;
   const address = place.address;
   const pricing = place.pricing;
+  const editorialSummary = (place.editorial_summary || "").trim();
+  const creatorNote = (place.creator_note || "").trim();
+  const topReviews = Array.isArray(place.top_reviews) ? place.top_reviews : [];
+  const isExperience = place.kind === "experience";
   const gmapsUrl =
     place.google_maps_url
     || (place.google_place_id
       ? `https://www.google.com/maps/place/?q=place_id:${place.google_place_id}`
       : null);
+
+  const handleAddToDay = async (dayPlanId) => {
+    if (!onAddToDay || adding) return;
+    setAdding(true);
+    try {
+      await onAddToDay(dayPlanId);
+      setAddedDayId(dayPlanId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[place-detail] add to day failed:", e);
+    } finally {
+      setAdding(false);
+    }
+  };
 
   return (
     <div
@@ -110,6 +147,53 @@ export default function PlaceDetailModal({ place, sourceUrl, onClose }) {
             </div>
           </div>
 
+          {/* Creator note — what the person in the source video actually
+              SAID about this place. This is the highest-signal text on
+              the modal because it's the user's specific reason for being
+              interested in this place (they saved THIS video). Goes
+              above the editorial summary on purpose. */}
+          {creatorNote && (
+            <div className="rounded-lg bg-coral-50 border border-coral-100 p-3">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-coral-600 mb-1 flex items-center gap-1">
+                <span>{sourceIconForUrl(url)}</span>
+                {pt ? "Do criador do vídeo" : "From the video creator"}
+              </div>
+              <p className="text-sm text-gray-800 leading-relaxed italic">
+                “{creatorNote}”
+              </p>
+            </div>
+          )}
+
+          {/* Editorial summary — Google's curated 1-2 sentence blurb.
+              When present, this is the most useful "what is this place?"
+              text. Falls back to nothing (we don't fabricate) when
+              Google has no summary for this venue. */}
+          {editorialSummary && (
+            <div className="rounded-lg bg-amber-50 border border-amber-100 p-3">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-600 mb-1">
+                {pt ? "Sobre o lugar" : "About this place"}
+              </div>
+              <p className="text-sm text-gray-800 leading-relaxed">
+                {editorialSummary}
+              </p>
+            </div>
+          )}
+
+          {/* Friendly fallback when we have NEITHER creator note nor
+              editorial summary — beats showing a bare card with just
+              address + phone. Tells the user where to look for more. */}
+          {!creatorNote && !editorialSummary && (
+            <div className="rounded-lg bg-gray-50 border border-gray-100 p-3 text-xs text-gray-600 leading-relaxed">
+              {isExperience
+                ? (pt
+                    ? "Essa experiência foi citada no vídeo do criador. Veja o vídeo de origem para o contexto exato — o que recomendou, melhor horário, dicas práticas."
+                    : "This experience was mentioned in the source video. Check the original video for context — recommendations, best time, practical tips.")
+                : (pt
+                    ? "Sem descrição editorial pra esse lugar. Veja o vídeo de origem — o criador certamente comentou algo específico — ou abra no Google Maps pra reviews completos e fotos."
+                    : "No editorial description for this place. Watch the source video for the creator's take, or open it on Google Maps for full reviews and photos.")}
+            </div>
+          )}
+
           {address && (
             <Section icon="📍" label={pt ? "Endereço" : "Address"}>
               {address}
@@ -146,6 +230,78 @@ export default function PlaceDetailModal({ place, sourceUrl, onClose }) {
                 {place.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}
               </a>
             </Section>
+          )}
+
+          {/* Top reviews — what real visitors said, capped at 3 by the
+              backend so we don't drown the modal in opinions. Each review
+              is a quote-card with author + rating + relative time. */}
+          {topReviews.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                {pt ? "O que dizem" : "What people say"}
+              </div>
+              {topReviews.map((r, i) => (
+                <div
+                  key={`review-${i}`}
+                  className="rounded-lg bg-gray-50 border border-gray-100 p-2.5 text-xs"
+                >
+                  <div className="flex items-center gap-1.5 mb-1 text-[11px]">
+                    {r.rating != null && (
+                      <span className="text-amber-600 font-semibold">
+                        ★ {Number(r.rating).toFixed(1)}
+                      </span>
+                    )}
+                    <span className="font-medium text-gray-700 truncate">
+                      {r.author || (pt ? "Anônimo" : "Anonymous")}
+                    </span>
+                    {r.relative_time && (
+                      <span className="text-gray-400 truncate">
+                        · {r.relative_time}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-gray-700 leading-snug line-clamp-3">
+                    {r.text}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Quick-add buttons — when the parent passes dayPlans + onAddToDay,
+              the user can drop this place onto any day with a single click,
+              right from the modal. Replaces the "drag from map" gesture
+              that's awkward when the pin is far from the day list.
+              The day this place already belongs to (if any) shows as added,
+              so the user gets immediate feedback the click landed. */}
+          {dayPlans && dayPlans.length > 0 && onAddToDay && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                {pt ? "Adicionar a um dia" : "Add to a day"}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {dayPlans.map((dp) => {
+                  const isHere =
+                    addedDayId === dp.id || alreadyOnDayId === dp.id;
+                  return (
+                    <button
+                      key={dp.id}
+                      type="button"
+                      onClick={() => handleAddToDay(dp.id)}
+                      disabled={adding || isHere}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1 ${
+                        isHere
+                          ? "bg-emerald-500 text-white cursor-default"
+                          : "bg-coral-500 hover:bg-coral-600 text-white shadow-sm"
+                      } ${adding && !isHere ? "opacity-50 cursor-wait" : ""}`}
+                    >
+                      {isHere && <span>✓</span>}
+                      {pt ? "Dia" : "Day"} {dp.day_number}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           )}
 
           {!hasGeo && (

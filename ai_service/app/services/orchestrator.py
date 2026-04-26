@@ -1287,7 +1287,7 @@ Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
 "cities_detected": ["City1", "City2"],
 "profile_description": "MINIMUM 40 WORDS in PERFECT Brazilian Portuguese (pt-BR) with flawless grammar — proper accents (á, é, ã, õ, ô, ç, à), punctuation, and cedilla. MUST reference 2-3 specific places by NAME from the content. Example tone: 'Viajante com olhar curioso para bairros autênticos — o interesse por Palermo Soho e as ruas históricas de San Telmo revela alguém que valoriza descobertas locais e atmosfera. O estilo é urbano e ritmado, com espaço para cafés especiais e experiências gastronômicas.' Not a generic line; a vivid mini-portrait.",
 "profile_description_en": "Same 40+ word portrait in English. Equally warm, specific, and rich.",
-"places_mentioned": [{{"name": "Exact Place Name OR Experience", "source_url": "https://...", "day": null, "kind": "place" | "experience"}}],
+"places_mentioned": [{{"name": "Exact Place Name OR Experience", "source_url": "https://...", "day": null, "kind": "place" | "experience", "creator_note": "1-2 frases curtas em pt-BR resumindo o que o creator falou ESPECIFICAMENTE sobre esse lugar (do transcript ou caption — ex: 'Recomenda visitar à noite quando as luzes acendem, leve casaco', 'Disse que é o melhor café da cidade', 'Avisou que precisa reservar com 1 dia de antecedência'). Se o creator só citou o nome sem comentar, deixe string vazia. NUNCA invente — é só uma citação enxuta do que ELE disse."}}],
 "day_plans_from_links": [{{"day": 1, "places": ["Place A", "Place B", "Place C"], "source_url": "https://..."}}]}}
 
 IMPORTANT:
@@ -1534,7 +1534,7 @@ Common things that get skipped — check if any of these are present in the cont
 - Comma-chained mentions ("vá a A, B, C, D antes de...")
 
 Return a JSON array of ONLY the new entries (do NOT repeat anything from the list above):
-[{{"name": "Exact Name", "source_url": "https://... (use the --- Source: URL --- marker if visible)", "kind": "place" | "experience", "day": null}}]
+[{{"name": "Exact Name", "source_url": "https://... (use the --- Source: URL --- marker if visible)", "kind": "place" | "experience", "day": null, "creator_note": "1-2 frases em pt-BR do que o creator falou sobre esse lugar (vazia se ele só citou)"}}]
 
 If nothing was missed, return [].
 
@@ -1717,12 +1717,137 @@ async def _geocode_places_for_manual(
         merged["phone"] = d.get("phone")
         merged["website"] = d.get("website")
         merged["operating_hours"] = d.get("operating_hours") or {}
+        # Editorial summary + top reviews — these are what turn the modal
+        # from "address + phone" into a real "what is this place?" card.
+        # Both are best-effort: editorial_summary is empty for ~half of
+        # places, and reviews can be missing for new/small businesses.
+        merged["editorial_summary"] = d.get("editorial_summary") or ""
+        merged["top_reviews"] = d.get("top_reviews") or []
         types = d.get("types") or best.get("types") or []
         merged["category"] = _classify_place_category(types)
         return merged
 
     enriched = await asyncio.gather(*[_enrich_one(p) for p in places])
     return list(enriched)
+
+
+async def _backfill_place_extras(
+    places: list[dict],
+    places_client,
+) -> tuple[list[dict], int]:
+    """Backfill `editorial_summary` + `top_reviews` + richer details on
+    places that were enriched BEFORE those fields were added to the
+    schema. Trips built earlier in the product's life store places with
+    google_place_id + lat/lng but no editorial_summary — the modal
+    looks bare for them. This function takes those places, re-fetches
+    Google Places details (cheap: cached 24h, only `details` not
+    `search`), and merges in just the new fields without disturbing
+    anything else.
+
+    Idempotent + bounded: places that ALREADY have at least one of the
+    new fields populated are skipped, so calling this twice is a no-op
+    after the first run.
+
+    Returns (updated_places, count_backfilled).
+    """
+    if not places:
+        return places, 0
+
+    SEM = asyncio.Semaphore(5)
+    backfilled = 0
+
+    async def _backfill_one(p: dict) -> dict:
+        nonlocal backfilled
+        place_id = p.get("google_place_id")
+        if not place_id:
+            return p
+        # Already has the new fields — skip.
+        if p.get("editorial_summary") or p.get("top_reviews"):
+            return p
+        async with SEM:
+            try:
+                details = await places_client.get_details(place_id)
+            except Exception:
+                logger.exception("[backfill] details failed for %r", p.get("name"))
+                return p
+            if not details:
+                return p
+
+        merged = dict(p)
+        # Only overlay the NEW fields + anything that was missing.
+        # Don't touch lat/lng/rating — those were already correct.
+        if details.get("editorial_summary"):
+            merged["editorial_summary"] = details["editorial_summary"]
+        if details.get("top_reviews"):
+            merged["top_reviews"] = details["top_reviews"]
+        if not merged.get("operating_hours") and details.get("operating_hours"):
+            merged["operating_hours"] = details["operating_hours"]
+        if not merged.get("phone") and details.get("phone"):
+            merged["phone"] = details["phone"]
+        if not merged.get("website") and details.get("website"):
+            merged["website"] = details["website"]
+        if not merged.get("photo_url") and details.get("photos"):
+            merged["photo_url"] = details["photos"][0]
+            merged["photos"] = details["photos"]
+        if merged != p:
+            backfilled += 1
+        return merged
+
+    updated = await asyncio.gather(*[_backfill_one(p) for p in places])
+    return list(updated), backfilled
+
+
+async def reenrich_trip_places(trip_id: int, http_client=None) -> dict:
+    """Public entry point for the re-enrich flow. Fetches the trip,
+    backfills any places that lack the new detail fields, persists the
+    updated traveler_profile back to Rails. Cheap (cache-friendly) and
+    safe to call from the frontend on demand or as an auto-trigger.
+    """
+    rails = RailsClient(client=http_client)
+    trip = await rails.get_trip(trip_id)
+    if not trip:
+        return {"backfilled": 0, "skipped": "trip_not_found"}
+
+    profile = trip.get("traveler_profile") or {}
+    places = profile.get("places_mentioned") or []
+    if not places:
+        return {"backfilled": 0, "skipped": "no_places"}
+
+    # Cheap pre-check: if every place already has the new fields, no
+    # need to spin up a Places client at all.
+    needs_backfill = sum(
+        1 for p in places
+        if p.get("google_place_id")
+        and not p.get("editorial_summary")
+        and not p.get("top_reviews")
+    )
+    if needs_backfill == 0:
+        return {"backfilled": 0, "skipped": "all_current"}
+
+    places_client = GooglePlacesClient(http_client=http_client)
+    try:
+        updated, count = await _backfill_place_extras(places, places_client)
+    finally:
+        try:
+            await places_client.close()
+        except Exception:
+            pass
+
+    if count == 0:
+        return {"backfilled": 0, "skipped": "no_new_data"}
+
+    profile["places_mentioned"] = updated
+    try:
+        await rails.update_trip(trip_id, {"traveler_profile": profile})
+    except Exception:
+        logger.exception("[reenrich] failed to persist trip %d", trip_id)
+        return {"backfilled": 0, "skipped": "persist_failed"}
+
+    logger.info(
+        "[reenrich] trip=%d backfilled %d/%d places with editorial+reviews",
+        trip_id, count, len(places),
+    )
+    return {"backfilled": count, "total_places": len(places)}
 
 
 def _classify_place_category(types: list[str]) -> str:
@@ -5711,6 +5836,158 @@ async def _extract_link(
 
     logger.info("[eco] Phase 0 complete for link %d — content stored (%d chars)", link_id, len(content_text))
     return {"status": "extracted", "places_created": 0}
+
+
+async def merge_link_into_existing_trip(
+    link_id: int, trip_id: int, url: str, platform: str, http_client=None,
+) -> dict:
+    """Incremental path for a NEW link added to an already-built trip.
+
+    The user is on the trip page, drops in another video URL, and expects:
+      a) the new link's places to appear in the ExtractedPlacesPanel;
+      b) the existing itinerary + profile to stay UNTOUCHED.
+
+    This function does ONLY (a): it extracts the link's content, runs
+    Haiku to find named places + experiences, dedupes against the trip's
+    existing places_mentioned, and (in manual mode) geocodes the new ones
+    via Google Places so they get a card with photo/rating + a map pin.
+    It NEVER rewrites the itinerary or rebuilds — that would clobber
+    user-placed items and rerun Sonnet for no reason.
+
+    Idempotent: re-running on the same link is a no-op (places already
+    in the profile are skipped during dedup; google_place_id already set
+    is skipped during geocoding).
+
+    Returns a dict with `places_added` (count of NEW entries merged in).
+    """
+    rails = RailsClient(client=http_client)
+    cost = CostTracker(link_id=link_id)
+
+    # 1. Fetch the trip — we need the destination for analyze + the
+    # existing places_mentioned for dedup. If the trip isn't in a
+    # "confirmed" state yet, we let the regular extract_profile_and_build
+    # pipeline handle it (no merge — full analyze is more accurate).
+    trip = await rails.get_trip(trip_id)
+    if not trip:
+        logger.warning("[merge-link] trip %d not found", trip_id)
+        return {"places_added": 0, "skipped": "trip_not_found"}
+
+    if (trip.get("profile_status") or "") != "confirmed":
+        logger.info(
+            "[merge-link] trip %d not yet confirmed — skipping merge, regular pipeline owns it",
+            trip_id,
+        )
+        return {"places_added": 0, "skipped": "trip_not_confirmed"}
+
+    profile = trip.get("traveler_profile") or {}
+    existing_places = profile.get("places_mentioned") or []
+
+    # 2. Extract the link content. Mark it "processing" then "extracted"
+    # just like the standard path so the UI's link list reflects state.
+    try:
+        await rails.update_link(trip_id, link_id, status="processing")
+    except Exception:
+        logger.exception("[merge-link] failed to mark link %d as processing", link_id)
+
+    logger.info("[merge-link] extracting content for new link %s", url)
+    content_text = await _extract_content(url)
+    if not content_text.strip():
+        await _mark_failed(rails, trip_id, link_id, "No content extracted")
+        return {"places_added": 0, "skipped": "no_content"}
+
+    try:
+        await rails.update_link(
+            trip_id, link_id, status="extracted",
+            extracted_data={"content_text": content_text[:12000]},
+        )
+    except Exception:
+        logger.exception("[merge-link] failed to persist extracted content for link %d", link_id)
+
+    # 3. Tag the content with a Source marker so _analyze_profile can
+    # attribute the resulting places to this URL (the prompt looks for
+    # "--- Source: URL ---" delimiters).
+    tagged_content = f"--- Source: {url} ---\n{content_text}"
+
+    # 4. Haiku pass — what places does THIS link mention?
+    destination = trip.get("destination") or ""
+    try:
+        analysis = await _analyze_profile(tagged_content, destination, cost)
+    except Exception:
+        logger.exception("[merge-link] _analyze_profile failed for link %d", link_id)
+        return {"places_added": 0, "skipped": "analyze_failed"}
+
+    new_places_raw = (analysis or {}).get("places_mentioned") or []
+    if not new_places_raw:
+        logger.info("[merge-link] no places extracted from new link %s", url)
+        return {"places_added": 0, "skipped": "no_places"}
+
+    # 5. Dedup against the existing list. Match key = lowercase name.
+    # We're conservative: same name = same place, even if source_url
+    # differs (e.g. the same museum mentioned in two videos). The user
+    # would prefer one card linked to multiple sources over two duplicate
+    # cards on the panel.
+    existing_keys = {
+        (p.get("name") or "").strip().lower()
+        for p in existing_places
+        if (p.get("name") or "").strip()
+    }
+    merged_new: list[dict] = []
+    for p in new_places_raw:
+        if not isinstance(p, dict):
+            continue
+        name = (p.get("name") or "").strip()
+        if not name or name.lower() in existing_keys:
+            continue
+        # Force source_url to this link so the Panel groups it under
+        # the right "from this video" bucket — Haiku may have parroted
+        # a different value back.
+        merged = dict(p)
+        merged["source_url"] = url
+        merged_new.append(merged)
+        existing_keys.add(name.lower())
+
+    if not merged_new:
+        logger.info("[merge-link] all %d places already in trip — nothing new", len(new_places_raw))
+        return {"places_added": 0, "skipped": "all_duplicates"}
+
+    # 6. Manual mode: geocode the new places so cards + map pins look
+    # complete the moment the user sees them. Other modes don't need
+    # this (the build pipeline already enriched everything during the
+    # original run).
+    ai_mode = trip.get("ai_mode") or "manual"
+    if ai_mode == "manual":
+        places_client = GooglePlacesClient(http_client=http_client)
+        try:
+            merged_new = await _geocode_places_for_manual(
+                places=merged_new,
+                destination=destination,
+                places_client=places_client,
+            )
+        except Exception:
+            logger.exception("[merge-link] geocoding new places failed (non-fatal)")
+        finally:
+            try:
+                await places_client.close()
+            except Exception:
+                pass
+
+    # 7. Write the merged list back. Append (don't insert at the front)
+    # so the existing card numbering stays stable for the user — the
+    # new cards appear at the bottom of the panel under their own
+    # video group.
+    final_places = list(existing_places) + merged_new
+    profile["places_mentioned"] = final_places
+    try:
+        await rails.update_trip(trip_id, {"traveler_profile": profile})
+    except Exception:
+        logger.exception("[merge-link] failed to persist merged profile for trip %d", trip_id)
+        return {"places_added": 0, "skipped": "persist_failed"}
+
+    logger.info(
+        "[merge-link] trip=%d link=%d added %d new place(s) (was %d, now %d)",
+        trip_id, link_id, len(merged_new), len(existing_places), len(final_places),
+    )
+    return {"places_added": len(merged_new), "total_places": len(final_places)}
 
 
 async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:

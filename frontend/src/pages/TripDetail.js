@@ -22,7 +22,9 @@ import AskDestinationModal from "../components/modals/AskDestinationModal";
 import CityDistributionModal from "../components/modals/CityDistributionModal";
 import AddDayTripModal from "../components/modals/AddDayTripModal";
 import ExtractedPlacesPanel from "../components/trips/ExtractedPlacesPanel";
-import { updateTrip, triggerBuild, confirmCityDistribution, addDayTrip, manualAssist } from "../api/trips";
+import EditableTripHeader from "../components/trips/EditableTripHeader";
+import PlaceDetailModal from "../components/modals/PlaceDetailModal";
+import { updateTrip, triggerBuild, confirmCityDistribution, addDayTrip, manualAssist, reenrichTripPlaces } from "../api/trips";
 import PlaceSuggestions from "../components/itinerary/PlaceSuggestions";
 import FeedbackBox from "../components/itinerary/FeedbackBox";
 import ConflictsBanner from "../components/itinerary/ConflictsBanner";
@@ -68,6 +70,11 @@ export default function TripDetail() {
   // Tracks whether we've already run silent auto-enrichment on this trip
   // in this browser session, so navigating away and back doesn't re-run it.
   const autoEnrichedRef = useRef(false);
+  // Same idea for the places re-enrichment (editorial_summary + top_reviews
+  // backfill) — fires once per session per trip when we detect old-schema
+  // places. The endpoint itself is idempotent, but skipping the network
+  // round-trip when nothing's missing keeps things snappy.
+  const autoReenrichedRef = useRef(false);
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === "undefined") return "list";
     return localStorage.getItem("mapass.viewMode") || "timeline";
@@ -92,6 +99,14 @@ export default function TripDetail() {
   // Loading state for the "Assistência IA" button (only used in manual mode).
   const [aiAssistRunning, setAiAssistRunning] = useState(false);
   const [showAddDayTrip, setShowAddDayTrip] = useState(false);
+  // Place detail modal state — lifted out of ExtractedPlacesPanel so the
+  // SAME modal opens whether the user clicks a card in the panel or a pin
+  // on the map. `detailPlace` is the full place dict; `highlightedKey` is
+  // the place's google_place_id|name and is forwarded to TripMap +
+  // ExtractedPlacesPanel so they highlight + scroll the matching surface.
+  const [detailPlace, setDetailPlace] = useState(null);
+  const [highlightedPlaceKey, setHighlightedPlaceKey] = useState(null);
+  const [hoveredPlaceKey, setHoveredPlaceKey] = useState(null);
 
   // Build a fingerprint of all item IDs to detect changes (adds, deletes, reorders)
   const itemsFingerprint = useMemo(() => {
@@ -166,6 +181,75 @@ export default function TripDetail() {
       try { await fetchTrip(); } catch {}
     })();
   }, [trip, id, pipelinePhase, fetchTrip]);
+
+  // Auto-backfill rich place details (editorial_summary + top_reviews +
+  // opening hours) for trips built BEFORE those fields were added. We
+  // detect "old schema" places by checking for entries that have a
+  // google_place_id (so they WERE enriched) but no editorial_summary
+  // AND no top_reviews. The endpoint itself is idempotent — this guard
+  // just avoids the network round-trip when nothing needs backfill.
+  useEffect(() => {
+    if (!trip || !id) return;
+    if (autoReenrichedRef.current) return;
+    if (pipelinePhase === "generating" || pipelinePhase === "analyzing") return;
+
+    const places = trip?.traveler_profile?.places_mentioned || [];
+    if (places.length === 0) return;
+    const needsBackfill = places.some(
+      (p) =>
+        p?.google_place_id
+        && !p?.editorial_summary
+        && !(Array.isArray(p?.top_reviews) && p.top_reviews.length > 0),
+    );
+    if (!needsBackfill) return;
+
+    autoReenrichedRef.current = true;
+    (async () => {
+      try {
+        const result = await reenrichTripPlaces(id);
+        if (result?.backfilled > 0) {
+          await fetchTrip();
+        }
+      } catch {
+        // Silent — the cards already render fine without the new fields,
+        // they just look a bit bare. We'll try again next session.
+      }
+    })();
+  }, [trip, id, pipelinePhase, fetchTrip]);
+
+  // Place-detail modal handlers — declared at the top level (not inside
+  // any conditional) so React's hook ordering rule is respected even
+  // when the early returns below short-circuit the render. They each
+  // rely only on stable setters + addItem so the dependency lists stay
+  // tight.
+  const handlePlaceClick = useCallback((place) => {
+    if (!place) return;
+    setDetailPlace(place);
+    setHighlightedPlaceKey(place.google_place_id || place.name || null);
+  }, []);
+
+  const closePlaceDetail = useCallback(() => {
+    setDetailPlace(null);
+    // Keep highlightedPlaceKey set briefly so a reopen of the same
+    // place doesn't lose its scroll-into-view animation. The next
+    // hover/click will overwrite it.
+  }, []);
+
+  const handleAddPlaceToDay = useCallback(
+    async (place, dayPlanId) => {
+      if (!place || !dayPlanId) return;
+      await addItem(dayPlanId, {
+        name: place.name,
+        category: place.category || "attraction",
+        source: "link",
+        origin: "extracted_from_video",
+        source_url: place.source_url || null,
+      });
+      // Brief visual confirmation in the modal before it closes.
+      setTimeout(() => closePlaceDetail(), 600);
+    },
+    [addItem, closePlaceDetail],
+  );
 
   if (loading) {
     return (
@@ -428,6 +512,16 @@ export default function TripDetail() {
     }
   };
 
+  // Inline header edits: name + num_days. updateTrip throws on Rails
+  // validation failure (e.g. trying to shrink num_days when day 7 still
+  // has items) — we let the error bubble so EditableTripHeader can show
+  // it inline instead of swallowing it. fetchTrip after success refreshes
+  // day_plans to reflect any added/removed days from the model callback.
+  const handleSaveTripMeta = async (changes) => {
+    await updateTrip(trip.id, changes);
+    await fetchTrip();
+  };
+
   return (
     <div className="max-w-[1600px] mx-auto pb-16">
       {showProgressModal && (
@@ -522,24 +616,25 @@ export default function TripDetail() {
           </div>
         </div>
       )}
-      {/* Trip header */}
-      <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-4">
-        <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 transition-colors">
+      {/* Trip header — name + num_days are inline-editable so the user
+          can rename the project or adjust duration without leaving this
+          page. Adding more links uses the LinkInput below the header. */}
+      <div className="px-4 py-4 border-b border-gray-200 flex items-start gap-4">
+        <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 transition-colors mt-1 flex-shrink-0">
           {t("tripDetail.back")}
         </Link>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h1 className="text-xl font-bold text-gray-900">{trip.name}</h1>
-            {trip.is_staging && (
-              <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-200">
-                🧪 {lang === "pt-BR" ? "Teste" : "Staging"}
-              </span>
-            )}
-          </div>
-          <p className="text-sm text-gray-500">
-            {trip.destination}
-            {trip.num_days && ` · ${trip.num_days} ${t("tripDetail.days")}`}
-          </p>
+          <EditableTripHeader
+            name={trip.name}
+            numDays={trip.num_days}
+            isStaging={trip.is_staging}
+            onSave={handleSaveTripMeta}
+          />
+          {trip.destination && (
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
+              📍 {trip.destination}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {/* AI Assist button moved out of the header into the AiAssistBanner
@@ -600,8 +695,24 @@ export default function TripDetail() {
       {activeTab === "itinerary" && <div className="flex flex-col lg:flex-row">
         {/* Left panel: itinerary (rolls with the page, no inner scroll) */}
         <div className="w-full lg:w-3/5 p-4">
-          {/* Link input section */}
+          {/* Link input section — works at any time, even after the trip
+              has been built. Adding a new link triggers extraction on
+              that link only; the user can then drag the new places onto
+              days (manual mode) or run AI Assist again. */}
           <div className="mb-4">
+            <div className="flex items-baseline justify-between mb-1.5">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                {lang === "pt-BR" ? "Links de inspiração" : "Inspiration links"}
+              </h2>
+              {trip.links && trip.links.length > 0 && (
+                <span className="text-[11px] text-gray-400 tabular-nums">
+                  {trip.links.length}{" "}
+                  {lang === "pt-BR"
+                    ? trip.links.length === 1 ? "link" : "links"
+                    : trip.links.length === 1 ? "link" : "links"}
+                </span>
+              )}
+            </div>
             <LinkInput onSubmit={(url) => addLink(url)} />
             {trip.links && trip.links.length > 0 && (
               <LinkList links={trip.links} onDelete={(linkId) => removeLink(linkId)} />
@@ -753,7 +864,13 @@ export default function TripDetail() {
             <DragDropContext onDragEnd={handleDragEnd}>
               <div className={isManualMode ? "grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4" : ""}>
                 {isManualMode && (
-                  <ExtractedPlacesPanel trip={trip} />
+                  <ExtractedPlacesPanel
+                    trip={trip}
+                    onPlaceClick={handlePlaceClick}
+                    highlightedPlaceKey={highlightedPlaceKey}
+                    hoveredPlaceKey={hoveredPlaceKey}
+                    onPlaceHover={setHoveredPlaceKey}
+                  />
                 )}
                 <Droppable droppableId="trip-days" type="day">
                   {(dropProvided) => (
@@ -840,6 +957,8 @@ export default function TripDetail() {
               onMarkerClick={handleMarkerClick}
               hotelLodgings={(trip.lodgings || []).filter(l => l.latitude && l.longitude)}
               unassignedPlaces={unassignedPlaces}
+              onUnassignedPlaceClick={handlePlaceClick}
+              highlightedUnassignedKey={highlightedPlaceKey}
             />
           </div>
         </div>
@@ -902,6 +1021,34 @@ export default function TripDetail() {
             setShowItemForm(dayPlanId);
           }}
           onClose={() => setShowSuggestions(null)}
+        />
+      )}
+
+      {/* Place detail modal — opened either by clicking a card in
+          ExtractedPlacesPanel OR a pin on TripMap. The same modal is
+          shared between both surfaces and offers quick "add to day X"
+          buttons (when in manual mode and the place isn't already
+          on a day). The polling refresh will update the cards/map
+          afterward. */}
+      {detailPlace && (
+        <PlaceDetailModal
+          place={detailPlace}
+          onClose={closePlaceDetail}
+          dayPlans={isManualMode ? (trip.day_plans || []) : null}
+          onAddToDay={
+            isManualMode
+              ? (dayPlanId) => handleAddPlaceToDay(detailPlace, dayPlanId)
+              : null
+          }
+          alreadyOnDayId={(() => {
+            const target = (detailPlace.name || "").trim().toLowerCase();
+            const owner = (trip.day_plans || []).find((dp) =>
+              (dp.itinerary_items || []).some(
+                (i) => (i.name || "").trim().toLowerCase() === target,
+              ),
+            );
+            return owner?.id || null;
+          })()}
         />
       )}
 

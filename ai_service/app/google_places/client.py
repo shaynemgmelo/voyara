@@ -200,7 +200,13 @@ class GooglePlacesClient:
             "fields": (
                 "place_id,name,formatted_address,formatted_phone_number,"
                 "website,url,rating,user_ratings_total,price_level,"
-                "opening_hours,geometry,types,photos,reviews"
+                "opening_hours,geometry,types,photos,reviews,"
+                # editorial_summary = a short Google-curated description
+                # of the place (e.g. "Iconic 19th-century cathedral known
+                # for..."). When present, it's the single best blurb to
+                # show on the detail card — beats raw reviews for at-a-
+                # glance "what is this place?" framing.
+                "editorial_summary"
             ),
             "key": settings.google_places_api_key,
         }
@@ -241,6 +247,31 @@ class GooglePlacesClient:
                         f"&key={settings.google_places_api_key}"
                     )
 
+            # Top 3 reviews — text + author + rating + relative time. We
+            # cap at 3 so the cached payload stays small and the modal
+            # doesn't drown the user in a wall of opinions.
+            top_reviews = []
+            for r in (result.get("reviews") or [])[:3]:
+                text = (r.get("text") or "").strip()
+                if not text:
+                    continue
+                top_reviews.append({
+                    "author": r.get("author_name") or "",
+                    "rating": r.get("rating"),
+                    "relative_time": r.get("relative_time_description") or "",
+                    "text": text[:400],  # clamp long ones for storage hygiene
+                })
+
+            # editorial_summary may come back as either a string or as
+            # {"overview": "...", "language": "en"}. Normalize to a string.
+            es_raw = result.get("editorial_summary")
+            if isinstance(es_raw, dict):
+                editorial_summary = (es_raw.get("overview") or "").strip()
+            elif isinstance(es_raw, str):
+                editorial_summary = es_raw.strip()
+            else:
+                editorial_summary = ""
+
             details = {
                 "place_id": result.get("place_id"),
                 "name": result.get("name"),
@@ -257,6 +288,8 @@ class GooglePlacesClient:
                 "operating_hours": operating_hours,
                 "types": result.get("types", []),
                 "photos": photos,
+                "editorial_summary": editorial_summary,
+                "top_reviews": top_reviews,
                 "is_open_now": hours.get("open_now"),
             }
             # Cache the stable fields. is_open_now stays on the returned

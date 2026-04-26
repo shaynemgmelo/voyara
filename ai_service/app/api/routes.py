@@ -29,6 +29,8 @@ from app.services.orchestrator import (
     analyze_trip,
     build_trip_itinerary,
     extract_profile_and_build,
+    merge_link_into_existing_trip,
+    reenrich_trip_places,
     refine_itinerary,
     optimize_trip_routing,
     enrich_trip_with_experiences,
@@ -37,6 +39,7 @@ from app.services.orchestrator import (
     manual_assist_organize,
     FlexibleResearchUnavailable,
 )
+from app.services.rails_client import RailsClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -974,6 +977,37 @@ async def handle_manual_assist(trip_id: int):
         _manual_assist_inflight.discard(trip_id)
 
 
+_reenrich_inflight: set[int] = set()
+
+
+@router.post("/reenrich-places/{trip_id}")
+async def handle_reenrich_places(trip_id: int):
+    """Backfill editorial_summary, top_reviews, opening hours, etc. on
+    places_mentioned entries that were enriched BEFORE those fields
+    were added to the schema. Cheap (Google Places details endpoint is
+    cached 24h), idempotent (skips places that already have the new
+    fields), and safe to call from the frontend on trip-page mount.
+
+    Used when the user opens an old trip that still shows bare
+    "Address + Phone" cards — once this runs, the modal/cards repaint
+    with the rich descriptions + reviews on the next polling tick.
+
+    Sync because the work is fast (5 cached lookups per trip ≈ <1s).
+    Dedup-guarded against double-clicks / racing auto-triggers.
+    """
+    if trip_id in _reenrich_inflight:
+        return {"status": "already_running", "backfilled": 0}
+    _reenrich_inflight.add(trip_id)
+    try:
+        result = await reenrich_trip_places(trip_id)
+        return result
+    except Exception as e:
+        logger.exception("[reenrich] trip=%d failed", trip_id)
+        return {"error": str(e), "backfilled": 0}
+    finally:
+        _reenrich_inflight.discard(trip_id)
+
+
 @router.post("/clear-build/{trip_id}")
 async def handle_clear_build(trip_id: int):
     """Force-clears any active_builds entry for this trip, no questions
@@ -1030,18 +1064,61 @@ async def handle_build_status(trip_id: int):
 async def _process_link_background(
     link_id: int, trip_id: int, url: str, platform: str, ai_mode: str = "eco"
 ):
+    """Background task fired by /process-link.
+
+    Two paths depending on trip state:
+      - Trip not yet built (profile_status != "confirmed"): standard
+        per-link extraction. The Rails check_all_extracted callback
+        eventually triggers /analyze-trip when all links are done.
+      - Trip already built: incremental MERGE. Extract this link, run
+        Haiku on its content, dedupe + append the new places into the
+        existing traveler_profile.places_mentioned, and (in manual mode)
+        geocode them. Itinerary stays untouched.
+
+    The fork is decided at runtime by checking the trip's current
+    profile_status — that's the source of truth even if the front-end's
+    cached copy is stale.
+    """
     processing_status[link_id]["status"] = "processing"
 
     try:
-        result = await process_link(link_id, trip_id, url, platform, ai_mode=ai_mode)
-        processing_status[link_id] = {
-            "status": "completed",
-            "extracted_data": {
-                "places_created": result.get("places_created", 0),
-                "summary": result.get("summary", ""),
-            },
-            "processing_meta": result.get("cost", {}),
-        }
+        # Probe trip state before deciding which path to run.
+        trip_state = None
+        try:
+            rails = RailsClient()
+            trip_state = await rails.get_trip(trip_id)
+        except Exception:
+            logger.warning("[process-link] couldn't fetch trip %d state — defaulting to standard path", trip_id)
+
+        already_built = bool(
+            trip_state and (trip_state.get("profile_status") or "") == "confirmed"
+        )
+
+        if already_built:
+            logger.info(
+                "[process-link] trip %d already built — using incremental merge path for link %d",
+                trip_id, link_id,
+            )
+            result = await merge_link_into_existing_trip(
+                link_id, trip_id, url, platform,
+            )
+            processing_status[link_id] = {
+                "status": "completed",
+                "extracted_data": {
+                    "places_added": result.get("places_added", 0),
+                    "merge": True,
+                },
+            }
+        else:
+            result = await process_link(link_id, trip_id, url, platform, ai_mode=ai_mode)
+            processing_status[link_id] = {
+                "status": "completed",
+                "extracted_data": {
+                    "places_created": result.get("places_created", 0),
+                    "summary": result.get("summary", ""),
+                },
+                "processing_meta": result.get("cost", {}),
+            }
     except Exception as e:
         logger.exception("Failed to process link %d", link_id)
         processing_status[link_id] = {

@@ -132,6 +132,22 @@ export async function manualAssist(tripId) {
   return resp.json();
 }
 
+// Backfills editorial_summary + top_reviews + opening hours on trips
+// whose places were enriched BEFORE those fields were added to the
+// schema. Cheap (Google Places details cached 24h), idempotent, and
+// safe to call on every trip-page mount — the endpoint short-circuits
+// when no place is missing the new fields. Returns
+// {backfilled: number, total_places: number} on success, or
+// {skipped: "all_current"|"no_places"|"trip_not_found"} when nothing
+// to do.
+export async function reenrichTripPlaces(tripId) {
+  const resp = await fetch(`${AI_URL}/reenrich-places/${tripId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  return resp.json();
+}
+
 // User-confirmed multi-base distribution. Resumes the paused extract-and-build
 // pipeline on the AI service — backend sets city_distribution.status="confirmed"
 // and re-enters extract_profile_and_build, which now skips the pause and runs
