@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import httpx
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+# Initialise Sentry BEFORE FastAPI() and route imports so startup errors,
+# import-time crashes, and middleware exceptions are all captured. No-op
+# when SENTRY_DSN is unset (local dev, CI, etc.).
+if dsn := os.environ.get("SENTRY_DSN"):
+    sentry_sdk.init(
+        dsn=dsn,
+        integrations=[FastApiIntegration()],
+        traces_sample_rate=0.1,
+        environment=os.environ.get("RENDER_SERVICE_NAME", "local"),
+        release=os.environ.get("RENDER_GIT_COMMIT", "dev")[:7],
+        send_default_pii=False,
+    )
 
 from app.api.routes import router
 from app.api.whatsapp_routes import router as whatsapp_router
@@ -86,7 +102,6 @@ cors_origins = [
     "http://localhost:3002",
 ]
 # Add production origins from env
-import os
 extra_origins = os.environ.get("CORS_ORIGINS", "")
 if extra_origins:
     cors_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
