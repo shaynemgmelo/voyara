@@ -57,11 +57,17 @@ export default function TripMap({
   // instead of the small in-map InfoWindow. Lets us share the same
   // detail UI between card-click (panel) and pin-click (map).
   onUnassignedPlaceClick = null,
-  // Pool key (poolIndex or name) currently highlighted by the user —
-  // either because they hovered the corresponding card in the panel
-  // or because the panel is asking the map to draw attention to a
-  // specific pin (e.g. after card click → "show me on the map").
+  // Pool key (google_place_id || name) for a pin that should be drawn
+  // attention to because the user CLICKED the corresponding card. The
+  // map auto-pans to it (see useEffect below).
   highlightedUnassignedKey = null,
+  // Pool key for a pin that should be highlighted because the user is
+  // HOVERING the corresponding card right now. Lighter touch than
+  // highlighted (no pan) — just changes the marker style. Trip 43
+  // surfaced this as missing: hovering card #17 in the panel didn't
+  // glow pin #17 on the map, so the user couldn't see "this is where
+  // that card is" without clicking.
+  hoveredUnassignedKey = null,
 }) {
   const { t } = useLanguage();
   const { isLoaded } = useJsApiLoader({
@@ -252,9 +258,16 @@ export default function TripMap({
         // hover sync card→pin works.
         const placeKey = place.google_place_id || place.name;
         const itemKey = `unassigned-${placeKey || idx}`;
+        // Three triggers for highlight:
+        //  1. internal hover on the pin itself
+        //  2. user clicked the matching card in the panel (sticky
+        //     highlight + pan)
+        //  3. user is hovering the matching card right now (light
+        //     touch — just glows, no pan)
         const isHovered =
           hoveredItemId === itemKey
-          || (highlightedUnassignedKey && highlightedUnassignedKey === placeKey);
+          || (highlightedUnassignedKey && highlightedUnassignedKey === placeKey)
+          || (hoveredUnassignedKey && hoveredUnassignedKey === placeKey);
         return (
           <Marker
             key={itemKey}

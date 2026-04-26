@@ -152,8 +152,17 @@ export default function ExtractedPlacesPanel({
   ).length;
 
   return (
-    <aside className="rounded-2xl bg-white border border-gray-200 overflow-hidden flex flex-col h-fit sticky top-4">
-      <header className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
+    // Fixed-height sticky container so the inner scroll area always
+    // has explicit dimensions for the wheel event to act on. The old
+    // `h-fit + max-h-on-inner` combo was confusing the layout: aside
+    // sized to content while the inner div clipped, which made the
+    // wheel feel "dead" because the scrollable region was nested in
+    // an auto-sized parent. Now: aside has a hard max-h tied to
+    // viewport, header is flex-shrink-0, and the inner list takes
+    // flex-1 with overflow-y-auto — wheel events land on a region
+    // with a known height and just work.
+    <aside className="rounded-2xl bg-white border border-gray-200 overflow-hidden flex flex-col sticky top-4 max-h-[calc(100vh-2rem)]">
+      <header className="flex-shrink-0 px-4 py-3 border-b border-gray-100 flex items-center gap-2">
         <span className="text-lg">📌</span>
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-bold text-gray-900">
@@ -178,11 +187,13 @@ export default function ExtractedPlacesPanel({
           <div
             ref={provided.innerRef}
             {...provided.droppableProps}
-            // overscroll-auto (the default, made explicit): once the
-            // inner list reaches its top or bottom edge, the wheel
-            // event chains up to the page so the user keeps scrolling
-            // without having to reposition the cursor off the panel.
-            className="p-3 space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto overscroll-auto"
+            // flex-1 takes the remaining vertical space below the
+            // header. overscroll-contain keeps the wheel scrolling
+            // the panel locally — when the user is on the panel they
+            // want to scan the cards, not chain-scroll the page out
+            // from under them. touch-pan-y green-lights vertical
+            // touch swipes on mobile / trackpad.
+            className="flex-1 min-h-0 p-3 space-y-4 overflow-y-auto overscroll-contain touch-pan-y panel-scroll"
           >
             {placesMentioned.length === 0 && (
               <div className="px-4 py-8 text-center text-sm text-gray-400">

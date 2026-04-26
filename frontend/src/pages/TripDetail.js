@@ -959,6 +959,7 @@ export default function TripDetail() {
               unassignedPlaces={unassignedPlaces}
               onUnassignedPlaceClick={handlePlaceClick}
               highlightedUnassignedKey={highlightedPlaceKey}
+              hoveredUnassignedKey={hoveredPlaceKey}
             />
           </div>
         </div>
