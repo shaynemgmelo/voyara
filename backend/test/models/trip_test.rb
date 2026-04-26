@@ -239,4 +239,18 @@ class TripTest < ActiveSupport::TestCase
     result = controller.send(:strip_backend_owned_profile_fields, fields)
     fields.each { |k, v| assert_equal v, result[k] }
   end
+
+  # Pin the constant itself — behavior tests above would still pass if
+  # someone removed e.g. external_research_flexible from the list.
+  # This test fails loudly when the field-set drifts, forcing the author
+  # to update frontend/src/utils/profileFields.js in lockstep.
+  test "ProfileFieldGuard::BACKEND_OWNED_PROFILE_FIELDS contains the expected 8 fields" do
+    expected = %w[
+      places_mentioned day_plans_from_links
+      external_research external_research_flexible
+      destination_classification city_distribution
+      build_error validation_report
+    ]
+    assert_equal expected.sort, ProfileFieldGuard::BACKEND_OWNED_PROFILE_FIELDS.sort
+  end
 end
