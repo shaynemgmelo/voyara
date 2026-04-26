@@ -92,7 +92,10 @@ export default function ExtractedPlacesPanel({ trip }) {
 
   // Group places by source_url, preserving each place's GLOBAL index in
   // placesMentioned so the @hello-pangea/dnd Draggable index stays unique
-  // and consistent across the whole droppable.
+  // and consistent across the whole droppable. The 1-based poolIndex+1
+  // is also the number rendered on the card badge AND on the gray map
+  // pin — that pairing is what lets the user spot "card #5 is the pin
+  // in Recoleta" and decide which day it belongs on.
   const groups = useMemo(() => {
     const byUrl = new Map();
     placesMentioned.forEach((place, globalIndex) => {
@@ -241,23 +244,36 @@ export default function ExtractedPlacesPanel({ trip }) {
                               }`}
                             >
                               <div className="flex gap-2 p-2">
-                                {place.photo_url ? (
-                                  <img
-                                    src={place.photo_url}
-                                    alt=""
-                                    loading="lazy"
-                                    className="w-14 h-14 rounded-md object-cover flex-shrink-0 bg-gray-100"
-                                  />
-                                ) : (
-                                  <div
-                                    className={`w-14 h-14 rounded-md flex items-center justify-center text-xl flex-shrink-0 ${
-                                      hasGeo ? "bg-coral-50" : "bg-gray-100"
-                                    }`}
-                                    aria-hidden
-                                  >
-                                    {CATEGORY_ICONS[cat] || CATEGORY_ICONS.place}
-                                  </div>
-                                )}
+                                <div className="relative flex-shrink-0">
+                                  {place.photo_url ? (
+                                    <img
+                                      src={place.photo_url}
+                                      alt=""
+                                      loading="lazy"
+                                      className="w-14 h-14 rounded-md object-cover bg-gray-100"
+                                    />
+                                  ) : (
+                                    <div
+                                      className={`w-14 h-14 rounded-md flex items-center justify-center text-xl ${
+                                        hasGeo ? "bg-coral-50" : "bg-gray-100"
+                                      }`}
+                                      aria-hidden
+                                    >
+                                      {CATEGORY_ICONS[cat] || CATEGORY_ICONS.place}
+                                    </div>
+                                  )}
+                                  {/* Pool number badge — matches the
+                                      number on the gray map pin so the
+                                      user can pair card ↔ pin visually. */}
+                                  {hasGeo && !used && (
+                                    <span
+                                      className="absolute -top-1.5 -left-1.5 min-w-[20px] h-[20px] px-1 rounded-full bg-gray-700 text-white text-[10px] font-bold flex items-center justify-center shadow-sm border-2 border-white"
+                                      title={pt ? `#${globalIndex + 1} no mapa` : `#${globalIndex + 1} on the map`}
+                                    >
+                                      {globalIndex + 1}
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-start justify-between gap-1">
                                     <div className="font-semibold text-gray-900 leading-snug truncate text-[13px]">

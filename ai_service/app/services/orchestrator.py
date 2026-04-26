@@ -1153,12 +1153,26 @@ Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
 "day_plans_from_links": [{{"day": 1, "places": ["Place A", "Place B", "Place C"], "source_url": "https://..."}}]}}
 
 IMPORTANT:
-- places_mentioned: Extract ABSOLUTELY EVERYTHING the creator mentions or shows — both named PLACES and named EXPERIENCES. This list is the spine of the user's manual itinerary; anything missing here can never appear as a card. BE EXHAUSTIVE — pass through transcript AND on-screen text twice if needed. A typical 1-minute travel video has 8-15 entries; a 3-minute one has 20-30+. If you returned fewer than what's clearly named, you missed some.
-   • PLACES (kind="place"): restaurants, cafes, attractions, parks, markets, hotels, bars, viewpoints, beaches, neighborhoods, museums, monuments, shops, plazas, bridges, churches, theaters, etc. Use the EXACT name shown ("In-N-Out Burger", "Griffith Observatory", "Café de Flore"). Generic mentions like "a nice cafe" don't count.
-   • EXPERIENCES (kind="experience"): bookable activities the creator highlighted — "experiência de tango", "passeio de barco ao pôr do sol com open bar", "aula de culinária", "show no Café Tortoni", "tour guiado pelo Cemitério da Recoleta", "trilha noturna", "passeio de balão", "jantar gourmet com música ao vivo". These deserve their own card because they're concrete things the user can book or do, even when there isn't a single physical address. Name them descriptively in the same language as the source ("Passeio de barco ao pôr do sol no Rio de la Plata", not "boat ride").
+- places_mentioned: Extract ABSOLUTELY EVERYTHING the creator mentions or shows — both named PLACES and named EXPERIENCES. This list is the spine of the user's manual itinerary; anything missing here can never appear as a card. BE EXHAUSTIVE — pass through transcript AND on-screen text TWICE if needed. A typical 1-minute travel video has 8-15 entries; a 3-minute one has 20-30+. If you returned fewer than what's clearly named, you missed some — RE-READ AND ADD THEM.
+
+   GOLDEN RULE: When in doubt, INCLUDE IT. The user can always delete a card; they cannot magically resurrect one you skipped.
+
+   • PLACES (kind="place"): restaurants, cafes, attractions, parks, markets, hotels, bars, viewpoints, beaches, neighborhoods, museums, monuments, shops, plazas, bridges, churches, theaters, observation decks, lookouts, ferries/boats with name, etc. Use the EXACT name shown ("In-N-Out Burger", "Griffith Observatory", "Café de Flore"). Generic mentions like "a nice cafe" don't count BUT a generic-but-located reference DOES — see below.
+
+   • EXPERIENCES (kind="experience"): activities the creator highlighted that the user could plausibly book, do, or seek out, EVEN if no specific venue is named. These ALL deserve cards:
+     - Meal recommendations tied to a NEIGHBORHOOD or AREA: "Jantar em Palermo" (dinner in Palermo), "Almoço na Recoleta" (lunch in Recoleta), "café da manhã em San Telmo". Each one = ONE card. Do NOT skip just because no specific restaurant is named — the creator literally said "have dinner here", that's a card.
+     - Cultural / nightlife experiences: "Show de tango", "experiência de tango em milonga", "tour guiado pelo cemitério", "aula de culinária", "passeio de barco ao pôr do sol", "passeio de balão", "open bar cruise", "noite em bares secretos de Palermo".
+     - Time-of-day-specific suggestions count: "Obelisco à noite" is its own card distinct from any earlier "Obelisco" mention. "Pôr do sol no mirante", "Sunrise hike".
+     - Statues, monuments, public art the creator filmed: "Estátua gigante do Maradona", "Wall of Love", "Flor metálica gigante".
+     - Choices ("OU" / "OR"): when the creator says "visit X OR Y", BOTH X and Y go in as separate cards. Never collapse alternatives into one entry.
+     - Chained mentions in a single sentence: "depois siga para A, B e C, antes de jantar em D" → A, B, C, D are FOUR separate cards.
+     - Name them descriptively in the source's language ("Show de tango em milonga tradicional", "Jantar em Palermo", not "have dinner").
+
    • Map each entry to its source URL (use the "--- Source: URL ---" headers in the content).
    • If the same place appears across multiple videos, include it ONCE with the first source URL — dedup is downstream's job, but yours is to not skip.
    • If a place/experience is assigned to a specific day in the content, include "day": <number>.
+
+   SELF-CHECK BEFORE RETURNING: count how many distinct named things appear in the transcript + on-screen text. If your places_mentioned list is more than 30% smaller than that count, GO BACK and add the ones you skipped.
 - day_plans_from_links: If the content contains a PRE-PLANNED day-by-day itinerary (e.g., "Day 1: visit X, Y, Z" or "First day: we went to A, B, C"), extract the COMPLETE day structure here. Each entry = one day with its ordered list of place names. This is CRITICAL — when someone shares a complete travel plan, we MUST respect their exact day grouping. If the content is NOT organized by days (just a list of recommendations), leave this as an empty array [].
 - cities_detected: List ONLY truly distinct cities/destinations that are far apart and require separate travel days (e.g., "Las Vegas" and "Zion National Park", or "Los Angeles" and "Joshua Tree").
   CRITICAL: Neighborhoods, districts, and nearby areas within the SAME metro area are NOT separate cities. For example: Venice, Santa Monica, Beverly Hills, Hollywood, Malibu are all part of "Los Angeles" — do NOT list them separately. Similarly, Brooklyn and Manhattan are both "New York City". Only list a place as a separate city if it's truly a different destination requiring 1+ hour of travel (like a national park, another city, etc.).
@@ -1178,16 +1192,18 @@ Content from multiple sources:
                 asyncio.to_thread(
                     lambda: client.messages.create(
                         model="claude-haiku-4-5-20251001",
-                        # 4096 (was 2048) so a video with 25-30 named places +
-                        # experiences doesn't get truncated mid-list. Trip 41
-                        # surfaced this: video had ~32 mentions, only 23 made
-                        # it to places_mentioned because the JSON ended early.
-                        max_tokens=4096,
+                        # 8192 — Haiku is non-deterministic about which
+                        # places it picks. With more headroom AND the
+                        # exhaustive checklist in the prompt, it has to
+                        # actively justify dropping anything. Trip 41
+                        # at 4096 was missing Caminito, Obelisco,
+                        # Mercado San Telmo etc. that were clearly named.
+                        max_tokens=8192,
                         messages=[{"role": "user", "content": prompt}],
-                        timeout=45.0,
+                        timeout=60.0,
                     )
                 ),
-                timeout=50.0,
+                timeout=65.0,
             )
             cost.record_usage(response.usage)
             raw = response.content[0].text if response.content else "{}"
@@ -1236,6 +1252,64 @@ Content from multiple sources:
                 "[profile] Profile parsed successfully with %d places mentioned",
                 len(parsed.get("places_mentioned", [])),
             )
+
+            # PER-LINK COMPLETENESS PASS. Haiku is non-deterministic about
+            # which places it captures from combined content — Trip 41 hit
+            # this with 17→27→30 across different runs of the same input.
+            # Solution: after the combined pass, run a focused completeness
+            # pass for EACH link independently. Each call sees just one
+            # video's content + the global "already" list, and returns the
+            # entries it thinks were missed for THAT specific video. Runs
+            # in parallel so total latency stays close to a single call.
+            #
+            # Triggers whenever content is substantial — there's no good
+            # reason to skip the safety net once we already paid for the
+            # first pass.
+            if len(content_text) > 3000:
+                try:
+                    per_link = _split_content_by_source(content_text)
+                    if per_link:
+                        tasks = [
+                            _haiku_completeness_pass(
+                                content_text=chunk,
+                                already=deduped,
+                                cost=cost,
+                            )
+                            for chunk in per_link
+                        ]
+                        extras_per_link = await asyncio.gather(
+                            *tasks, return_exceptions=True,
+                        )
+                        before = len(deduped)
+                        seen = set(seen_norms)
+                        for extras in extras_per_link:
+                            if isinstance(extras, Exception):
+                                logger.warning(
+                                    "[profile] per-link completeness pass raised: %s",
+                                    extras,
+                                )
+                                continue
+                            for p in extras or []:
+                                n = (p.get("name") or "").strip()
+                                if not n:
+                                    continue
+                                norm = _normalize_place_name(n)
+                                if not norm or norm in seen:
+                                    continue
+                                seen.add(norm)
+                                deduped.append(p)
+                        if len(deduped) > before:
+                            logger.info(
+                                "[profile] per-link completeness pass added "
+                                "%d → total %d places",
+                                len(deduped) - before, len(deduped),
+                            )
+                            parsed["places_mentioned"] = deduped
+                except Exception:
+                    logger.exception(
+                        "[profile] per-link completeness pass failed (non-fatal)"
+                    )
+
             return parsed
 
         logger.warning("[profile] Failed to parse profile response (attempt %d). Raw: %s", attempt + 1, raw[:300])
@@ -1249,6 +1323,109 @@ Content from multiple sources:
     fallback["day_plans_from_links"] = []
     logger.warning("[profile] Using synthesized fallback profile for %s", destination)
     return fallback
+
+
+def _split_content_by_source(content_text: str) -> list[str]:
+    """Split aggregated content (joined by `--- Source: URL ---` markers)
+    into per-link chunks. Each chunk keeps its own marker as the first
+    line so the per-link completeness pass knows which source_url to
+    attach to its findings.
+
+    Returns the chunks in original order. If no markers are found, returns
+    a single-element list with the full content (degenerate case — old
+    code path or single-link trip without a header).
+    """
+    if not content_text:
+        return []
+    marker = "--- Source:"
+    if marker not in content_text:
+        return [content_text] if content_text.strip() else []
+    parts = content_text.split(marker)
+    chunks: list[str] = []
+    for p in parts:
+        if not p.strip():
+            continue
+        # Re-attach the marker we stripped during split so each chunk is
+        # self-contained and the model can grab the URL from the first line.
+        chunks.append(f"{marker}{p}")
+    return chunks
+
+
+async def _haiku_completeness_pass(
+    content_text: str,
+    already: list[dict],
+    cost: CostTracker,
+) -> list[dict]:
+    """Second Haiku call that ONLY asks: "given this content and the list
+    of places we already extracted, what did we miss?" Returns a list of
+    NEW entries (caller dedups them in).
+
+    Defense against Haiku non-determinism — the first pass might've
+    skipped Caminito or Obelisco simply because the model got lazy near
+    its token limit. This pass forces it to look again with the prior
+    list staring it in the face.
+    """
+    if not content_text or not already:
+        return []
+
+    already_names = "\n".join(f"  - {p.get('name')}" for p in already if p.get("name"))
+    prompt = f"""You are auditing a place-extraction pass for completeness.
+
+Below is travel video content + the list of places that were already extracted from it. Your job is ONLY to find the ones that were MISSED.
+
+Already extracted ({len(already)} places):
+{already_names}
+
+Common things that get skipped — check if any of these are present in the content but NOT in the list above:
+- Specific named neighborhoods to walk through (e.g. "passe pelo Palermo", "explore San Telmo")
+- Markets and bazaars (Mercado X, Feira Y)
+- Specific museums (Malba, MoMA, Louvre, etc.) — even when mentioned as "OR"
+- Iconic monuments (Obelisco, Eiffel Tower, Cristo Redentor)
+- Statues and public art (loja gigante do Maradona, Wall of Love)
+- Time-of-day-specific suggestions ("Obelisco à noite" if not already)
+- Meals tied to a neighborhood ("almoço em Recoleta", "jantar em Palermo")
+- Generic experiences with concrete framing ("show de tango", "passeio de barco com open bar")
+- Choices: when the creator says "X OU Y", BOTH go in
+- Comma-chained mentions ("vá a A, B, C, D antes de...")
+
+Return a JSON array of ONLY the new entries (do NOT repeat anything from the list above):
+[{{"name": "Exact Name", "source_url": "https://... (use the --- Source: URL --- marker if visible)", "kind": "place" | "experience", "day": null}}]
+
+If nothing was missed, return [].
+
+Content:
+{content_text[:6000]}"""
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=40.0,
+                )
+            ),
+            timeout=45.0,
+        )
+        cost.record_usage(response.usage)
+    except (asyncio.TimeoutError, Exception):
+        logger.warning("[profile] completeness pass call failed")
+        return []
+
+    raw = response.content[0].text if response.content else "[]"
+    parsed = _parse_json_response(raw)
+    if isinstance(parsed, list):
+        # Filter to dict entries with at least a name.
+        out = [p for p in parsed if isinstance(p, dict) and (p.get("name") or "").strip()]
+        return out
+    if isinstance(parsed, dict) and isinstance(parsed.get("places_mentioned"), list):
+        return [
+            p for p in parsed["places_mentioned"]
+            if isinstance(p, dict) and (p.get("name") or "").strip()
+        ]
+    return []
 
 
 def _enrich_weak_profile(parsed: dict, destination: str) -> None:

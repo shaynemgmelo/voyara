@@ -204,38 +204,54 @@ export default function TripMap({
         );
       })}
 
-      {/* Unassigned (manual mode): gray pins for places extracted from
-          videos that the user hasn't yet dragged onto a day. Hidden when
-          a specific day is selected — those views are about that day's
-          route, not the broader pool. */}
-      {!selectedDayNumber && geocodedUnassigned.map((place, idx) => (
-        <Marker
-          key={`unassigned-${place.google_place_id || place.name || idx}`}
-          position={{
-            lat: parseFloat(place.latitude),
-            lng: parseFloat(place.longitude),
-          }}
-          icon={{
-            path: window.google.maps.SymbolPath.CIRCLE,
-            fillColor: "#9ca3af",
-            fillOpacity: 0.85,
-            strokeColor: "#ffffff",
-            strokeWeight: 2,
-            scale: 9,
-          }}
-          title={place.name}
-          onClick={() => {
-            setInfoItem({
-              ...place,
-              id: `unassigned-${idx}`,
-              day_number: null,
-              day_index: null,
-            });
-            setHotelInfo(null);
-          }}
-          zIndex={0}
-        />
-      ))}
+      {/* Unassigned (manual mode): NUMBERED gray pins for places extracted
+          from videos that the user hasn't yet dragged onto a day. The
+          number on each pin matches the badge on the card in the
+          ExtractedPlacesPanel sidebar — that way the user can see "this
+          pin in Recoleta is card #5" and decide which day it belongs on.
+          Hidden when a specific day is selected (filtered to that day's
+          colored markers). Hovered/selected pins highlight with white ring.
+      */}
+      {!selectedDayNumber && geocodedUnassigned.map((place, idx) => {
+        // 1-indexed for display — humans count from 1.
+        const pinNumber = (place.poolIndex ?? idx) + 1;
+        const itemKey = `unassigned-${place.google_place_id || place.name || idx}`;
+        const isHovered = hoveredItemId === itemKey;
+        return (
+          <Marker
+            key={itemKey}
+            position={{
+              lat: parseFloat(place.latitude),
+              lng: parseFloat(place.longitude),
+            }}
+            label={{
+              text: String(pinNumber),
+              color: "#fff",
+              fontSize: isHovered ? "13px" : "10px",
+              fontWeight: "bold",
+            }}
+            icon={{
+              path: window.google.maps.SymbolPath.CIRCLE,
+              fillColor: isHovered ? "#525252" : "#737373",
+              fillOpacity: 0.95,
+              strokeColor: "#ffffff",
+              strokeWeight: isHovered ? 3 : 2,
+              scale: isHovered ? 13 : 10,
+            }}
+            title={`#${pinNumber} ${place.name}`}
+            onClick={() => {
+              setInfoItem({
+                ...place,
+                id: itemKey,
+                day_number: null,
+                day_index: null,
+              });
+              setHotelInfo(null);
+            }}
+            zIndex={isHovered ? 997 : 0}
+          />
+        );
+      })}
 
       {/* Hotel markers — always visible */}
       {hotelLodgings.map((hotel) => (

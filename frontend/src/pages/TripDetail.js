@@ -393,6 +393,10 @@ export default function TripDetail() {
   // Filtered against current itinerary item names so a place that was
   // dragged disappears from the gray-pin pool and reappears as a colored
   // day-pin instantly.
+  //
+  // poolIndex is attached BEFORE filtering so the number on each card
+  // stays stable as items are dragged out — card #5 stays #5 even after
+  // cards #1-4 disappear, matching what the user sees on the map.
   const unassignedPlaces = (() => {
     if (!isManualMode) return [];
     const placesMentioned = trip?.traveler_profile?.places_mentioned || [];
@@ -403,9 +407,9 @@ export default function TripDetail() {
         usedNames.add((it.name || "").trim().toLowerCase());
       });
     });
-    return placesMentioned.filter(
-      (p) => !usedNames.has((p.name || "").trim().toLowerCase()),
-    );
+    return placesMentioned
+      .map((p, idx) => ({ ...p, poolIndex: idx }))
+      .filter((p) => !usedNames.has((p.name || "").trim().toLowerCase()));
   })();
   const handleAiAssist = async () => {
     if (aiAssistRunning) return;
