@@ -1,4 +1,6 @@
 class Api::V1::TripsController < ApplicationController
+  include JsonColumnMerge
+
   before_action :authenticate_user!, except: [:shared]
   before_action :set_trip, only: [:show, :update, :destroy, :share, :unshare, :build]
 
@@ -35,11 +37,12 @@ class Api::V1::TripsController < ApplicationController
     # interests, etc.), and Rails merges those into the existing
     # traveler_profile JSON without touching backend-managed keys
     # (places_mentioned, day_plans_from_links, external_research, etc.).
+    # See JsonColumnMerge concern for nil-handling semantics.
     permitted = trip_params
-    if permitted[:traveler_profile].present? && @trip.traveler_profile.present?
+    if permitted[:traveler_profile].present?
       permitted = permitted.to_h
-      permitted["traveler_profile"] = @trip.traveler_profile.deep_merge(
-        permitted["traveler_profile"].to_h,
+      permitted["traveler_profile"] = merge_json_column(
+        @trip.traveler_profile, permitted["traveler_profile"],
       )
     end
 
