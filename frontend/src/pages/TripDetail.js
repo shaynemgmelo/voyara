@@ -36,6 +36,7 @@ import TripShareModal from "../components/trip/TripShareModal";
 import { getTravelTimes, recalculateSchedule } from "../api/dayPlans";
 import { optimizeTripRouting, enrichTripExperiences } from "../api/optimize";
 import { useLanguage } from "../i18n/LanguageContext";
+import { buildItineraryItemPayload } from "../utils/itineraryItemPayload";
 
 export default function TripDetail() {
   const { id } = useParams();
@@ -261,34 +262,9 @@ export default function TripDetail() {
   const handleAddPlaceToDay = useCallback(
     async (place, dayPlanId) => {
       if (!place || !dayPlanId) return;
-      // Same field-set the drag-drop path now sends — must propagate
-      // every Google-Places field so the new itinerary_item gets a map
-      // pin + rich card. Trip 44 surfaced the bug where dragged items
-      // landed without lat/lng and the pin silently disappeared.
-      const VALID_CATS = new Set([
-        "restaurant", "attraction", "hotel", "transport", "activity",
-        "shopping", "cafe", "nightlife", "other",
-      ]);
-      const rawCat = (place.category || "").trim().toLowerCase();
-      const category = VALID_CATS.has(rawCat) ? rawCat : "attraction";
-      await addItem(dayPlanId, {
-        name: place.name,
-        category,
-        source: "link",
+      await addItem(dayPlanId, buildItineraryItemPayload(place, {
         origin: "extracted_from_video",
-        source_url: place.source_url || null,
-        latitude: place.latitude ?? null,
-        longitude: place.longitude ?? null,
-        address: place.address ?? null,
-        google_place_id: place.google_place_id ?? null,
-        google_rating: place.rating ?? null,
-        google_reviews_count: place.reviews_count ?? null,
-        photos: Array.isArray(place.photos) ? place.photos : (place.photo_url ? [place.photo_url] : []),
-        phone: place.phone ?? null,
-        website: place.website ?? null,
-        operating_hours: place.operating_hours ?? {},
-        pricing_info: place.pricing ?? null,
-      });
+      }));
       // Brief visual confirmation in the modal before it closes.
       setTimeout(() => closePlaceDetail(), 600);
     },
@@ -382,36 +358,11 @@ export default function TripDetail() {
       const place =
         (!Number.isNaN(idxFromDrag) && candidates[idxFromDrag])
         || candidates.find((p) => (p?.name || "") === name);
-      // Mirror category to a valid Rails CATEGORY_OPTIONS value (the
-      // panel/Google may emit "place" which Rails rejects). Falls back
-      // to "attraction" — same default _build_assist_item uses.
-      const VALID = new Set([
-        "restaurant", "attraction", "hotel", "transport", "activity",
-        "shopping", "cafe", "nightlife", "other",
-      ]);
-      const rawCat = (place?.category || "").trim().toLowerCase();
-      const category = VALID.has(rawCat) ? rawCat : "attraction";
-      addItem(destDayId, {
-        name,
-        category,
-        source: "link",
+      // Use the place dict if found; otherwise fall back to bare name so
+      // the item is created even when the enriched entry is missing.
+      addItem(destDayId, buildItineraryItemPayload(place || { name }, {
         origin: "extracted_from_video",
-        source_url: place?.source_url || null,
-        // Geo + Google Places fields — these are what make the pin
-        // appear on the map and the rich card render properly. Rails
-        // accepts every key here via the itinerary_items permit list.
-        latitude: place?.latitude ?? null,
-        longitude: place?.longitude ?? null,
-        address: place?.address ?? null,
-        google_place_id: place?.google_place_id ?? null,
-        google_rating: place?.rating ?? null,
-        google_reviews_count: place?.reviews_count ?? null,
-        photos: Array.isArray(place?.photos) ? place.photos : (place?.photo_url ? [place.photo_url] : []),
-        phone: place?.phone ?? null,
-        website: place?.website ?? null,
-        operating_hours: place?.operating_hours ?? {},
-        pricing_info: place?.pricing ?? null,
-      });
+      }));
       return;
     }
 

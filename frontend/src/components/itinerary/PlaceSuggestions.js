@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { getSmartSuggestions } from "../../api/dayPlans";
 import { useLanguage } from "../../i18n/LanguageContext";
 import { categoryIcon } from "../../utils/formatters";
+import { buildItineraryItemPayload } from "../../utils/itineraryItemPayload";
 
 export default function PlaceSuggestions({ tripId, dayPlanId, onAdd, onManualAdd, onClose }) {
   const { t } = useLanguage();
@@ -28,16 +29,18 @@ export default function PlaceSuggestions({ tripId, dayPlanId, onAdd, onManualAdd
   const handleAdd = async (suggestion) => {
     setAddingId(suggestion.place_id);
     try {
-      await onAdd({
-        name: suggestion.name,
-        category: suggestion.category || "attraction",
-        google_place_id: suggestion.place_id,
-        google_rating: suggestion.rating,
-        latitude: suggestion.latitude,
-        longitude: suggestion.longitude,
-        address: suggestion.address,
-        photos: suggestion.photo ? [suggestion.photo] : [],
-      });
+      // Map Google Places API field names to our internal convention so
+      // buildItineraryItemPayload can normalise them correctly.
+      await onAdd(buildItineraryItemPayload(
+        {
+          ...suggestion,
+          // place_id → google_place_id (builder passes through google_place_id)
+          google_place_id: suggestion.place_id,
+          // photo → photo_url (builder picks up photo_url when photos is absent)
+          photo_url: suggestion.photo,
+        },
+        { origin: "ai_suggested" },
+      ));
       // Remove from list after adding
       setSuggestions((prev) => prev.filter((s) => s.place_id !== suggestion.place_id));
     } finally {
