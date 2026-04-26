@@ -5445,24 +5445,39 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
         # rating, address, category) AND drop pins on the map BEFORE the
         # user assigns them to a day. Without this, manual mode would show
         # naked place names — useless for "drag onto a day" UX.
+        #
+        # IMPORTANT: re-fetch the trip here. The classifier block above is
+        # skipped for manual (it's gated on ai_mode != "manual"), so the
+        # `refreshed_profile` local from that block doesn't exist on this
+        # path. Using it would raise UnboundLocalError, which the broad
+        # except below would swallow as "non-fatal" — and the cards would
+        # silently stay naked. Trip 41 surfaced exactly this bug.
         try:
-            enriched = await _geocode_places_for_manual(
-                places=refreshed_profile.get("places_mentioned") or [],
-                destination=trip.get("destination") or "",
-                places_client=places,
-            )
-            if enriched:
-                refreshed_profile["places_mentioned"] = enriched
-                await rails.update_trip(
-                    trip_id, {"traveler_profile": refreshed_profile},
+            refreshed_for_manual = await rails.get_trip(trip_id)
+            manual_profile = refreshed_for_manual.get("traveler_profile") or {}
+            manual_places = manual_profile.get("places_mentioned") or []
+            if manual_places:
+                enriched = await _geocode_places_for_manual(
+                    places=manual_places,
+                    destination=trip.get("destination") or "",
+                    places_client=places,
                 )
-                _mark(
-                    f"manual mode — enriched {len(enriched)} places with "
-                    f"Google data"
+                if enriched:
+                    manual_profile["places_mentioned"] = enriched
+                    await rails.update_trip(
+                        trip_id, {"traveler_profile": manual_profile},
+                    )
+                    _mark(
+                        f"manual mode — enriched {len(enriched)} places with "
+                        f"Google data"
+                    )
+            else:
+                logger.warning(
+                    "[combined] manual enrichment skipped — no places_mentioned"
                 )
         except Exception:
-            # Non-fatal. The user still gets the bare names on cards;
-            # they just won't have photos/pins until they refine manually.
+            # Non-fatal but loudly logged with full traceback so we can SEE
+            # when enrichment quietly degrades to bare cards.
             logger.exception("[combined] manual enrichment failed (non-fatal)")
         _mark("manual mode — skipping itinerary build")
         return {
