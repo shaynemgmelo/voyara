@@ -62,6 +62,26 @@ async def process_link(
 async def _extract_content(url: str, deep: bool = True) -> str:
     """Extract text content from URL.
 
+    Returns a STRUCTURED content_text with each source clearly delimited:
+        [CAPTION]
+        ...post description / oEmbed title...
+
+        [TRANSCRIPT]
+        ...what's said in the audio (Whisper)...
+
+        [ON-SCREEN TEXT]
+        ...text shown on the video frames (vision OCR)...
+
+        [COMMENTS]
+        ...top comments if available...
+
+    Each section appears AT MOST ONCE. Trip 41 surfaced this as a real
+    bug: extractors were stuffing the caption into title + description +
+    captions[0], then the join here produced the same caption three
+    times — wasting tokens and biasing the Haiku away from transcript +
+    on-screen text. Now we deduplicate before joining so each source
+    contributes exactly its unique content.
+
     Args:
         deep: when True, extractors run transcription + vision OCR in
               addition to caption/oEmbed (slow, used in background trip
@@ -80,12 +100,11 @@ async def _extract_content(url: str, deep: bool = True) -> str:
                 # parallel → ~95s clock. 240s absorbs cold start.
                 timeout = 240 if deep else 15
                 content = await asyncio.wait_for(ext.extract(url), timeout=timeout)
-                parts = [content.title or "", content.description or ""]
-                if content.captions:
-                    parts.append(" ".join(content.captions[:50]))
-                if content.comments:
-                    parts.append(" ".join(content.comments[:10]))
-                content_text = "\n".join(p for p in parts if p)
+                content_text = _build_structured_content(content)
+                # Audit: shout if any of the three expected sources came
+                # back empty so we catch silent extractor regressions.
+                if deep and content_text:
+                    _audit_extracted_sources(content_text, url)
             except asyncio.TimeoutError:
                 logger.warning("[extract] Extraction timed out for %s", url)
             except Exception as e:
@@ -95,6 +114,125 @@ async def _extract_content(url: str, deep: bool = True) -> str:
             break
 
     return content_text
+
+
+def _audit_extracted_sources(content_text: str, url: str) -> dict:
+    """Post-extract sanity check. Logs ERROR when an entire source went
+    missing — that's almost always a regression we want to catch fast,
+    not a quiet content_text that secretly had only the caption.
+
+    Three sources expected for video URLs (TikTok, Instagram, YouTube):
+      [CAPTION], [TRANSCRIPT], [ON-SCREEN TEXT]
+
+    Missing one is loud-logged. Two missing → likely an extractor crash
+    or quota wall (Groq Whisper down, vision OCR API key missing).
+    Returns counts so the build can decide whether to bail.
+    """
+    has_caption = "[CAPTION]" in content_text
+    has_transcript = "[TRANSCRIPT]" in content_text
+    has_onscreen = "[ON-SCREEN TEXT]" in content_text
+    missing = [
+        n for n, has in [
+            ("CAPTION", has_caption),
+            ("TRANSCRIPT", has_transcript),
+            ("ON-SCREEN TEXT", has_onscreen),
+        ] if not has
+    ]
+    if missing and len(missing) >= 2:
+        logger.error(
+            "[extract-audit] %s — %d/%d sources missing: %s. Extracted "
+            "content is likely incomplete; cards downstream will under-cover.",
+            url, len(missing), 3, ", ".join(missing),
+        )
+    elif missing:
+        logger.warning(
+            "[extract-audit] %s — missing source: %s (cards may miss "
+            "places that only appeared in this source)",
+            url, missing[0],
+        )
+    return {
+        "has_caption": has_caption,
+        "has_transcript": has_transcript,
+        "has_on_screen": has_onscreen,
+        "missing": missing,
+    }
+
+
+def _build_structured_content(content) -> str:
+    """Stitch the extractor's title/description/captions/comments into a
+    clean three-section content_text with no duplicates.
+
+    Extractors today (TikTok, Instagram) put the same caption string into
+    title, description, AND captions[0] — convenient for legacy callers
+    but it makes the joined content_text look like the caption appeared
+    three times. We collapse that here:
+
+      1. Pick ONE caption text (prefer description, fall back to title).
+      2. Pull [TRANSCRIPT] and [ON-SCREEN TEXT] entries from captions
+         list, one of each at most.
+      3. Comments (if any) get their own section.
+
+    The output is markdown-ish with section headers so the Haiku prompt
+    can reference them ("examine each section separately").
+    """
+    sections: list[str] = []
+
+    # Caption: prefer description, fall back to title. If captions[0] is
+    # the same string, skip it (don't double-print).
+    caption_raw = (getattr(content, "description", None) or "").strip()
+    title_raw = (getattr(content, "title", None) or "").strip()
+    if not caption_raw and title_raw:
+        caption_raw = title_raw
+    captions_list = list(getattr(content, "captions", None) or [])
+
+    # Untagged caption entries (those that DON'T start with [TRANSCRIPT]
+    # or [ON-SCREEN TEXT]) are usually the same caption again. Add only
+    # if they bring NEW content.
+    untagged = [
+        c for c in captions_list
+        if not (c.startswith("[TRANSCRIPT]") or c.startswith("[ON-SCREEN TEXT]"))
+    ]
+    extra_caption_chars: list[str] = []
+    seen_caption = caption_raw
+    for u in untagged:
+        u = (u or "").strip()
+        if not u or u == caption_raw:
+            continue
+        # Caption already contains it as substring? skip.
+        if seen_caption and u in seen_caption:
+            continue
+        extra_caption_chars.append(u)
+        seen_caption = f"{seen_caption}\n{u}" if seen_caption else u
+
+    final_caption = seen_caption.strip()
+    if final_caption:
+        sections.append(f"[CAPTION]\n{final_caption}")
+
+    # Transcript: take the FIRST tagged transcript entry, strip the marker.
+    transcript_text = ""
+    for c in captions_list:
+        if c.startswith("[TRANSCRIPT]"):
+            transcript_text = c[len("[TRANSCRIPT]"):].strip()
+            break
+    if transcript_text:
+        sections.append(f"[TRANSCRIPT]\n{transcript_text}")
+
+    # On-screen text: take the FIRST tagged on-screen entry.
+    onscreen_text = ""
+    for c in captions_list:
+        if c.startswith("[ON-SCREEN TEXT]"):
+            onscreen_text = c[len("[ON-SCREEN TEXT]"):].strip()
+            break
+    if onscreen_text:
+        sections.append(f"[ON-SCREEN TEXT]\n{onscreen_text}")
+
+    # Comments: optional fourth section.
+    comments = list(getattr(content, "comments", None) or [])[:10]
+    cleaned_comments = [c.strip() for c in comments if (c or "").strip()]
+    if cleaned_comments:
+        sections.append("[COMMENTS]\n" + "\n".join(cleaned_comments))
+
+    return "\n\n".join(sections)
 
 
 class _ShallowFlag:
@@ -1154,6 +1292,13 @@ Return ONLY a JSON object with BILINGUAL fields (both Portuguese and English):
 
 IMPORTANT:
 - places_mentioned: Extract ABSOLUTELY EVERYTHING the creator mentions or shows — both named PLACES and named EXPERIENCES. This list is the spine of the user's manual itinerary; anything missing here can never appear as a card. BE EXHAUSTIVE — pass through transcript AND on-screen text TWICE if needed. A typical 1-minute travel video has 8-15 entries; a 3-minute one has 20-30+. If you returned fewer than what's clearly named, you missed some — RE-READ AND ADD THEM.
+
+   THREE EQUALLY IMPORTANT SOURCES — read EACH ONE separately, then merge:
+     a) [CAPTION] — the post description / on-feed text. Often contains a NUMBERED LIST of places (1️⃣ X 2️⃣ Y 3️⃣ Z, or "1. X / 2. Y / 3. Z"). PARSE EVERY NUMBERED ENTRY as its own card. Hashtags are NOT places (#argentina ≠ a place). If the creator wrote "6 PASSEIOS DIFERENTES" and listed 6 numbered items, you must return at least 6 entries from those.
+     b) [TRANSCRIPT] — what's spoken. Captures the narrative ("comece pelo bairro X, depois siga para Y") plus implicit experiences ("almoçar por lá", "dê uma passeadinha") that the user explicitly framed as recommendations.
+     c) [ON-SCREEN TEXT] — text shown over the video frames. CRITICAL when the creator films a place silently and only shows its name on a sticker/title card. NEVER skip on-screen entries just because the audio didn't repeat them — those are exactly the places that get lost otherwise.
+
+   The same place often appears across two or three sources (e.g. caption lists "Casa Rosada", transcript says "visite a Casa Rosada", on-screen shows "Casa Rosada"). Count it ONCE. But a place that appears in only ONE source still counts — never drop a name just because two sources didn't repeat it.
 
    GOLDEN RULE: When in doubt, INCLUDE IT. The user can always delete a card; they cannot magically resurrect one you skipped.
 
