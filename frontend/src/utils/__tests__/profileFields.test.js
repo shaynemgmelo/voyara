@@ -17,7 +17,11 @@ describe("profileFields", () => {
     const overlap = [...FRONTEND_OWNED_PROFILE_FIELDS].filter((f) =>
       BACKEND_OWNED_PROFILE_FIELDS.has(f),
     );
+    const reverseOverlap = [...BACKEND_OWNED_PROFILE_FIELDS].filter((f) =>
+      FRONTEND_OWNED_PROFILE_FIELDS.has(f),
+    );
     expect(overlap).toEqual([]);
+    expect(reverseOverlap).toEqual([]);
   });
 
   test("stripBackendOwned removes places_mentioned", () => {
@@ -65,5 +69,19 @@ describe("profileFields", () => {
     // easier to debug (the test sees what was sent).
     expect(stripped.travel_style).toBe("x");
     expect(stripped.__debug).toBe(true);
+  });
+
+  test("stripBackendOwned does not mutate the input", () => {
+    const orig = { travel_style: "x", places_mentioned: [{ name: "A" }] };
+    const snapshot = JSON.parse(JSON.stringify(orig));
+    stripBackendOwned(orig);
+    expect(orig).toEqual(snapshot);
+  });
+
+  test("stripBackendOwned returns {} for null/undefined/non-object", () => {
+    expect(stripBackendOwned(null)).toEqual({});
+    expect(stripBackendOwned(undefined)).toEqual({});
+    expect(stripBackendOwned("string")).toEqual({});
+    expect(stripBackendOwned(42)).toEqual({});
   });
 });

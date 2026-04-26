@@ -16,6 +16,15 @@
  *
  * To add a new field: pick a side, add it to the right set, and add
  * a test in profileFields.test.js that pins the choice.
+ *
+ * Note: Rails permits `traveler_profile: {}` (any inner keys), so
+ * unknown frontend-owned fields write through silently — this is
+ * intentional, lets new editable fields ship without a Rails change.
+ * The real risk is the OTHER direction: a backend-owned field that
+ * forgets to land in BACKEND_OWNED_PROFILE_FIELDS will round-trip
+ * back to clobber the AI service's writes — that's the exact Trip-46
+ * bug class. Always add new backend-managed fields to the denylist
+ * FIRST, before they ship to prod.
  */
 
 export const FRONTEND_OWNED_PROFILE_FIELDS = new Set([
