@@ -28,6 +28,8 @@ services:
         generateValue: true
       - key: RAILS_ENV
         value: production
+      - key: SENTRY_DSN
+        sync: false
 
   # AI Service — FastAPI
   - type: web
