@@ -33,6 +33,9 @@ Rails.application.routes.draw do
         resources :transports, except: [:new, :edit]
         resources :trip_notes, except: [:new, :edit]
         resources :day_plans do
+          collection do
+            patch :reorder
+          end
           member do
             get :travel_times
             post :recalculate_schedule

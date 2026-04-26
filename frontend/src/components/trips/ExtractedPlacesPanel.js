@@ -53,6 +53,16 @@ function sourceIcon(url) {
   return "🔗";
 }
 
+const CATEGORY_ICONS = {
+  restaurant: "🍽️",
+  cafe: "☕",
+  nightlife: "🍸",
+  shopping: "🛍️",
+  hotel: "🏨",
+  attraction: "🏛️",
+  place: "📍",
+};
+
 export default function ExtractedPlacesPanel({ trip }) {
   const { lang } = useLanguage();
   const pt = lang === "pt-BR";
@@ -186,31 +196,75 @@ export default function ExtractedPlacesPanel({ trip }) {
                         index={globalIndex}
                         isDragDisabled={used}
                       >
-                        {(p, snapshot) => (
-                          <div
-                            ref={p.innerRef}
-                            {...p.draggableProps}
-                            {...p.dragHandleProps}
-                            className={`rounded-lg border p-3 text-sm transition select-none ${
-                              used
-                                ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
-                                : snapshot.isDragging
-                                  ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
-                                  : "border-gray-200 bg-white hover:border-coral-300 cursor-grab"
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="font-medium text-gray-900 leading-snug min-w-0">
-                                {place.name}
+                        {(p, snapshot) => {
+                          const hasGeo = place.latitude != null && place.longitude != null;
+                          const cat = place.category || "place";
+                          const shortAddress = (place.address || "").split(",")[0] || "";
+                          return (
+                            <div
+                              ref={p.innerRef}
+                              {...p.draggableProps}
+                              {...p.dragHandleProps}
+                              className={`rounded-lg border overflow-hidden text-sm transition select-none ${
+                                used
+                                  ? "border-gray-100 bg-gray-50 opacity-50 cursor-default"
+                                  : snapshot.isDragging
+                                    ? "border-coral-400 bg-coral-50 shadow-lg cursor-grabbing"
+                                    : "border-gray-200 bg-white hover:border-coral-300 cursor-grab"
+                              }`}
+                            >
+                              <div className="flex gap-2 p-2">
+                                {place.photo_url ? (
+                                  <img
+                                    src={place.photo_url}
+                                    alt=""
+                                    loading="lazy"
+                                    className="w-14 h-14 rounded-md object-cover flex-shrink-0 bg-gray-100"
+                                  />
+                                ) : (
+                                  <div
+                                    className={`w-14 h-14 rounded-md flex items-center justify-center text-xl flex-shrink-0 ${
+                                      hasGeo ? "bg-coral-50" : "bg-gray-100"
+                                    }`}
+                                    aria-hidden
+                                  >
+                                    {CATEGORY_ICONS[cat] || CATEGORY_ICONS.place}
+                                  </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-start justify-between gap-1">
+                                    <div className="font-semibold text-gray-900 leading-snug truncate text-[13px]">
+                                      {place.name}
+                                    </div>
+                                    {used && (
+                                      <span className="text-emerald-500 text-[10px] flex-shrink-0">
+                                        ✓
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-gray-500">
+                                    {place.rating != null && (
+                                      <span className="font-semibold text-amber-600">
+                                        ★ {Number(place.rating).toFixed(1)}
+                                      </span>
+                                    )}
+                                    {place.rating != null && shortAddress && (
+                                      <span className="text-gray-300">·</span>
+                                    )}
+                                    {shortAddress && (
+                                      <span className="truncate">{shortAddress}</span>
+                                    )}
+                                    {!hasGeo && place.rating == null && !shortAddress && (
+                                      <span className="italic text-gray-400">
+                                        {pt ? "sem dados" : "no data"}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
                               </div>
-                              {used && (
-                                <span className="text-emerald-500 text-xs flex-shrink-0">
-                                  ✓ {pt ? "no roteiro" : "added"}
-                                </span>
-                              )}
                             </div>
-                          </div>
-                        )}
+                          );
+                        }}
                       </Draggable>
                     );
                   })}

@@ -1312,6 +1312,105 @@ def _enrich_weak_profile(parsed: dict, destination: str) -> None:
     parsed.setdefault("places_mentioned", [])
 
 
+async def _geocode_places_for_manual(
+    places: list[dict],
+    destination: str,
+    places_client,
+) -> list[dict]:
+    """Enrich each place in `places_mentioned` with Google Places data so
+    manual-mode cards can show photo/rating/category and the map can drop
+    a pin for it BEFORE the user assigns it to a day.
+
+    Per place we run text search → details lookup. Failures are tolerated
+    (the place keeps its original {name, source_url} fields and the UI
+    falls back to the minimal card). Concurrency is bounded so we don't
+    hammer the Places API quota when a trip has 25+ extracted places.
+
+    Idempotent: places that already have `google_place_id` are skipped
+    (they were enriched on a previous run — re-extraction shouldn't
+    re-charge us for Places lookups).
+
+    Returns the SAME list, with each entry augmented in place. Original
+    keys (name, source_url) are preserved.
+    """
+    if not places:
+        return places
+
+    SEM = asyncio.Semaphore(5)  # cap parallel Places lookups
+
+    async def _enrich_one(p: dict) -> dict:
+        # Skip if already enriched (e.g. user re-ran extract).
+        if p.get("google_place_id") and p.get("latitude") is not None:
+            return p
+        name = (p.get("name") or "").strip()
+        if not name:
+            return p
+        async with SEM:
+            try:
+                results = await places_client.search(name, location=destination or None)
+            except Exception:
+                logger.exception("[manual-geo] search failed for %r", name)
+                return p
+            if not results:
+                return p
+            best = results[0]
+            place_id = best.get("place_id")
+            details = None
+            if place_id:
+                try:
+                    details = await places_client.get_details(place_id)
+                except Exception:
+                    logger.exception("[manual-geo] details failed for %r", name)
+                    details = None
+
+        # Merge — prefer details (more complete) then fall back to search.
+        merged = dict(p)
+        merged["google_place_id"] = place_id
+        merged["latitude"] = (details or {}).get("latitude") or best.get("latitude")
+        merged["longitude"] = (details or {}).get("longitude") or best.get("longitude")
+        merged["address"] = (details or {}).get("address") or best.get("address")
+        merged["rating"] = (details or {}).get("rating") or best.get("rating")
+        merged["reviews_count"] = (
+            (details or {}).get("reviews_count") or best.get("user_ratings_total")
+        )
+        merged["pricing"] = (details or {}).get("pricing")
+        photos = (details or {}).get("photos") or []
+        merged["photo_url"] = photos[0] if photos else None
+        merged["google_maps_url"] = (details or {}).get("google_maps_url")
+        types = (details or {}).get("types") or best.get("types") or []
+        merged["category"] = _classify_place_category(types)
+        return merged
+
+    enriched = await asyncio.gather(*[_enrich_one(p) for p in places])
+    return list(enriched)
+
+
+def _classify_place_category(types: list[str]) -> str:
+    """Map Google Places types to a single user-facing category. Mirrors
+    the same buckets the build pipeline uses for itinerary items so the
+    manual cards match the AI-generated ones visually."""
+    if not types:
+        return "place"
+    type_set = set(types)
+    if {"restaurant", "food", "meal_takeaway"} & type_set:
+        return "restaurant"
+    if {"cafe", "bakery"} & type_set:
+        return "cafe"
+    if {"bar", "night_club", "casino"} & type_set:
+        return "nightlife"
+    if {"shopping_mall", "store", "clothing_store", "market"} & type_set:
+        return "shopping"
+    if {"lodging"} & type_set:
+        return "hotel"
+    if {
+        "tourist_attraction", "museum", "park", "landmark", "art_gallery",
+        "natural_feature", "place_of_worship", "amusement_park", "aquarium",
+        "zoo", "stadium",
+    } & type_set:
+        return "attraction"
+    return "place"
+
+
 def _proportional_distribution(num_days: int, cities: list[str]) -> dict[str, int]:
     """Split num_days across cities proportionally; remainder goes to earlier ones.
 
@@ -5341,6 +5440,30 @@ async def extract_profile_and_build(trip_id: int, http_client=None) -> dict:
 
     # ─── Phase 2: build itinerary (skip in manual mode) ────────────────────
     if ai_mode == "manual":
+        # MANUAL ENRICHMENT: before returning, geocode each extracted place
+        # via Google Places so the frontend can render rich cards (photo,
+        # rating, address, category) AND drop pins on the map BEFORE the
+        # user assigns them to a day. Without this, manual mode would show
+        # naked place names — useless for "drag onto a day" UX.
+        try:
+            enriched = await _geocode_places_for_manual(
+                places=refreshed_profile.get("places_mentioned") or [],
+                destination=trip.get("destination") or "",
+                places_client=places,
+            )
+            if enriched:
+                refreshed_profile["places_mentioned"] = enriched
+                await rails.update_trip(
+                    trip_id, {"traveler_profile": refreshed_profile},
+                )
+                _mark(
+                    f"manual mode — enriched {len(enriched)} places with "
+                    f"Google data"
+                )
+        except Exception:
+            # Non-fatal. The user still gets the bare names on cards;
+            # they just won't have photos/pins until they refine manually.
+            logger.exception("[combined] manual enrichment failed (non-fatal)")
         _mark("manual mode — skipping itinerary build")
         return {
             "status": "manual_extracted",

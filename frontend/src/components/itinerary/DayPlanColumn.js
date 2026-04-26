@@ -25,6 +25,11 @@ export default function DayPlanColumn({
   onRecalculate,
   onRefine,
   refineLoading,
+  // Provided by the outer day-Draggable in TripDetail. When present,
+  // renders a small grip handle on the day badge that the user can grab
+  // to drag the entire day block to a new position. Passed through as
+  // an opaque object (innerRef + dragHandleProps from @hello-pangea/dnd).
+  dayDragHandleProps = null,
 }) {
   const { t, lang } = useLanguage();
   const pt = lang === "pt-BR";
@@ -146,6 +151,29 @@ export default function DayPlanColumn({
           onClick={() => { onSelectDay(); }}
           className="w-full flex items-center gap-3 px-4 py-3 text-left"
         >
+          {/* Day-reorder drag handle. Rendered only when the parent
+              wrapped this column in a day-level Draggable (i.e. inside
+              the standard list view, not inside the timeline). The grip
+              is the only element that initiates a day-drag — clicking
+              the rest of the header still selects the day. */}
+          {dayDragHandleProps && (
+            <div
+              {...dayDragHandleProps}
+              onClick={(e) => e.stopPropagation()}
+              className="flex-shrink-0 cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 select-none"
+              title={pt ? "Arrastar para reordenar dia" : "Drag to reorder day"}
+              aria-label={pt ? "Arrastar dia" : "Drag day"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="9" cy="6" r="1.5" />
+                <circle cx="15" cy="6" r="1.5" />
+                <circle cx="9" cy="12" r="1.5" />
+                <circle cx="15" cy="12" r="1.5" />
+                <circle cx="9" cy="18" r="1.5" />
+                <circle cx="15" cy="18" r="1.5" />
+              </svg>
+            </div>
+          )}
           {/* Day badge */}
           <div
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-white text-xs font-bold flex-shrink-0"

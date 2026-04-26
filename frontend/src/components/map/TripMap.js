@@ -42,6 +42,10 @@ export default function TripMap({
   hoveredItemId,
   onMarkerClick,
   hotelLodgings = [],
+  // Manual-mode: places extracted from videos that aren't yet on a day.
+  // Each needs lat/lng to render as a gray pin. When the user drags one
+  // onto a day it'll re-render as a colored day-pin via dayPlans above.
+  unassignedPlaces = [],
 }) {
   const { t } = useLanguage();
   const { isLoaded } = useJsApiLoader({
@@ -61,10 +65,22 @@ export default function TripMap({
     ? allItems.filter((item) => item.day_number === selectedDayNumber)
     : allItems;
 
-  // All points for bounds: visible items + hotels
+  // Filter unassigned to those with valid coords (geocoded by manual extract).
+  const geocodedUnassigned = unassignedPlaces.filter(
+    (p) => p && p.latitude != null && p.longitude != null,
+  );
+
+  // All points for bounds: visible items + hotels + unassigned (when no day
+  // is selected — when a day is filtered, only show its own bounds).
   const allBoundsPoints = [
     ...visibleItems.map((i) => ({ lat: parseFloat(i.latitude), lng: parseFloat(i.longitude) })),
     ...hotelLodgings.map((h) => ({ lat: parseFloat(h.latitude), lng: parseFloat(h.longitude) })),
+    ...(selectedDayNumber
+      ? []
+      : geocodedUnassigned.map((p) => ({
+          lat: parseFloat(p.latitude),
+          lng: parseFloat(p.longitude),
+        }))),
   ];
 
   const onMapLoad = useCallback(
@@ -187,6 +203,39 @@ export default function TripMap({
           />
         );
       })}
+
+      {/* Unassigned (manual mode): gray pins for places extracted from
+          videos that the user hasn't yet dragged onto a day. Hidden when
+          a specific day is selected — those views are about that day's
+          route, not the broader pool. */}
+      {!selectedDayNumber && geocodedUnassigned.map((place, idx) => (
+        <Marker
+          key={`unassigned-${place.google_place_id || place.name || idx}`}
+          position={{
+            lat: parseFloat(place.latitude),
+            lng: parseFloat(place.longitude),
+          }}
+          icon={{
+            path: window.google.maps.SymbolPath.CIRCLE,
+            fillColor: "#9ca3af",
+            fillOpacity: 0.85,
+            strokeColor: "#ffffff",
+            strokeWeight: 2,
+            scale: 9,
+          }}
+          title={place.name}
+          onClick={() => {
+            setInfoItem({
+              ...place,
+              id: `unassigned-${idx}`,
+              day_number: null,
+              day_index: null,
+            });
+            setHotelInfo(null);
+          }}
+          zIndex={0}
+        />
+      ))}
 
       {/* Hotel markers — always visible */}
       {hotelLodgings.map((hotel) => (

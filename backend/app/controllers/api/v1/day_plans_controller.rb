@@ -32,6 +32,44 @@ class Api::V1::DayPlansController < Api::V1::BaseController
     end
   end
 
+  # PATCH /api/v1/trips/:trip_id/day_plans/reorder
+  # Body: { day_plan_ids: [12, 8, 10, ...] }
+  #
+  # Renumbers day_plans according to the new order. day_plan_ids[0] becomes
+  # day_number=1, day_plan_ids[1] becomes day_number=2, etc. All-or-nothing
+  # via a transaction so a partial failure can't leave two days at the same
+  # number. Used by the frontend's day-drag-to-reorder UX.
+  def reorder
+    ids = (params[:day_plan_ids] || []).map(&:to_i)
+    if ids.empty?
+      return render(json: { error: "day_plan_ids required" }, status: :bad_request)
+    end
+
+    plans = @trip.day_plans.where(id: ids).to_a
+    if plans.size != ids.size
+      return render(json: { error: "some day_plan ids do not belong to this trip" }, status: :bad_request)
+    end
+
+    by_id = plans.index_by(&:id)
+    DayPlan.transaction do
+      # First pass: park every day_plan at a temporary, non-conflicting
+      # day_number so the unique-on-(trip_id, day_number) index doesn't
+      # bite us mid-shuffle. Negative numbers can't collide with the
+      # final positive assignments below.
+      plans.each_with_index do |plan, idx|
+        plan.update_column(:day_number, -(idx + 1))
+      end
+      # Second pass: assign the final positions in the requested order.
+      ids.each_with_index do |id, idx|
+        by_id[id].update_column(:day_number, idx + 1)
+      end
+    end
+
+    render json: @trip.day_plans.order(:day_number).includes(:itinerary_items).map { |dp|
+      DayPlanSerializer.new(dp).as_json
+    }
+  end
+
   def destroy
     @day_plan.destroy
     head :no_content

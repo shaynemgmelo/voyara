@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
-import { DragDropContext } from "@hello-pangea/dnd";
+import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import useTripDetail from "../hooks/useTripDetail";
 import DayPlanColumn from "../components/itinerary/DayPlanColumn";
 import TripTimeline from "../components/itinerary/TripTimeline";
@@ -42,6 +42,7 @@ export default function TripDetail() {
     loading,
     error,
     addItem,
+    reorderDays,
     updateItem,
     removeItem,
     reorderItems,
@@ -209,9 +210,25 @@ export default function TripDetail() {
   };
 
   const handleDragEnd = (result) => {
-    const { source, destination, draggableId } = result;
+    const { source, destination, draggableId, type } = result;
     if (!destination) return;
     if (source.droppableId === destination.droppableId && source.index === destination.index) return;
+
+    // DAY-LEVEL DRAG: user reordered entire day blocks. The Droppable
+    // wrapping the day list uses type="day"; each DayPlanColumn wrapper
+    // is a Draggable with the same type. Build the new ordered list of
+    // day_plan IDs and persist via reorderDays.
+    if (type === "day") {
+      const currentDays = activeCity
+        ? trip.day_plans?.filter((dp) => dp.city === activeCity)
+        : trip.day_plans;
+      if (!currentDays) return;
+      const ids = currentDays.map((dp) => dp.id);
+      const [moved] = ids.splice(source.index, 1);
+      ids.splice(destination.index, 0, moved);
+      reorderDays(ids);
+      return;
+    }
 
     // Drag FROM the manual-mode extracted-places panel TO a day → create a
     // new itinerary_item on that day. The draggableId encodes the place name
@@ -360,6 +377,26 @@ export default function TripDetail() {
     (dp) => (dp.itinerary_items || []).length > 0,
   );
   const showAiAssistButton = isManualMode && !hasItemsForAssist;
+  // Manual-mode: places extracted from videos that haven't been dragged
+  // onto a day yet. Each one already has lat/lng (geocoded by the backend
+  // during extract-and-build) so the map can drop a gray pin for it.
+  // Filtered against current itinerary item names so a place that was
+  // dragged disappears from the gray-pin pool and reappears as a colored
+  // day-pin instantly.
+  const unassignedPlaces = (() => {
+    if (!isManualMode) return [];
+    const placesMentioned = trip?.traveler_profile?.places_mentioned || [];
+    if (placesMentioned.length === 0) return [];
+    const usedNames = new Set();
+    (trip?.day_plans || []).forEach((dp) => {
+      (dp.itinerary_items || []).forEach((it) => {
+        usedNames.add((it.name || "").trim().toLowerCase());
+      });
+    });
+    return placesMentioned.filter(
+      (p) => !usedNames.has((p.name || "").trim().toLowerCase()),
+    );
+  })();
   const handleAiAssist = async () => {
     if (aiAssistRunning) return;
     setAiAssistRunning(true);
@@ -699,42 +736,70 @@ export default function TripDetail() {
                 {isManualMode && (
                   <ExtractedPlacesPanel trip={trip} />
                 )}
-                <div className="space-y-4">
-              {(activeCity
-                ? trip.day_plans?.filter((dp) => dp.city === activeCity)
-                : trip.day_plans
-              )?.map((dayPlan) => (
-                <DayPlanColumn
-                  key={dayPlan.id}
-                  dayPlan={dayPlan}
-                  tripId={trip.id}
-                  selectedItemId={selectedItemId}
-                  hoveredItemId={hoveredItemId}
-                  vibeFilters={vibeFilters}
-                  travelSegments={travelTimes[dayPlan.id] || []}
-                  hotelLodging={(trip.lodgings || []).find(l => l.latitude && l.longitude) || null}
-                  onItemClick={handleItemClick}
-                  onItemHover={setHoveredItemId}
-                  onAddClick={() => setShowSuggestions(dayPlan.id)}
-                  onDeleteItem={(itemId) => removeItem(dayPlan.id, itemId)}
-                  onSwapItem={handleSwapItem}
-                  onSelectDay={() =>
-                    setSelectedDayNumber(
-                      selectedDayNumber === dayPlan.day_number ? null : dayPlan.day_number
-                    )
-                  }
-                  isSelectedDay={selectedDayNumber === dayPlan.day_number}
-                  onRefine={(dayPlanId, feedback) => refineItinerary(feedback, "day", dayPlanId)}
-                  refineLoading={refining}
-                  onRecalculate={async () => {
-                    try {
-                      const data = await recalculateSchedule(trip.id, dayPlan.id);
-                      setSchedulePreview({ dayPlanId: dayPlan.id, proposals: data.proposals || [] });
-                    } catch { /* ignore */ }
-                  }}
-                />
-              ))}
-                </div>
+                <Droppable droppableId="trip-days" type="day">
+                  {(dropProvided) => (
+                    <div
+                      ref={dropProvided.innerRef}
+                      {...dropProvided.droppableProps}
+                      className="space-y-4"
+                    >
+                      {(activeCity
+                        ? trip.day_plans?.filter((dp) => dp.city === activeCity)
+                        : trip.day_plans
+                      )?.map((dayPlan, dayIndex) => (
+                        <Draggable
+                          key={dayPlan.id}
+                          draggableId={`day::${dayPlan.id}`}
+                          index={dayIndex}
+                          type="day"
+                        >
+                          {(dragProvided, dragSnapshot) => (
+                            <div
+                              ref={dragProvided.innerRef}
+                              {...dragProvided.draggableProps}
+                              className={
+                                dragSnapshot.isDragging
+                                  ? "ring-2 ring-coral-400 rounded-2xl"
+                                  : ""
+                              }
+                            >
+                              <DayPlanColumn
+                                dayPlan={dayPlan}
+                                tripId={trip.id}
+                                selectedItemId={selectedItemId}
+                                hoveredItemId={hoveredItemId}
+                                vibeFilters={vibeFilters}
+                                travelSegments={travelTimes[dayPlan.id] || []}
+                                hotelLodging={(trip.lodgings || []).find(l => l.latitude && l.longitude) || null}
+                                onItemClick={handleItemClick}
+                                onItemHover={setHoveredItemId}
+                                onAddClick={() => setShowSuggestions(dayPlan.id)}
+                                onDeleteItem={(itemId) => removeItem(dayPlan.id, itemId)}
+                                onSwapItem={handleSwapItem}
+                                onSelectDay={() =>
+                                  setSelectedDayNumber(
+                                    selectedDayNumber === dayPlan.day_number ? null : dayPlan.day_number
+                                  )
+                                }
+                                isSelectedDay={selectedDayNumber === dayPlan.day_number}
+                                onRefine={(dayPlanId, feedback) => refineItinerary(feedback, "day", dayPlanId)}
+                                refineLoading={refining}
+                                onRecalculate={async () => {
+                                  try {
+                                    const data = await recalculateSchedule(trip.id, dayPlan.id);
+                                    setSchedulePreview({ dayPlanId: dayPlan.id, proposals: data.proposals || [] });
+                                  } catch { /* ignore */ }
+                                }}
+                                dayDragHandleProps={dragProvided.dragHandleProps}
+                              />
+                            </div>
+                          )}
+                        </Draggable>
+                      ))}
+                      {dropProvided.placeholder}
+                    </div>
+                  )}
+                </Droppable>
               </div>
             </DragDropContext>
           )}
@@ -755,6 +820,7 @@ export default function TripDetail() {
               hoveredItemId={hoveredItemId}
               onMarkerClick={handleMarkerClick}
               hotelLodgings={(trip.lodgings || []).filter(l => l.latitude && l.longitude)}
+              unassignedPlaces={unassignedPlaces}
             />
           </div>
         </div>

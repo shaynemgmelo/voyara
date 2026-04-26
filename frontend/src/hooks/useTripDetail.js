@@ -3,6 +3,7 @@ import * as tripsApi from "../api/trips";
 import * as itemsApi from "../api/itineraryItems";
 import * as linksApi from "../api/links";
 import * as logisticsApi from "../api/logistics";
+import { reorderDayPlans as reorderDayPlansApi } from "../api/dayPlans";
 import { resumeProcessing, analyzeTrip } from "../api/links";
 import { refineItinerary as refineApi } from "../api/trips";
 import { fetchBuildStatus, clearStuckBuild } from "../api/buildStatus";
@@ -659,6 +660,34 @@ export default function useTripDetail(tripId) {
     return () => clearInterval(id);
   }, [trip, clientForcedFailure]);
 
+  // Reorder days within a trip. Takes the new ordered list of day_plan IDs
+  // (e.g. user dragged Day 3 to slot 1 → [day3_id, day1_id, day2_id, ...]).
+  // Optimistic: re-shuffles the local trip.day_plans + renumbers their
+  // day_number client-side, then PATCHes the backend. Rolls back via
+  // fetchTrip on failure.
+  const reorderDays = async (orderedDayPlanIds) => {
+    if (!Array.isArray(orderedDayPlanIds) || orderedDayPlanIds.length === 0) return;
+
+    setTrip((prev) => {
+      if (!prev?.day_plans) return prev;
+      const byId = new Map(prev.day_plans.map((dp) => [dp.id, dp]));
+      const reordered = orderedDayPlanIds
+        .map((id, idx) => {
+          const dp = byId.get(id);
+          if (!dp) return null;
+          return { ...dp, day_number: idx + 1 };
+        })
+        .filter(Boolean);
+      return { ...prev, day_plans: reordered };
+    });
+
+    try {
+      await reorderDayPlansApi(tripId, orderedDayPlanIds);
+    } catch {
+      fetchTrip(); // rollback
+    }
+  };
+
   return {
     trip,
     loading,
@@ -671,6 +700,7 @@ export default function useTripDetail(tripId) {
     removeItem,
     reorderItems,
     moveItemBetweenDays,
+    reorderDays,
     addLink,
     removeLink,
     updateAiMode,
