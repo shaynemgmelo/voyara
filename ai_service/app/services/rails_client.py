@@ -109,6 +109,29 @@ class RailsClient:
             json={"itinerary_item": item_data},
         )
 
+    async def move_itinerary_item(
+        self,
+        trip_id: int,
+        day_plan_id: int,
+        item_id: int,
+        target_day_plan_id: int,
+        position: int,
+    ) -> dict:
+        """Move an item to a different day_plan via the Rails `move` endpoint.
+
+        Rails route: PATCH /trips/:trip_id/day_plans/:day_plan_id/itinerary_items/:id/move
+        Controller: itinerary_items#move — expects `target_day_plan_id` and
+        `position` as top-level params (not nested under :itinerary_item).
+
+        Use this instead of sending day_plan_id inside update_itinerary_item,
+        which goes through item_params and does NOT permit day_plan_id.
+        """
+        return await self._request(
+            "PATCH",
+            f"/trips/{trip_id}/day_plans/{day_plan_id}/itinerary_items/{item_id}/move",
+            json={"target_day_plan_id": target_day_plan_id, "position": position},
+        )
+
     async def _request(
         self,
         method: str,
