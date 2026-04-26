@@ -9,6 +9,11 @@
 # the last line of defense.
 class AddDataIntegrityConstraints < ActiveRecord::Migration[8.0]
   def change
+    # Pre-flight: catch any violating rows BEFORE we acquire ACCESS
+    # EXCLUSIVE locks. Fails fast with a clear "fix this row first"
+    # message instead of leaving the schema half-applied on prod.
+    check_data_integrity!
+
     # ------------------------------------------------------------------
     # Trip — Trip#validates :name, presence: true
     #        Trip#validates :num_days, numericality:
@@ -60,5 +65,67 @@ class AddDataIntegrityConstraints < ActiveRecord::Migration[8.0]
 
     # Flight#validates :airline, presence: true
     change_column_null :flights, :airline, false
+  end
+
+  private
+
+  # Surface any constraint violations BEFORE the change block grabs
+  # ACCESS EXCLUSIVE locks on the tables. On prod, a single bad row
+  # otherwise causes the migration to die mid-way through with the
+  # schema half-applied — exactly what we don't want during a Render
+  # deploy.
+  def check_data_integrity!
+    bad_trips = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM trips
+      WHERE name IS NULL
+         OR status IS NULL
+         OR ai_mode IS NULL
+         OR num_days IS NULL
+         OR num_days < 1
+         OR num_days > 30
+    SQL
+    if bad_trips.to_i > 0
+      raise "#{bad_trips} trip rows violate the new constraints. Run a data migration first."
+    end
+
+    bad_day_plans = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM day_plans
+      WHERE day_number IS NULL OR day_number < 1 OR trip_id IS NULL
+    SQL
+    if bad_day_plans.to_i > 0
+      raise "#{bad_day_plans} day_plan rows violate the new constraints. Fix them first."
+    end
+
+    bad_items = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM itinerary_items
+      WHERE name IS NULL OR day_plan_id IS NULL
+    SQL
+    if bad_items.to_i > 0
+      raise "#{bad_items} itinerary_item rows violate the new constraints. Fix them first."
+    end
+
+    bad_links = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM links
+      WHERE url IS NULL OR trip_id IS NULL
+    SQL
+    if bad_links.to_i > 0
+      raise "#{bad_links} link rows violate the new constraints. Fix them first."
+    end
+
+    bad_lodgings = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM lodgings
+      WHERE name IS NULL
+    SQL
+    if bad_lodgings.to_i > 0
+      raise "#{bad_lodgings} lodging rows violate the new constraints. Fix them first."
+    end
+
+    bad_flights = ActiveRecord::Base.connection.select_value(<<~SQL)
+      SELECT count(*) FROM flights
+      WHERE airline IS NULL
+    SQL
+    if bad_flights.to_i > 0
+      raise "#{bad_flights} flight rows violate the new constraints. Fix them first."
+    end
   end
 end

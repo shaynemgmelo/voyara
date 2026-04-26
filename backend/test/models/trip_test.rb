@@ -121,6 +121,17 @@ class TripTest < ActiveSupport::TestCase
     assert_match /less than or equal to 30/i, trip.errors[:num_days].join
   end
 
+  # Bypass the model validator with raw SQL to prove the DB-level
+  # CHECK constraint added in 20260427000000 actually fires. Without
+  # this test, we'd only know the Rails validator works — the DB
+  # constraint would be untested trust.
+  test "DB CHECK constraint rejects num_days out of range when validator bypassed" do
+    trip = build_trip(num_days: 5)
+    assert_raises ActiveRecord::StatementInvalid do
+      Trip.connection.execute("UPDATE trips SET num_days = 99 WHERE id = #{trip.id}")
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # traveler_profile deep-merge regression
   #
