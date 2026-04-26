@@ -66,3 +66,49 @@ def assert_itinerary_item_payload(payload: dict) -> None:
         raise AssertionError(
             f"itinerary_item.origin={origin!r} not in {sorted(ITINERARY_ITEM_ORIGINS)}"
         )
+
+
+# Rails: trips_controller.rb trip_params permit list. Extends
+# ITINERARY_ITEM_PERMITTED_FIELDS protection to the parent Trip
+# resource — every PATCH /trips/:id payload the AI service builds
+# (e.g. update_trip with traveler_profile) must comply.
+TRIP_PERMITTED_FIELDS: set[str] = {
+    "ai_mode", "destination", "is_staging", "name", "num_days",
+    "profile_status", "status", "traveler_profile",
+}
+
+# Rails: day_plans_controller.rb day_plan_params permit list.
+DAY_PLAN_PERMITTED_FIELDS: set[str] = {
+    "city", "conflict_alerts", "date", "day_number", "day_type",
+    "estimated_pace", "notes", "origin", "pattern_signature",
+    "primary_region", "rigidity", "source_creator_handle",
+    "source_video_url",
+}
+
+# Rails: links_controller.rb link_update_params permit list. The OTHER
+# permit list (link_params, just :url) is for the create action and not
+# something the AI service ever touches.
+LINK_UPDATE_PERMITTED_FIELDS: set[str] = {"extracted_data", "status"}
+
+
+def assert_trip_payload(payload: dict) -> None:
+    """Same defensive check as assert_itinerary_item_payload but for
+    Trip-level updates. Catches frontend or AI-service code that tries
+    to PATCH a field outside the Trip permit list."""
+    if not isinstance(payload, dict):
+        raise AssertionError(f"payload must be a dict, got {type(payload)}")
+    extras = set(payload.keys()) - TRIP_PERMITTED_FIELDS
+    if extras:
+        raise AssertionError(
+            f"trip payload contains fields not in Rails permit list: {sorted(extras)}"
+        )
+
+
+def assert_day_plan_payload(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        raise AssertionError(f"payload must be a dict, got {type(payload)}")
+    extras = set(payload.keys()) - DAY_PLAN_PERMITTED_FIELDS
+    if extras:
+        raise AssertionError(
+            f"day_plan payload contains fields not in Rails permit list: {sorted(extras)}"
+        )

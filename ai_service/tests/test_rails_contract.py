@@ -33,38 +33,73 @@ def _rails_constant(model_path: str, name: str) -> set[str]:
     return set(match.group(1).split())
 
 
-def _rails_permit_list(controller_path: str, model_key: str) -> set[str]:
-    """Extract the field set from `params.require(:model_key).permit(...)`
-    in a Rails controller. Captures BOTH bare symbols (`:foo`) and the
-    keys of nested hash declarations (`operating_hours: {}, photos: []`).
-    The permit list is exactly what controls which fields survive
-    Strong Parameters before validation runs — drift between Python's
-    mirror and this list is the bug class trip 41 + 44 hit.
+def _rails_permit_list(controller_path: str, model_key: str, match_index: int = 0) -> set[str]:
+    """Extract the field set from the Nth `params.require(:model_key).permit(...)`
+    block in a Rails controller. Default match_index=0 grabs the first
+    block; pass 1 for the second (e.g. links_controller has TWO permit
+    blocks: link_params and link_update_params).
+
+    Captures BOTH bare symbols (`:foo`) and the keys of nested hash
+    declarations (`operating_hours: {}, photos: []`). The permit list is
+    exactly what controls which fields survive Strong Parameters before
+    validation runs — drift between Python's mirror and this list is the
+    bug class trip 41 + 44 hit.
 
     Comment-aware: Ruby comments are stripped first so a parenthesized
     aside like `# Phase 1 of the reform).` doesn't fool the regex into
-    closing the permit() block early."""
+    closing the permit() block early.
+
+    Block-end is detected by paren-balance scan from the opening `(`,
+    so both single-line (`permit(:url)`) and multi-line permit blocks
+    work. Strong-params array-of-hashes shapes (`conflict_alerts:
+    [[:type, :day, ...]]`) are stripped before symbol extraction so the
+    inner shape symbols don't pollute the top-level field set."""
     controller_path_full = REPO_ROOT / controller_path
     raw = controller_path_full.read_text()
     # Strip Ruby line comments (anything from `#` to end-of-line that
     # isn't inside a string literal). Good enough for permit blocks
     # which never contain string literals.
     text = re.sub(r"#[^\n]*", "", raw)
-    # Match the permit block by requiring its closing `)` to sit at the
-    # start of its own line (Ruby permit blocks always close that way).
-    pattern = rf"params\.require\(:{model_key}\)\.permit\((.*?)^\s*\)"
-    match = re.search(pattern, text, re.DOTALL | re.MULTILINE)
-    assert match, (
-        f"params.require(:{model_key}).permit(...) not found in {controller_path_full}"
+    header = rf"params\.require\(:{model_key}\)\.permit\("
+    matches: list[str] = []
+    for header_match in re.finditer(header, text):
+        # Paren-balance scan from the opening `(` so we tolerate both
+        # single-line `permit(:url)` and multi-line permit blocks. The
+        # earlier `^\s*\)` end-anchor only matched multi-line, missing
+        # `params.require(:trip).permit(:name, ...)` and
+        # `params.require(:link).permit(:url)` outright.
+        start = header_match.end()
+        depth = 1
+        i = start
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        if depth == 0:
+            matches.append(text[start:i - 1])
+    assert match_index < len(matches), (
+        f"only {len(matches)} permit() block(s) found for :{model_key} in {controller_path_full}; "
+        f"requested index {match_index}"
     )
-    block = match.group(1)
+    block = matches[match_index]
+    # Strip array-of-hashes shape declarations like
+    # `conflict_alerts: [[:type, :day, :message]]`. The inner symbols
+    # describe the SHAPE of each array element (not standalone permitted
+    # fields), so they must not feed the bare-symbol scan below. The key
+    # itself (`conflict_alerts`) is still picked up by the nested-hash
+    # regex — `[[` matches `[\{\[]` — so dropping the inner content is
+    # safe.
+    block_no_array_shapes = re.sub(r"\[\[.*?\]\]", "[[]]", block, flags=re.DOTALL)
     fields: set[str] = set()
     # Bare symbols: :name, :description, ...
-    for sym in re.findall(r":(\w+)", block):
+    for sym in re.findall(r":(\w+)", block_no_array_shapes):
         if sym != model_key:
             fields.add(sym)
     # Nested hash keys: operating_hours: {} OR photos: [] etc.
-    for nested in re.findall(r"(\w+)\s*:\s*[\{\[]", block):
+    for nested in re.findall(r"(\w+)\s*:\s*[\{\[]", block_no_array_shapes):
         fields.add(nested)
     return fields
 
@@ -105,6 +140,38 @@ class TestRailsContractInSync:
             f"  In Python but not Rails: {sorted(ITINERARY_ITEM_PERMITTED_FIELDS - rails)}\n"
             f"  In Rails but not Python: {sorted(rails - ITINERARY_ITEM_PERMITTED_FIELDS)}"
         )
+
+    def test_trip_permitted_fields_match_rails(self):
+        from app.services.rails_contract import TRIP_PERMITTED_FIELDS
+        rails = _rails_permit_list(
+            "backend/app/controllers/api/v1/trips_controller.rb", "trip",
+        )
+        assert TRIP_PERMITTED_FIELDS == rails, (
+            f"Trip permit-list drift!\n"
+            f"  Python only: {sorted(TRIP_PERMITTED_FIELDS - rails)}\n"
+            f"  Rails only: {sorted(rails - TRIP_PERMITTED_FIELDS)}"
+        )
+
+    def test_day_plan_permitted_fields_match_rails(self):
+        from app.services.rails_contract import DAY_PLAN_PERMITTED_FIELDS
+        rails = _rails_permit_list(
+            "backend/app/controllers/api/v1/day_plans_controller.rb", "day_plan",
+        )
+        assert DAY_PLAN_PERMITTED_FIELDS == rails, (
+            f"DayPlan permit-list drift!\n"
+            f"  Python only: {sorted(DAY_PLAN_PERMITTED_FIELDS - rails)}\n"
+            f"  Rails only: {sorted(rails - DAY_PLAN_PERMITTED_FIELDS)}"
+        )
+
+    def test_link_update_permitted_fields_match_rails(self):
+        from app.services.rails_contract import LINK_UPDATE_PERMITTED_FIELDS
+        # links_controller.rb has TWO permit lists. We mirror the UPDATE one
+        # (link_update_params) since that's what the AI service uses.
+        rails = _rails_permit_list(
+            "backend/app/controllers/api/v1/links_controller.rb", "link",
+            match_index=1,  # the SECOND permit() block — link_update_params
+        )
+        assert LINK_UPDATE_PERMITTED_FIELDS == rails
 
 
 class TestAssertItineraryItemPayload:
