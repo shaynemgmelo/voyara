@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.contracts
+
 from app.services.rails_contract import assert_itinerary_item_payload
 
 

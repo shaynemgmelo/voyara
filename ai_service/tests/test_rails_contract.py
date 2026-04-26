@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.contracts
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Sanity check the path resolution — protects against future refactors

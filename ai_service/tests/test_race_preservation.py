@@ -8,6 +8,8 @@ import copy
 from unittest.mock import patch, AsyncMock
 import pytest
 
+pytestmark = pytest.mark.contracts
+
 
 class FakeRails:
     def __init__(self, trip):

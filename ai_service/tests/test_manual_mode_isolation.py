@@ -22,6 +22,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.contracts
+
 
 class FakeRails:
     """Minimal RailsClient stub that returns a canned trip + day_plans
