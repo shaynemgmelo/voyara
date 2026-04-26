@@ -94,6 +94,8 @@ staticSites:
         sync: false
       - key: REACT_APP_GOOGLE_MAPS_API_KEY
         sync: false
+      - key: REACT_APP_SENTRY_DSN
+        sync: false
 
 databases:
   - name: mapass-db
