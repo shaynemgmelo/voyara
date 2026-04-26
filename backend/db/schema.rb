@@ -10,14 +10,14 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
+ActiveRecord::Schema[8.0].define(version: 2026_04_27_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
   create_table "day_plans", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.date "date"
-    t.integer "day_number"
+    t.integer "day_number", null: false
     t.text "notes"
     t.bigint "trip_id", null: false
     t.datetime "updated_at", null: false
@@ -37,10 +37,11 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
     t.index ["trip_id", "city"], name: "index_day_plans_on_trip_id_and_city"
     t.index ["trip_id", "day_number"], name: "index_day_plans_on_trip_id_and_day_number", unique: true
     t.index ["trip_id"], name: "index_day_plans_on_trip_id"
+    t.check_constraint "day_number > 0", name: "day_plans_day_number_positive"
   end
 
   create_table "flights", force: :cascade do |t|
-    t.string "airline"
+    t.string "airline", null: false
     t.string "flight_number"
     t.string "confirmation_number"
     t.string "total_cost"
@@ -69,7 +70,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
     t.integer "google_reviews_count"
     t.decimal "latitude", precision: 10, scale: 7
     t.decimal "longitude", precision: 10, scale: 7
-    t.string "name"
+    t.string "name", null: false
     t.text "notes"
     t.jsonb "operating_hours", default: {}
     t.string "phone"
@@ -114,13 +115,13 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
     t.string "status", default: "pending", null: false
     t.bigint "trip_id", null: false
     t.datetime "updated_at", null: false
-    t.string "url"
+    t.string "url", null: false
     t.index ["trip_id", "status"], name: "index_links_on_trip_id_and_status"
     t.index ["trip_id"], name: "index_links_on_trip_id"
   end
 
   create_table "lodgings", force: :cascade do |t|
-    t.string "name"
+    t.string "name", null: false
     t.string "address"
     t.date "check_in_date"
     t.string "check_in_time"
@@ -175,7 +176,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
     t.datetime "created_at", null: false
     t.string "destination"
     t.date "end_date"
-    t.string "name"
+    t.string "name", null: false
     t.date "start_date"
     t.string "status", default: "draft", null: false
     t.datetime "updated_at", null: false
@@ -191,6 +192,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_25_000000) do
     t.index ["share_token"], name: "index_trips_on_share_token", unique: true
     t.index ["status"], name: "index_trips_on_status"
     t.index ["user_id"], name: "index_trips_on_user_id"
+    t.check_constraint "num_days >= 1 AND num_days <= 30", name: "trips_num_days_in_range"
   end
 
   add_foreign_key "day_plans", "trips"
