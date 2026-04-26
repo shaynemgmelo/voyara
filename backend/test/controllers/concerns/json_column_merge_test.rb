@@ -37,4 +37,25 @@ class JsonColumnMergeTest < ActiveSupport::TestCase
     result = merge_json_column({ "a" => 1 }, nil)
     assert_equal({ "a" => 1 }, result)
   end
+
+  test "merge_json_column never returns a reference shared with its inputs" do
+    incoming = { "a" => 1 }
+    result = merge_json_column(nil, incoming)
+    refute_same incoming, result, "nil-existing branch must dup incoming"
+    result["mutated"] = true
+    refute incoming.key?("mutated"), "mutating result must not affect incoming"
+
+    existing = { "a" => 1 }
+    result2 = merge_json_column(existing, nil)
+    refute_same existing, result2, "nil-incoming branch must dup existing"
+    result2["mutated"] = true
+    refute existing.key?("mutated"), "mutating result must not affect existing"
+  end
+
+  test "merge_json_column wipes existing list when incoming sends []" do
+    existing = { "list" => [1, 2, 3] }
+    incoming = { "list" => [] }
+    result = merge_json_column(existing, incoming)
+    assert_equal [], result["list"]
+  end
 end

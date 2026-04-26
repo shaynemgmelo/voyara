@@ -15,12 +15,23 @@
 #     (this is intentional: arrays are atomic; a partial-array update
 #     would be ambiguous about ordering / dedup)
 #   - nil-safe on either side
+#   - Result is ALWAYS a fresh object — never aliases the inputs.
+#     Callers can mutate the result without corrupting strong-params
+#     or the model's in-memory JSON column.
+#
+# Usable two ways:
+#   - `include JsonColumnMerge` then call `merge_json_column(a, b)`
+#   - `JsonColumnMerge.merge_json_column(a, b)` directly (background
+#     jobs, model hooks, anywhere a controller concern include is
+#     awkward)
 module JsonColumnMerge
   extend ActiveSupport::Concern
 
+  module_function
+
   def merge_json_column(existing, incoming)
-    return (incoming || {}) if existing.blank?
-    return existing if incoming.blank?
+    return (incoming || {}).deep_dup if existing.blank?
+    return existing.deep_dup if incoming.blank?
     existing.deep_merge(incoming.to_h)
   end
 end
