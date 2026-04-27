@@ -2135,6 +2135,10 @@ async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
     # PASS 1 — populated days: fill from the dominant video's pool.
     added_total = 0
     days_filled = 0
+    # Track per-day item count so PASS 1.5 + PASS 2 can respect the
+    # TARGET_PER_DAY cap across passes (items_by_day is the original
+    # snapshot — it doesn't see what we just created).
+    added_per_day: dict[int, int] = {dp["day_number"]: 0 for dp in day_plans}
     for dp in day_plans:
         items = items_by_day.get(dp["day_number"]) or []
         if not items:
@@ -2170,12 +2174,167 @@ async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
                 )
                 placed_names.add(_norm(p.get("name") or ""))
                 added_total += 1
+                added_per_day[dp["day_number"]] = added_per_day.get(dp["day_number"], 0) + 1
             except Exception:
                 logger.exception(
                     "[manual-assist] failed to create item %r on day %d",
                     p.get("name"), dp["day_number"],
                 )
         days_filled += 1
+
+    # PASS 1.5 — research-augmented fill. Pull a day-by-day plan from
+    # real travel blogs (Tavily + Haiku) and use it to top up days
+    # that aren't yet at TARGET_PER_DAY. Outlier days (e.g. a day
+    # anchored at Campanópolis 35km from BA centre) are SKIPPED — we
+    # don't pollute them with central-area suggestions that would make
+    # the day geographically impossible.
+    profile_for_research = trip.get("traveler_profile") or {}
+    country = (profile_for_research.get("country_detected") or "").strip()
+    cities = profile_for_research.get("cities_detected") or []
+    profile_summary = (
+        profile_for_research.get("travel_style_en")
+        or profile_for_research.get("travel_style")
+        or ""
+    )
+
+    researched_days: list[list[str]] = []
+    if country and cities and len(day_plans) > 0:
+        try:
+            researched_days = await _research_day_by_day_itinerary(
+                country, cities, len(day_plans), profile_summary,
+                http_client=http_client,
+            )
+        except Exception:
+            logger.exception(
+                "[manual-assist] research failed — continuing without",
+            )
+
+    outlier_day_numbers = _detect_outlier_days(items_by_day, threshold_km=20.0)
+    logger.info(
+        "[manual-assist] research returned %d days; outliers=%s",
+        len(researched_days), sorted(outlier_day_numbers),
+    )
+
+    research_places: list[dict] = []
+    if researched_days:
+        existing_pool_names = {_norm(p.get("name") or "") for p in pool}
+        main_dest = (
+            f"{cities[0]}, {country}" if cities and country
+            else (cities[0] if cities else country)
+        )
+        # Flatten researched names; skip ones already in the pool (the
+        # pool already has the source-video names — the user's videos
+        # may have surfaced "Recoleta", and we don't want to re-geocode
+        # the same name from the blog list).
+        research_names_to_geocode: list[str] = []
+        seen_local: set[str] = set()
+        for day_places in researched_days:
+            for nm in day_places:
+                norm = _norm(nm)
+                if not norm or norm in existing_pool_names or norm in seen_local:
+                    continue
+                seen_local.add(norm)
+                research_names_to_geocode.append(nm)
+
+        # Cap to bound Google Places spend on a single AI Assist click —
+        # 30 names = at most 30 textsearch + 30 details calls, well
+        # within typical free-tier daily quotas even for a chatty trip.
+        research_names_to_geocode = research_names_to_geocode[:30]
+
+        if research_names_to_geocode:
+            try:
+                research_places = await _geocode_research_places(
+                    research_names_to_geocode, main_dest,
+                    existing_pool_names, http_client=http_client,
+                )
+            except Exception:
+                logger.exception("[manual-assist] research geocode failed")
+                research_places = []
+
+        # Index by normalized name for day-assignment lookup.
+        research_by_name = {
+            _norm(p.get("name") or ""): p
+            for p in research_places
+            if p.get("name")
+        }
+
+        # For each non-outlier day, look up its blog suggestions and
+        # add them to fill remaining slots up to TARGET_PER_DAY. Outlier
+        # days are skipped entirely (they keep their sparse character).
+        TARGET_PER_DAY = 7
+        for day_idx, dp in enumerate(day_plans):
+            if dp["day_number"] in outlier_day_numbers:
+                continue
+            if day_idx >= len(researched_days):
+                break
+            current_total = (
+                len(items_by_day.get(dp["day_number"]) or [])
+                + added_per_day.get(dp["day_number"], 0)
+            )
+            slots = max(0, TARGET_PER_DAY - current_total)
+            if slots == 0:
+                continue
+            blog_picks = researched_days[day_idx]
+            added_this_day = 0
+            for nm in blog_picks:
+                if added_this_day >= slots:
+                    break
+                rp = research_by_name.get(_norm(nm))
+                if not rp:
+                    continue
+                if _norm(rp.get("name") or "") in placed_names:
+                    continue
+                try:
+                    await rails.create_itinerary_item(
+                        trip_id, dp["id"], _build_assist_item(rp),
+                    )
+                    placed_names.add(_norm(rp.get("name") or ""))
+                    added_total += 1
+                    added_this_day += 1
+                    added_per_day[dp["day_number"]] = (
+                        added_per_day.get(dp["day_number"], 0) + 1
+                    )
+                except Exception:
+                    logger.exception(
+                        "[manual-assist] failed to add researched %r to day %d",
+                        rp.get("name"), dp["day_number"],
+                    )
+            if added_this_day > 0 and not (items_by_day.get(dp["day_number"]) or []):
+                # Researched fill turned a previously-empty day into a
+                # populated one — count it toward days_filled so the
+                # caller's "M days filled" message is accurate.
+                days_filled += 1
+
+        # Persist researched places into traveler_profile.places_mentioned
+        # so the panel + map show them. Use a fetch + merge + update
+        # pattern so we don't clobber concurrent writes (the AI
+        # service's auth bypass means our update WILL include
+        # places_mentioned — Rails strips it for unauthed callers).
+        if research_places:
+            try:
+                fresh_trip = await rails.get_trip(trip_id)
+                fresh_profile = fresh_trip.get("traveler_profile") or {}
+                fresh_pool = fresh_profile.get("places_mentioned") or []
+                fresh_pool_names = {
+                    _norm(p.get("name") or "") for p in fresh_pool
+                }
+                new_for_pool = [
+                    p for p in research_places
+                    if _norm(p.get("name") or "") not in fresh_pool_names
+                ]
+                if new_for_pool:
+                    fresh_profile["places_mentioned"] = fresh_pool + new_for_pool
+                    await rails.update_trip(
+                        trip_id, {"traveler_profile": fresh_profile},
+                    )
+                    logger.info(
+                        "[manual-assist] persisted %d researched places to pool",
+                        len(new_for_pool),
+                    )
+            except Exception:
+                logger.exception(
+                    "[manual-assist] failed to persist researched pool",
+                )
 
     # PASS 2 — empty days: distribute leftover by geographic proximity.
     leftover = [
@@ -2191,7 +2350,14 @@ async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
         if _norm(p.get("name") or "") not in placed_names
         and (p.get("latitude") is None or p.get("longitude") is None)
     ]
-    empty_dps = [dp for dp in day_plans if not (items_by_day.get(dp["day_number"]) or [])]
+    # A day is "empty" for PASS 2 only if it was empty originally AND
+    # PASS 1.5 didn't put anything on it (otherwise PASS 2 would add a
+    # second cluster of items on top of the researched fill).
+    empty_dps = [
+        dp for dp in day_plans
+        if not (items_by_day.get(dp["day_number"]) or [])
+        and added_per_day.get(dp["day_number"], 0) == 0
+    ]
     if empty_dps and (leftover or leftover_no_geo):
         groups = _cluster_by_proximity(leftover, len(empty_dps))
         # Spread no-geo leftovers round-robin across the same buckets.
@@ -2206,6 +2372,9 @@ async def manual_assist_organize(trip_id: int, http_client=None) -> dict:
                     )
                     placed_names.add(_norm(p.get("name") or ""))
                     added_total += 1
+                    added_per_day[dp["day_number"]] = (
+                        added_per_day.get(dp["day_number"], 0) + 1
+                    )
                 except Exception:
                     logger.exception(
                         "[manual-assist] failed to create item %r on empty day %d",
@@ -2256,6 +2425,143 @@ def _build_assist_item(p: dict) -> dict:
     }
 
 
+async def _geocode_research_places(
+    place_names: list[str],
+    main_destination: str,
+    existing_pool_names: set[str],
+    http_client=None,
+) -> list[dict]:
+    """Take a list of place names from blog research, geocode each via
+    Google Places (textsearch + details), and return a list of place
+    dicts in the same shape as places_mentioned entries. Skips names
+    that already exist in `existing_pool_names` (case-insensitive
+    normalized) so we never double-add a place the video already
+    surfaced.
+
+    Returns places with: name, latitude, longitude, google_place_id,
+    photo_url, photos, address, rating, reviews_count,
+    kind="ai_researched", source_url=None, creator_note=None. The
+    `kind` mark is what lets the frontend (ExtractedPlacesPanel) tag
+    these visually as "AI suggested" vs. "from your video".
+
+    Concurrency is bounded (5 parallel) so a list of 30 names doesn't
+    fan out into 30 simultaneous Google Places calls. Failures are
+    tolerated per-name — one bad geocode doesn't drop the rest.
+    """
+    if not place_names:
+        return []
+
+    # Filter out names already in the pool (case-insensitive). The
+    # caller passes us names worth geocoding, but we belt-and-suspenders
+    # the dedup here so this helper is safe in isolation.
+    filtered = [
+        n for n in place_names
+        if n and _normalize_place_name(n) not in existing_pool_names
+    ]
+    if not filtered:
+        return []
+
+    places_client = GooglePlacesClient(http_client=http_client)
+    SEM = asyncio.Semaphore(5)
+
+    async def _geocode_one(name: str) -> dict | None:
+        async with SEM:
+            try:
+                results = await places_client.search(
+                    name, location=main_destination or None,
+                )
+            except Exception:
+                logger.exception(
+                    "[research-geo] search failed for %r", name,
+                )
+                return None
+            if not results:
+                return None
+            best = results[0]
+            place_id = best.get("place_id")
+            details = None
+            if place_id:
+                try:
+                    details = await places_client.get_details(place_id)
+                except Exception:
+                    logger.exception(
+                        "[research-geo] details failed for %r", name,
+                    )
+                    details = None
+
+        d = details or {}
+        # Require coordinates — pins without lat/lng can't render on
+        # the map and would be confusing to surface.
+        lat = d.get("latitude") or best.get("latitude")
+        lng = d.get("longitude") or best.get("longitude")
+        if lat is None or lng is None:
+            return None
+
+        photos = d.get("photos") or []
+        types = d.get("types") or best.get("types") or []
+        return {
+            "name": d.get("name") or best.get("name") or name,
+            "latitude": lat,
+            "longitude": lng,
+            "google_place_id": place_id,
+            "address": d.get("address") or best.get("address"),
+            "rating": d.get("rating") or best.get("rating"),
+            "reviews_count": (
+                d.get("reviews_count") or best.get("user_ratings_total")
+            ),
+            "photo_url": photos[0] if photos else None,
+            "photos": photos,
+            "google_maps_url": d.get("google_maps_url"),
+            "phone": d.get("phone"),
+            "website": d.get("website"),
+            "operating_hours": d.get("operating_hours") or {},
+            "editorial_summary": d.get("editorial_summary") or "",
+            "top_reviews": d.get("top_reviews") or [],
+            "category": _classify_place_category(types),
+            "source_url": None,
+            "creator_note": None,
+            "kind": "ai_researched",
+        }
+
+    try:
+        results = await asyncio.gather(
+            *[_geocode_one(n) for n in filtered], return_exceptions=False,
+        )
+    finally:
+        # Only close if we created the underlying http client ourselves.
+        if http_client is None:
+            try:
+                await places_client.close()
+            except Exception:
+                pass
+
+    # Drop nulls (failed lookups) AND deduplicate by google_place_id
+    # — Google Places sometimes resolves "Recoleta" and "Recoleta
+    # Cemetery" to the same place, and we don't want both pins.
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_norm: set[str] = set()
+    for r in results:
+        if not r:
+            continue
+        pid = r.get("google_place_id") or ""
+        if pid and pid in seen_ids:
+            continue
+        norm = _normalize_place_name(r.get("name") or "")
+        if norm and norm in seen_norm:
+            continue
+        if pid:
+            seen_ids.add(pid)
+        if norm:
+            seen_norm.add(norm)
+        out.append(r)
+    logger.info(
+        "[research-geo] geocoded %d/%d places for %s",
+        len(out), len(filtered), main_destination,
+    )
+    return out
+
+
 # Rails ItineraryItem.CATEGORY_OPTIONS — keep in sync with the Ruby
 # enum. Anything not in this set is rejected with a 422 by the
 # validates :category, inclusion: validator.
@@ -2304,6 +2610,64 @@ def _cluster_by_proximity(places: list[dict], num_clusters: int) -> list[list[di
         out.append(sortable[cursor:cursor + size])
         cursor += size
     return out
+
+
+def _detect_outlier_days(
+    items_by_day: dict[int, list[dict]],
+    threshold_km: float = 20.0,
+) -> set[int]:
+    """For each day with geocoded items, compute the centroid. A day is
+    an "outlier" if its centroid is more than threshold_km from the
+    median centroid across all populated days. Returns the set of
+    day_numbers that should ONLY get nearby additions (not random
+    central-area places) when AI Assist fills them.
+
+    Example: in Buenos Aires, if Day 1 has Campanópolis
+    (-34.78, -58.60) and Days 2-5 have central places
+    (-34.60, -58.40), Day 1 is the outlier — even if blog research
+    suggests "Recoleta + Palermo" for Day 1 of a 5-day BA trip, those
+    should NOT be added there. Day 1 stays sparse (its outlier nature
+    is intentional — that's the day the user planned to visit
+    Campanópolis).
+
+    Days with no geocoded items are silently skipped (not flagged as
+    outliers — we have no signal to evaluate them).
+    """
+    if not items_by_day:
+        return set()
+
+    # Compute centroid per day (only for days with geocoded items).
+    centroids: dict[int, tuple[float, float]] = {}
+    for day_number, items in items_by_day.items():
+        if not items:
+            continue
+        c = _compute_centroid(items)
+        if c is not None:
+            centroids[day_number] = c
+
+    if len(centroids) < 2:
+        # With ≤1 populated day, "outlier" has no meaning — there's no
+        # cluster to be away from.
+        return set()
+
+    # Median centroid across populated days. Median (not mean) so a
+    # single outlier doesn't drag the reference point toward itself.
+    lats = sorted(c[0] for c in centroids.values())
+    lngs = sorted(c[1] for c in centroids.values())
+    n = len(lats)
+    if n % 2 == 1:
+        median_lat = lats[n // 2]
+        median_lng = lngs[n // 2]
+    else:
+        median_lat = (lats[n // 2 - 1] + lats[n // 2]) / 2
+        median_lng = (lngs[n // 2 - 1] + lngs[n // 2]) / 2
+
+    outliers: set[int] = set()
+    for day_number, (lat, lng) in centroids.items():
+        dist = _haversine_km(median_lat, median_lng, lat, lng)
+        if dist > threshold_km:
+            outliers.add(day_number)
+    return outliers
 
 
 def _proportional_distribution(num_days: int, cities: list[str]) -> dict[str, int]:
@@ -9480,6 +9844,178 @@ async def _research_itinerary_patterns(
         len(snippets), len(summary), country,
     )
     return summary
+
+
+async def _research_day_by_day_itinerary(
+    country: str,
+    cities: list[str],
+    num_days: int,
+    profile_summary: str = "",
+    http_client=None,
+) -> list[list[str]]:
+    """Query Tavily for day-by-day itinerary recommendations from real
+    travel blogs. Asks Haiku to extract the structure as a list of lists
+    of place names: [[day1 places], [day2 places], ...] of length
+    num_days.
+
+    Returns empty list on any failure (Tavily timeout, no key, Haiku
+    parse error). Caller MUST handle empty list — this is the
+    "fail-open" contract: AI Assist still runs, just without the
+    research-augmented fill.
+
+    profile_summary is optional context (e.g. "loves architecture +
+    historic buildings") used to bias one of the Tavily queries toward
+    the user's travel style — so a museum-lover gets museum-heavy
+    recs and a foodie gets food-tour-heavy recs.
+    """
+    # Fail-open guards (in priority order — cheapest checks first).
+    if not settings.tavily_api_key:
+        logger.info("[research-dbd] Tavily not configured — skipping")
+        return []
+    if not country or not cities or num_days <= 0:
+        return []
+
+    import httpx as _httpx
+
+    main_city = cities[0] if cities else ""
+    if not main_city:
+        return []
+
+    # Two queries: one generic day-by-day, one biased toward the user's
+    # travel style if we have a profile summary. Both target the main
+    # city (the one with the most days in this trip), since blog posts
+    # almost always frame their itineraries around a single city.
+    queries: list[str] = [
+        f"{num_days} day itinerary {main_city} {country}".strip(),
+    ]
+    profile_summary = (profile_summary or "").strip()
+    if profile_summary:
+        # Cap the profile string so the query stays compact (Tavily
+        # works best with focused queries; long ones get noisy results).
+        ps = profile_summary[:120]
+        queries.append(f"{ps} attractions {main_city}".strip())
+
+    own_client = http_client is None
+    client = http_client or _httpx.AsyncClient(timeout=15.0)
+
+    blog_snippets: list[str] = []
+    try:
+        for q in queries:
+            try:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": settings.tavily_api_key,
+                            "query": q,
+                            "search_depth": "basic",
+                            "include_answer": True,
+                            "max_results": 7,
+                        },
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[research-dbd] Tavily %d on %r: %s",
+                        resp.status_code, q, resp.text[:200],
+                    )
+                    continue
+                data = resp.json()
+                answer = (data.get("answer") or "").strip()
+                if answer:
+                    blog_snippets.append(f"[Curated answer for: {q}]\n{answer[:800]}")
+                for r in (data.get("results") or [])[:5]:
+                    content = (r.get("content") or "").strip()
+                    title = (r.get("title") or "").strip()
+                    if content:
+                        blog_snippets.append(
+                            f"[{title[:80]}]\n{content[:600]}"
+                        )
+            except asyncio.TimeoutError:
+                logger.warning("[research-dbd] Tavily timeout on %r", q)
+            except Exception as e:
+                logger.warning("[research-dbd] Tavily error on %r: %s", q, e)
+    finally:
+        if own_client:
+            await client.aclose()
+
+    if not blog_snippets:
+        logger.info("[research-dbd] no blog content gathered for %s", main_city)
+        return []
+
+    # Cap combined content size so the Haiku prompt stays compact.
+    blog_content = "\n\n".join(blog_snippets)[:6000]
+
+    # Ask Haiku to extract the day-by-day structure as JSON. Constrained
+    # output: {"days": [[name, name, ...], ...]} with exactly num_days
+    # entries. Anything else gets parsed best-effort and clipped.
+    prompt = (
+        f"You're given travel blog content for a {num_days}-day trip "
+        f"to {main_city}, {country}. Extract a day-by-day plan as JSON.\n\n"
+        f'Format: {{"days": [["Place A", "Place B", "Place C"], '
+        f'["Place D", "Place E"], ...]}}\n\n'
+        f"Rules:\n"
+        f"- Exactly {num_days} day arrays.\n"
+        f"- Each day has 3-5 places.\n"
+        f"- Use the most consensus picks across blogs (places mentioned "
+        f"by multiple sources).\n"
+        f"- Place names MUST be specific real proper nouns "
+        f"(e.g. 'Recoleta Cemetery', 'Teatro Colón'), not generic "
+        f"('a local restaurant').\n"
+        f"- Return JSON only — no markdown fences, no prose.\n\n"
+        f"=== BLOG CONTENT ===\n{blog_content}\n=== END ===\n\n"
+        f"JSON:"
+    )
+
+    try:
+        a_client = anthropic.Anthropic(
+            api_key=settings.anthropic_api_key, max_retries=1,
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: a_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=20.0,
+                )
+            ),
+            timeout=25.0,
+        )
+        raw = response.content[0].text if response.content else ""
+    except Exception as e:
+        logger.warning("[research-dbd] Haiku failed: %s", e)
+        return []
+
+    parsed = _parse_json_response(raw)
+    if not isinstance(parsed, dict):
+        logger.warning("[research-dbd] non-dict JSON: %r", str(raw)[:200])
+        return []
+    days = parsed.get("days")
+    if not isinstance(days, list):
+        logger.warning("[research-dbd] missing/invalid 'days' key in %r", str(raw)[:200])
+        return []
+
+    # Sanitize: drop non-list entries, coerce names to strings, cap
+    # 3-7 items per day, pad/truncate to num_days entries.
+    cleaned: list[list[str]] = []
+    for day in days[:num_days]:
+        if not isinstance(day, list):
+            cleaned.append([])
+            continue
+        names = [str(n).strip() for n in day if str(n).strip()][:7]
+        cleaned.append(names)
+    while len(cleaned) < num_days:
+        cleaned.append([])
+
+    total_places = sum(len(d) for d in cleaned)
+    logger.info(
+        "[research-dbd] %s/%s — %d days, %d places extracted",
+        main_city, country, len(cleaned), total_places,
+    )
+    return cleaned
 
 
 # ──────────────────────────────────────────────
